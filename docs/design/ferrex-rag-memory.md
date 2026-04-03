@@ -2,9 +2,9 @@
 
 ## Overview
 
-ferrex is a local-first MCP server that provides intelligent long-term memory for AI agents. It combines vector search, BM25 keyword matching, and a lightweight knowledge graph into a unified retrieval system — exposed through memory-typed tools that agents interact with naturally.
+ferrex is a local-first MCP server that provides intelligent long-term memory for AI agents. It combines vector search and BM25 keyword matching into a hybrid retrieval system — exposed through memory-typed tools that agents interact with naturally.
 
-The goal is not another vector store with an MCP wrapper. It is a memory system that understands temporal facts, resolves contradictions, manages its own lifecycle, and retrieves context through three complementary signal paths fused into one result.
+The goal is not another vector store with an MCP wrapper. It is a memory system that understands temporal facts, resolves contradictions, manages its own lifecycle, and retrieves context through complementary signal paths fused into one result.
 
 ## Design Principles
 
@@ -22,13 +22,15 @@ The landscape (as of April 2026):
 | System | Approach | Limitation ferrex solves |
 |---|---|---|
 | **mem0** | LLM-based extraction → vector store | Summarization destroys detail; ~2-3% recall on long contexts |
-| **Hindsight** | 4-network retrieval, Python/FastAPI, Postgres | No adaptive retrieval; SQL-join-based graph hits scaling limits |
+| **Hindsight** | 4-network retrieval, Python/FastAPI, Postgres | Heavy Python stack; SQL-join-based graph hits scaling limits |
 | **Cognee** | KG + vector, Python, 30+ connectors | Heavy Python stack, not embeddable |
-| **Zep/Graphiti** | Temporal KG, Neo4j | Killed self-hosted; cloud-only (Graphiti lib is OSS) |
+| **Zep/Graphiti** | Temporal KG, Neo4j | Zep Cloud killed self-hosted; Graphiti OSS but requires Neo4j |
 | **Letta/MemGPT** | Self-editing memory, agent controls recall | No knowledge graph, no hybrid search |
 | **memory-mcp-rs** | Rust + SQLite KG | No vector search, no embeddings |
+| **A-Mem** | Zettelkasten-style linked notes (NeurIPS 2025) | No hybrid search, no temporal awareness |
+| **Memobase.ai** | MCP-native memory-as-a-service | Cloud dependency, no local-first option |
 
-ferrex's unique position: **Rust-native + Qdrant sidecar + hybrid search (vector + BM25 + KG) + temporal validity + staleness safeguards + MCP-native**.
+ferrex's unique position: **Rust-native + Qdrant (sidecar or external) + hybrid search (vector + BM25) + temporal validity + staleness safeguards + MCP-native**.
 
 ## Architecture
 
@@ -40,7 +42,7 @@ ferrex's unique position: **Rust-native + Qdrant sidecar + hybrid search (vector
                          │
 ┌────────────────────────▼────────────────────────────┐
 │                    Tool Router                       │
-│     store / recall / forget / reflect / relate       │
+│       store / recall / forget / reflect / stats      │
 └────────────────────────┬────────────────────────────┘
                          │
 ┌────────────────────────▼────────────────────────────┐
@@ -64,16 +66,10 @@ ferrex's unique position: **Rust-native + Qdrant sidecar + hybrid search (vector
 │  └──────────────────────────────┘                    │
 │  ┌──────────────────────────────┐                    │
 │  │  SQLite (in-process)          │                    │
-│  │  • Knowledge graph tables     │                    │
-│  │  • kNN link cache             │                    │
+│  │  • Entity/relation tables     │                    │
 │  │  • Temporal validity tracking │                    │
 │  │  • Metadata, access counts    │                    │
 │  │  • Staleness scores           │                    │
-│  └──────────────────────────────┘                    │
-│  ┌──────────────────────────────┐                    │
-│  │  petgraph (in-memory cache)   │                    │
-│  │  • Entity/relation traversal  │                    │
-│  │  • Loaded from SQLite on boot │                    │
 │  └──────────────────────────────┘                    │
 └─────────────────────────────────────────────────────┘
         │
@@ -85,11 +81,16 @@ ferrex's unique position: **Rust-native + Qdrant sidecar + hybrid search (vector
 └─────────────────────────────────────────────────────┘
 ```
 
-### Qdrant Sidecar
+### Qdrant Connection
 
-Qdrant runs as a managed subprocess. ferrex starts it on launch and stops it on shutdown. The Rust binary communicates via gRPC using `qdrant-client`. This trades pure single-binary for access to Qdrant's full feature set (HNSW, sparse vectors, payload filtering, named vectors). The sidecar is invisible to the user — ferrex manages its lifecycle.
+ferrex communicates with Qdrant via gRPC using `qdrant-client`. Two modes:
 
-For service mode, the same `qdrant-client` code points to a remote Qdrant URL instead of localhost — no code change needed.
+1. **Sidecar (default)** — ferrex manages a local Qdrant subprocess. Starts on launch, stops on shutdown. Invisible to the user. Data stored at `~/.ferrex/qdrant-data/`.
+2. **External (`--qdrant-url <url>`)** — ferrex connects to a user-provided Qdrant instance. No sidecar process, no local data directory. Use this for team deployments, existing infrastructure, or when you prefer to manage Qdrant yourself. Fail-fast: one connection attempt with 3-second timeout. On failure: `"error: cannot connect to Qdrant at {url} — is it running?"` and exit. No retry — the user manages the instance.
+
+When `--qdrant-url` is set, sidecar management is skipped entirely. The same `qdrant-client` code handles both modes — the only difference is the connection target.
+
+This trades pure single-binary for access to Qdrant's full feature set: HNSW with fused payload filtering, sparse vectors for BM25, and named vectors for hybrid search.
 
 ## Memory Types
 
@@ -111,8 +112,8 @@ Records of specific events and interactions. Timestamped, contextual, append-onl
 }
 ```
 
-- **Storage**: vector embedding + BM25 index + metadata + kNN links (precomputed at insert time)
-- **Retrieval**: temporal + similarity search + kNN link expansion
+- **Storage**: vector embedding + BM25 index + metadata
+- **Retrieval**: temporal + similarity search
 - **Lifecycle**: decays after configurable TTL unless accessed. Candidates for consolidation into semantic memory via `reflect`.
 
 ### Semantic Memory
@@ -131,8 +132,8 @@ Stable facts, concepts, entity relationships. The knowledge graph lives here.
 }
 ```
 
-- **Storage**: vector embedding + BM25 index + knowledge graph node/edge + metadata
-- **Retrieval**: exact match + semantic search + graph traversal
+- **Storage**: vector embedding + BM25 index + entity metadata + SQLite tables
+- **Retrieval**: exact match + semantic search + entity filtering
 - **Lifecycle**: never auto-decays. Updated via upsert with conflict resolution. Old values archived with `t_invalid` timestamp set.
 - **Temporal validity**: every semantic fact has `t_valid` (when it became true) and `t_invalid` (when it stopped being true, null if current). Queries default to current facts only. Historical queries can specify a time range to include invalidated facts. (Adopted from Zep/Graphiti's bi-temporal model, which scored 94.8% on DMR benchmark.)
 
@@ -155,7 +156,7 @@ Workflows, heuristics, learned strategies. Versioned.
 
 ## MCP Tools API
 
-Tool count is kept low (6 tools) to minimize context window tax. Research shows MCP tools can consume 16%+ of context — fewer, richer tools are better.
+Tool count is kept low (5 tools) to minimize context window tax. Research shows MCP tools can consume 16%+ of context — fewer, richer tools are better.
 
 ### Tool Descriptions as Agent Instructions
 
@@ -164,37 +165,38 @@ MCP tool descriptions are loaded into the agent's context at session start. They
 ### `store`
 
 **MCP description** (what the agent sees):
-> Store a memory for long-term recall. Call this whenever you learn something worth remembering: new facts about the user or project, decisions made, problems solved, workflows discovered, or corrections to previous knowledge. Use type "episodic" for events and interactions, "semantic" for stable facts and entity relationships, "procedural" for workflows and learned strategies. Write self-contained memories — each should make sense on its own without surrounding context. Include relevant entities to build the knowledge graph. If this updates a previously known fact, the system detects and resolves the contradiction automatically.
+> Store a memory for long-term recall. Call this whenever you learn something worth remembering: new facts about the user or project, decisions made, problems solved, workflows discovered, or corrections to previous knowledge. You can specify type explicitly ("episodic" for events, "semantic" for stable facts, "procedural" for workflows) or omit it and the system will auto-detect from the fields you provide. Write self-contained memories — each should make sense on its own without surrounding context. Include relevant entities for filtering. If this updates a previously known fact, the system detects and resolves the contradiction automatically. Near-duplicate memories are rejected automatically.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `type` | string | yes | `"episodic"`, `"semantic"`, or `"procedural"` |
+| `type` | string | no | `"episodic"`, `"semantic"`, or `"procedural"`. Auto-detected when omitted: semantic if `subject`+`predicate`+`object` provided, procedural if `steps`/`conditions` provided, episodic otherwise. |
 | `content` | string | yes* | What happened (episodic) or the procedure steps (procedural). Self-contained format recommended: "what \| when \| where \| who \| why" |
 | `subject` | string | yes* | The entity this fact is about (semantic only) |
 | `predicate` | string | yes* | The relationship or property (semantic only) |
 | `object` | string | yes* | The value or target entity (semantic only) |
 | `confidence` | float | no | 0.0-1.0, defaults to 1.0 |
 | `source` | string | no | Provenance (memory ID, URL, etc.) |
-| `entities` | string[] | no | Entity names to extract/link in the knowledge graph |
-| `relations` | object[] | no | Explicit relations `[{subject, predicate, object, weight}]`. Supports causal predicates: `caused_by`, `enables`, `prevents` |
+| `entities` | string[] | no | Entity names for filtering and future knowledge graph expansion |
 | `context` | object | no | Structured context (task, project, outcome, etc.) |
 | `supersedes` | string | no | Memory ID to explicitly replace (skips similarity check) |
 
-*Required fields depend on `type`: episodic/procedural require `content`; semantic requires `subject`+`predicate`+`object`.
+*Required fields depend on `type` (explicit or auto-detected): episodic/procedural require `content`; semantic requires `subject`+`predicate`+`object`.
 
 **On store, the ingestion pipeline**:
-1. **Context-enriched embedding**: prepend metadata before embedding (see Embedding Strategy)
-2. **Chunking** (if needed): apply type-aware chunking (see Chunking Strategy)
-3. Embed via fastembed → write to Qdrant (dense + sparse/BM25 vectors)
-4. Compute **top-5 kNN links** against existing memories (similarity >= 0.7, bidirectional — also update neighbors' link lists, cap at 10 per memory). Stored in SQLite `memory_links` table.
-5. Extract/link entities in knowledge graph (with alias resolution — see Entity Resolution)
-6. For semantic type: run conflict detection (see Conflict Resolution)
-7. For procedural type: create new version if name already exists
+1. **Type resolution**: if `type` omitted, auto-detect from provided fields
+2. **Context-enriched embedding**: prepend metadata before embedding (see Embedding Strategy)
+3. **Deduplication check**: search existing same-type memories by embedding similarity. If cosine > 0.95 → reject with `"similar memory already exists: {id}"`. Prevents agents from storing the same fact repeatedly with slight rewording.
+4. **Chunking** (if needed): apply type-aware chunking (see Chunking Strategy)
+5. Embed via fastembed → write to Qdrant (dense + sparse/BM25 vectors)
+6. Store entities as Qdrant payload metadata + SQLite entity table (with normalization — see Entity Resolution)
+7. Write metadata to SQLite (timestamps, access counts, staleness fields)
+8. For semantic type: run conflict detection (see Conflict Resolution)
+9. For procedural type: create new version if name already exists
 
 ### `recall`
 
 **MCP description** (what the agent sees):
-> Search long-term memory. Call this at the START of every conversation to load relevant context about the user, project, and prior decisions. Also call whenever you need to remember something: past discussions, known facts, established workflows, or entity relationships. Returns results ranked by relevance with freshness metadata — check the staleness field to gauge how current each memory is.
+> Search long-term memory. Call this whenever you need to remember something: past discussions, known facts, established workflows, or entity relationships. Use `stats` at the start of a conversation for a quick overview — use `recall` when you have a specific question. Returns results ranked by relevance with freshness metadata — check the staleness field to gauge how current each memory is.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -208,12 +210,11 @@ MCP tool descriptions are loaded into the agent's context at session start. They
 
 **Retrieval pipeline** (see Retrieval Pipeline Detail for full walkthrough):
 1. Embed query via fastembed
-2. Query routing — classify query and weight retrieval channels (see Adaptive Retrieval)
-3. Parallel search: vector top-K, BM25 top-K, kNN link expansion, graph expansion (if entities detected)
-4. Reciprocal Rank Fusion (k=60) to merge results
-5. Cross-encoder reranking with **multiplicative** recency and temporal proximity boosts
-6. Staleness annotation on each result
-7. Return top-N with scores, provenance, and freshness metadata
+2. Parallel search: vector top-K (Qdrant dense), BM25 top-K (Qdrant sparse)
+3. Reciprocal Rank Fusion (k=60) to merge results
+4. Cross-encoder reranking with **multiplicative** recency and temporal proximity boosts
+5. Staleness annotation on each result
+6. Return top-N with scores, provenance, and freshness metadata
 
 **Each result includes freshness metadata:**
 ```json
@@ -247,106 +248,55 @@ MCP tool descriptions are loaded into the agent's context at session start. They
 ### `reflect`
 
 **MCP description** (what the agent sees):
-> Consolidate and audit memories. Call this periodically (e.g., end of a long session or weekly) to: extract recurring patterns from recent events into stable facts, surface stale memories that need review, and detect contradictions between active facts. Review the results and confirm or discard proposed changes.
+> Audit memory health. Call this periodically (e.g., end of a long session or weekly) to: surface stale memories that need review, detect contradictions between active facts, and identify memories that haven't been validated recently. Review the results and use store/forget to address issues.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `scope` | string | no | Limit reflection to a project/topic |
+| `scope` | string | no | Limit reflection to a namespace/topic |
 | `window` | string | no | Time window to reflect over, default "7d" |
 
 Returns:
-- Proposed semantic facts extracted from episodic patterns (agent confirms or discards)
 - List of stale/unvalidated memories that need review
 - Contradiction alerts (multiple active facts for same subject+predicate)
-
-### `relate`
-
-**MCP description** (what the agent sees):
-> Create a relationship between two entities in the knowledge graph. Use this when you discover how things connect: dependencies, causation, composition, or other relationships. Supports causal predicates (caused_by, enables, prevents) which boost retrieval for "why" and "how" questions.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `subject` | string | yes | Source entity |
-| `predicate` | string | yes | Relationship type (including causal: `caused_by`, `enables`, `prevents`) |
-| `object` | string | yes | Target entity |
-| `weight` | float | no | Relationship strength, 0.0-1.0, default 1.0 |
+- Memories with lowest access counts (candidates for forget)
 
 ### `stats`
 
 **MCP description** (what the agent sees):
-> Memory system health and metrics. Call this to understand memory state: total count by type, staleness distribution, contradictions detected, storage usage. Useful before deciding whether to run reflect or forget.
+> Memory system health and overview. Call this at the START of every conversation to get a snapshot of what ferrex knows, or anytime you need to understand memory state. Returns counts by type, staleness distribution, contradictions, recent memories, and items needing attention. Useful before deciding whether to run reflect or forget.
 
-Returns: total memories by type, staleness distribution (fresh/aging/stale counts), conflict count, most/least accessed, storage size, graph node/edge counts, kNN link count.
+Returns: total memories by type, staleness distribution (fresh/aging/stale counts), conflict count, most/least accessed, storage size, entity count, top-5 most recent memories (brief), count of stale/contradicted items needing attention.
 
-## Knowledge Graph
+## Entity Storage
 
-The graph stores entities and their relationships, extracted from stored memories.
+Entities mentioned in memories are stored in SQLite and as Qdrant payload metadata for filtering. This provides the foundation for future knowledge graph expansion (see `future-improvements.md`).
 
 ### Entities
-A node in the graph. Has a name, type, description, and embedding.
 
 ```rust
 struct Entity {
     id: EntityId,
     name: String,          // "tokio", "api-server", "deadlock bug #42"
     entity_type: String,   // "library", "project", "event"
-    description: String,   // embedded for vector search
-    properties: HashMap<String, String>,
     created_at: DateTime,
     updated_at: DateTime,
 }
 ```
 
-### Relations
-An edge between two entities.
-
-```rust
-struct Relation {
-    source: EntityId,
-    target: EntityId,
-    predicate: String,    // "uses", "caused_by", "part_of", "depends_on"
-    weight: f32,          // strength/confidence
-    source_memory: MemoryId, // which memory established this relation
-}
-```
-
-### Graph Operations
-- **Entity extraction**: when memories are stored with `entities` param, look up or create entity nodes
-- **Relation extraction**: explicit via `relate` tool or `relations` param on store. Supports causal predicates (`caused_by`, `enables`, `prevents`) as first-class edges with boosted retrieval weight.
-- **Graph traversal at query time**: find seed entities via vector search on entity descriptions, expand 1-2 hops via edges, collect connected memories
-- **Community detection**: deferred to v2 (Leiden algorithm over entity clusters for global queries)
-
-### kNN Link Graph (complementary to knowledge graph)
-
-A second graph layer stored in SQLite `memory_links` table. Unlike the knowledge graph which captures *named relationships* between entities, kNN links capture *unnamed semantic proximity* between memories.
-
-| Aspect | Knowledge Graph | kNN Links |
-|---|---|---|
-| Nodes | Entities (named concepts) | Memory records |
-| Edges | Typed relations (uses, caused_by) | Similarity >= 0.7 |
-| Created | Explicitly by agent | Automatically at insert time |
-| Traversal | petgraph in-memory | SQLite query |
-| Use case | "What relates to X?" | "What's similar to this memory?" |
-
-Both are queried in parallel during retrieval and merged via RRF.
-
-### Storage
-`petgraph::StableGraph` in memory, backed by SQLite entity/relation tables. Loaded from SQLite on startup, written through on mutations. For the expected scale of a personal/team memory system (thousands to low tens-of-thousands of entities), this fits comfortably in memory. SQLite provides durability, debuggability (`sqlite3` CLI), and a migration path to PostgreSQL for service mode.
+### Entity Operations
+- **Entity extraction**: when memories are stored with `entities` param, look up or create entity rows in SQLite
+- **Payload filtering**: entities stored as Qdrant payload on each memory point, enabling filtered vector search (`recall` with `entities` param)
+- **Memory-entity links**: SQLite junction table tracks which memories mention which entities
 
 ### Entity Resolution
 
-Agents provide inconsistent entity names ("tokio" vs "Tokio" vs "tokio runtime"). Without resolution, the knowledge graph fragments into disconnected nodes that should be one.
+Agents provide inconsistent entity names ("tokio" vs "Tokio" vs "tokio runtime"). Without resolution, filtering fragments across variant names.
 
-On entity creation, a layered resolution pipeline runs:
-
+v1 uses normalization only:
 1. **Normalize** — lowercase, trim whitespace, collapse separators. `"Tokio"` → `"tokio"`. Check for exact match against existing entities → merge silently.
-2. **Fuzzy string match** — SequenceMatcher ratio > 0.85 against existing entity names and aliases → merge silently. Catches "postgres" ↔ "postgresql".
-3. **Embedding similarity** — embed the entity name, search existing entity embeddings:
-   - Cosine > 0.92 → merge silently. Catches "k8s" ↔ "kubernetes".
-   - Cosine 0.80-0.92 → store both, add as alias candidates, surface in `reflect` for agent review.
-4. **Below 0.80** → create as new entity.
+2. **No match** → create as new entity.
 
-Each entity has a canonical name + alias list stored in SQLite. All lookups check aliases first. The `reflect` tool surfaces unresolved alias candidates for the agent to confirm or dismiss.
+Fuzzy string matching and embedding-based resolution are deferred to v2 (see `future-improvements.md`).
 
 ## Embedding Strategy
 
@@ -424,89 +374,41 @@ At retrieval time: Qdrant returns the best-matching chunk. ferrex deduplicates b
 | **Agentic chunking** | High computational overhead, consensus is it's not worth the cost (dropped from ACL 2025 benchmarks). |
 | **RAG fusion** | Increases raw recall but gains vanish after reranking (confirmed by arXiv:2603.02153, March 2026). We already have reranking. |
 
-## Adaptive Retrieval
-
-Not all queries need all retrieval channels. Running all 4 channels (vector, BM25, kNN links, graph) on every query wastes resources — and GraphRAG-Bench (June 2025) showed graph retrieval is 13.4% *less accurate* than vanilla RAG on single-hop factoid queries.
-
-Query routing classifies the query and adjusts channel weights:
-
-| Query Signal | Strategy | Example |
-|---|---|---|
-| Has specific identifiers, code symbols, exact names | Weight BM25 higher | "tokio::sync::Semaphore version" |
-| Asks about relationships, causality | Weight graph + kNN links higher | "what caused the connection pool deadlock?" |
-| Vague, conceptual, semantic | Weight vector higher | "how do we handle auth?" |
-| Has temporal markers | Enable two-phase temporal retrieval | "what changed last week?" |
-| Simple lookup (high BM25 confidence) | **Skip graph entirely** | "deploy-to-staging procedure" |
-
-Classification is rule-based (regex + heuristics), not LLM-based. Zero latency overhead.
-
 ## Retrieval Pipeline Detail
+
+v1 uses two retrieval channels (vector + BM25) fused via RRF, followed by cross-encoder reranking. Adaptive query routing and additional channels (kNN links, graph expansion) are deferred to v2 pending retrieval quality measurements (see `future-improvements.md`).
 
 ```
 Query: "how did we fix the connection pool issue?"
 
 Step 1: Embed query → [0.12, -0.34, 0.56, ...]
 
-Step 2: Query routing
-  ├── Detected: causal intent ("fix"), entity ("connection pool")
-  └── Strategy: vector(1.0) + BM25(0.8) + kNN_links(1.0) + graph(1.2)
-
-Step 3: Parallel retrieval (via tokio::join!)
+Step 2: Parallel retrieval (via tokio::join!)
   ├── Vector search (Qdrant dense) → [mem_7, mem_12, mem_3, mem_19, mem_44]
-  ├── BM25 search (Qdrant sparse) → [mem_12, mem_8, mem_3, mem_27, mem_15]
-  ├── kNN link expansion:
-  │   ├── Take top-3 vector hits as seeds
-  │   └── Expand via precomputed kNN links (SQLite memory_links table)
-  │   └── [mem_12→mem_22, mem_7→mem_33, mem_3→mem_41]
-  └── Graph expansion (petgraph):
-      ├── Entity detection in query: ["connection pool"]
-      ├── Find entity node → "connection-pool" (id: e_5)
-      ├── Traverse 1-2 hops:
-      │     e_5 --caused_by--> e_12 ("deadlock bug")
-      │     e_5 --part_of--> e_3 ("api-server")
-      │     e_5 --uses--> e_8 ("tokio::sync::Semaphore")
-      └── Collect memories linked to e_5, e_12, e_3, e_8 → [mem_7, mem_12, mem_22, mem_33]
+  └── BM25 search (Qdrant sparse) → [mem_12, mem_8, mem_3, mem_27, mem_15]
 
-Step 4: Reciprocal Rank Fusion (k=60)
-  Merge four ranked lists with channel weights from Step 2.
-  Documents appearing in multiple lists get boosted.
-  → [mem_12, mem_7, mem_22, mem_3, mem_8, mem_33, mem_19, ...]
+Step 3: Reciprocal Rank Fusion (k=60)
+  Merge two ranked lists. Documents appearing in both get boosted.
+  → [mem_12, mem_7, mem_3, mem_8, mem_19, ...]
 
-Step 5: Staleness filter
+Step 4: Staleness filter
   Remove memories with staleness="stale" (unless include_stale=true).
   Flag "aging" memories for annotation.
   Filter out semantic facts with t_invalid set (unless include_invalidated=true).
 
-Step 6: Reranking (fastembed cross-encoder)
+Step 5: Reranking (fastembed cross-encoder)
   Score top-10 candidates with cross-encoder(query, memory_content)
   Apply multiplicative boosts (not additive — keeps secondary signals proportional):
     final_score = rerank_score × recency_boost × temporal_proximity_boost
   Where:
     recency_boost = 1.0 + 0.1 × (1 - age_days/365)  // ±10% over a year
     temporal_proximity_boost = 1.0 + 0.1 × temporal_relevance  // ±10%
-  → [mem_12: 0.94, mem_7: 0.91, mem_22: 0.87, mem_3: 0.72, mem_8: 0.68]
+  → [mem_12: 0.94, mem_7: 0.91, mem_3: 0.87, mem_8: 0.72, mem_19: 0.68]
 
-Step 7: Annotate and return top-5
+Step 6: Annotate and return top-5
   Each result includes freshness metadata (age, last_accessed, staleness level).
   If multiple active semantic facts exist for the same subject+predicate, flag as contradiction.
 ```
-
-### kNN Link Expansion (adopted from Hindsight)
-
-At **insert time**, compute cosine similarity between the new memory's embedding and all existing memories. Store the top-5 neighbors with similarity >= 0.7 in the `memory_links` table (SQLite). Links are bidirectional.
-
-At **query time**, take the top seed results from vector search and expand through their precomputed links. This provides graph-like traversal without the entity extraction overhead — memories that are semantically related are already connected.
-
-The kNN links complement the knowledge graph: the graph captures *named relationships* (entity A "uses" entity B), while kNN links capture *unnamed semantic proximity* (these two memories are about similar things even if they don't share named entities).
-
-### Two-Phase Temporal Retrieval (adopted from Hindsight)
-
-When the query contains temporal markers (detected via rule-based date parsing):
-
-1. **Phase 1 (cheap)**: Query SQLite for memories within the time window, ranked by date proximity. Return top-50 candidates.
-2. **Phase 2 (expensive)**: Compute vector similarity only for those 50 candidates against the query embedding.
-
-This avoids running expensive vector comparisons against the entire corpus when the user clearly wants time-scoped results.
 
 ## Conflict Resolution
 
@@ -600,11 +502,8 @@ Defaults:
 - Semantic: no time-based decay, but staleness scoring based on last-validated timestamp
 - Procedural: no decay
 
-### Compaction
-Periodic (or on-demand via `reflect`):
-- Cluster similar episodic memories
-- If N episodic memories share overlapping entities/topics → propose a semantic summary
-- Agent confirms or discards proposed consolidations
+### Compaction (v2)
+Deferred to v2 (see `future-improvements.md`). Requires episodic clustering and semantic promotion via `reflect`.
 
 ### Eviction
 
@@ -642,14 +541,7 @@ ferrex/
 │   │   ├── retrieval.rs     # hybrid retrieval pipeline, RRF, reranking
 │   │   ├── conflict.rs      # contradiction detection and temporal validity
 │   │   ├── lifecycle.rs     # decay, staleness scoring, compaction, eviction
-│   │   ├── staleness.rs     # staleness safeguards, validation tracking
-│   │   └── router.rs        # adaptive query classification and routing
-│   │
-│   ├── ferrex-graph/        # knowledge graph + kNN links
-│   │   ├── graph.rs         # petgraph wrapper, entity/relation types
-│   │   ├── traversal.rs     # graph expansion for retrieval
-│   │   ├── knn_links.rs     # precomputed kNN link management
-│   │   └── persistence.rs   # SQLite ↔ petgraph sync
+│   │   └── staleness.rs     # staleness safeguards, validation tracking
 │   │
 │   ├── ferrex-embed/        # embedding engine
 │   │   ├── embed.rs         # fastembed wrapper
@@ -658,7 +550,7 @@ ferrex/
 │   └── ferrex-store/        # storage backends
 │       ├── qdrant.rs        # Qdrant client (sidecar gRPC or remote URL)
 │       ├── sidecar.rs       # Qdrant sidecar process management
-│       ├── db.rs            # SQLite: graph tables, kNN links, metadata, staleness
+│       ├── db.rs            # SQLite: entity tables, metadata, staleness
 │       └── schema.rs        # SQLite migrations and table definitions
 │
 ├── Cargo.toml
@@ -672,11 +564,8 @@ ferrex/
 | Component | Choice | Why | Service scaling path |
 |---|---|---|---|
 | **MCP SDK** | `rmcp` | Official Rust SDK, `#[tool]` macros, stdio transport | Add SSE transport |
-| **Vector + BM25** | Qdrant (sidecar → remote) | Built-in hybrid search (dense + sparse + BM25 since v1.15), rich payload filtering, one write path for both indexes. Sidecar for local, remote URL for service mode. | Already a service — replication, sharding, multi-client |
-| **kNN link cache** | SQLite `memory_links` table | Precomputed at insert time (top-5 neighbors, similarity >= 0.7). Provides graph-like expansion without entity extraction overhead. | Migrates with graph to Postgres |
-| **Graph storage** | SQLite (`rusqlite`) | Debuggable (`sqlite3` CLI), FTS5 for free, SQL migration path to PostgreSQL. Entity/relation tables, temporal validity tracking, staleness metadata. | Same schema moves to Postgres trivially |
-| **Graph traversal** | `petgraph` (in-memory cache) | Sub-microsecond reads during retrieval. Loaded from SQLite on startup, updated on writes. | Extract to separate graph service if needed |
-| **Metadata** | Same SQLite instance | One file, one connection pool. Timestamps, access counts, staleness scores, validation timestamps, memory types — all tables alongside graph. | Migrates with graph to Postgres |
+| **Vector + BM25** | Qdrant (sidecar or external) | Built-in hybrid search (dense + sparse + BM25 since v1.15), rich payload filtering, one write path for both indexes. Sidecar for local, `--qdrant-url` for external. | Already a service — replication, sharding, multi-client |
+| **Metadata + entities** | SQLite (`rusqlite`) | Debuggable (`sqlite3` CLI), one file, one connection pool. Entity tables, temporal validity, staleness metadata. | Same schema moves to Postgres trivially |
 | **Embedding** | `fastembed` | 44 embedding models + 6 reranker models, ONNX quantized, local, no API keys. Maintained by Qdrant team. | Wrap in gRPC service if needed |
 | **Entity extraction** | Caller provides via tool params (v1) | MCP clients (Claude) already know the entities. Zero latency, clean API contract. | Add optional NER model in v2 |
 
@@ -742,10 +631,7 @@ fastembed = "5"
 # Vector + BM25 store
 qdrant-client = "1"
 
-# Knowledge graph (in-memory)
-petgraph = { version = "0.7", features = ["serde-1"] }
-
-# Graph + metadata persistence
+# Metadata + entity persistence
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Serialization
@@ -776,18 +662,19 @@ uuid = { version = "1", features = ["v7", "serde"] }
 
 2. **fastembed ONNX Runtime in Nix**: needs `onnxruntime` in `flake.nix` buildInputs. May require system library or static linking. Needs investigation for the Nix build.
 
-3. **Reflect tool scope**: how much intelligence should `reflect` have? Minimal: cluster episodic memories by similarity, surface staleness audit, flag contradictions. Maximal: extract entity-relation triples and propose semantic facts. The minimal version works without any LLM; the maximal version needs one.
+3. **Qdrant sidecar packaging**: how to distribute the Qdrant binary alongside ferrex? Options: (a) expect user to install Qdrant separately, (b) download on first run, (c) bundle in Nix flake. Nix makes (c) straightforward.
 
-4. **Qdrant sidecar packaging**: how to distribute the Qdrant binary alongside ferrex? Options: (a) expect user to install Qdrant separately, (b) download on first run, (c) bundle in Nix flake. Nix makes (c) straightforward.
+4. **BGE-M3 as unified model**: BGE-M3 outputs dense + sparse + ColBERT from a single forward pass. This could replace the separate BM25 index entirely (Qdrant's sparse vector support can ingest the sparse output directly). Worth benchmarking vs separate BGE-base + Qdrant BM25 tokenization.
 
-5. **BGE-M3 as unified model**: BGE-M3 outputs dense + sparse + ColBERT from a single forward pass. This could replace the separate BM25 index entirely (Qdrant's sparse vector support can ingest the sparse output directly). Worth benchmarking vs separate BGE-base + Qdrant BM25 tokenization.
-
-6. **kNN link maintenance at scale**: with 10k+ memories, computing top-5 neighbors at insert time requires scanning all existing embeddings. At small scale this is fine (Qdrant search handles it). At larger scale, may need to limit search to same-type or same-project memories.
+5. **Embedding prefix format**: current `[type | namespace | date]` prefix uses tokens out-of-distribution for BGE-base. Benchmark against (a) no prefix, (b) natural language prefix, (c) Qdrant payload filtering only. May be doing more harm than good — needs measurement.
 
 ## Non-Goals (v1)
 
 - Multi-user / multi-tenant support
 - Cloud sync or remote storage
+- Knowledge graph traversal as retrieval channel (v2 — see `future-improvements.md`)
+- kNN link graphs (v2 — see `future-improvements.md`)
+- Adaptive query routing (v2 — see `future-improvements.md`)
 - Community detection / Leiden algorithm (v2)
 - Automatic entity extraction from free text (require explicit entities in v1)
 - Multimodal embeddings (text only in v1)
@@ -798,42 +685,38 @@ uuid = { version = "1", features = ["v7", "serde"] }
 
 ### Phase 1: Foundation (~900 LOC)
 - Scaffold workspace and crates
-- Qdrant sidecar lifecycle management (start/stop/health check)
+- Qdrant sidecar lifecycle management (start/stop/health check) + `--qdrant-url` external mode
 - fastembed wrapper (embed + rerank, configurable model tiers)
 - Qdrant client (vector + BM25 write/search via gRPC)
-- SQLite schema (entities, relations, memory_links, metadata tables, temporal validity columns)
-- Basic `store` (episodic only) and `recall` (vector-only) MCP tools
+- SQLite schema (entity table, metadata tables, temporal validity columns)
+- Basic `store` (all types) and `recall` (vector-only) MCP tools
 - stdio transport via rmcp
 
-### Phase 2: Hybrid Retrieval + kNN Links (~700 LOC)
+### Phase 2: Hybrid Retrieval + Reranking (~600 LOC)
 - BM25 via Qdrant built-in sparse index
-- kNN link computation at insert time (top-5 neighbors, similarity >= 0.7)
-- kNN link expansion in retrieval
-- Reciprocal Rank Fusion (k=60) with channel weights
+- Reciprocal Rank Fusion (k=60) merging vector + BM25 results
 - Cross-encoder reranking with multiplicative recency boosts
-- Adaptive query routing (rule-based classifier)
-- Two-phase temporal retrieval
+- Parallel retrieval (vector + BM25 concurrently via tokio::join!)
+- Context-enriched embedding (metadata prefix on embed)
 
-### Phase 3: Knowledge Graph + Conflict Resolution (~700 LOC)
-- petgraph entity/relation model (including causal predicates)
-- SQLite persistence (entity/relation tables ↔ petgraph sync)
-- `store` semantic type support, `relate` tool
-- Graph expansion in retrieval pipeline (seed + traverse + collect)
-- Conflict detection with temporal validity (`t_valid`/`t_invalid`)
+### Phase 3: Conflict Resolution + Semantic Facts (~500 LOC)
+- `store` semantic type: conflict detection with temporal validity (`t_valid`/`t_invalid`)
 - Contradiction detection at query time
+- Entity storage (SQLite + Qdrant payload) with normalization
+- Entity-based filtering on `recall`
+- Deduplication on write
 
 ### Phase 4: Memory Lifecycle + Staleness (~600 LOC)
-- `store` procedural type support, `forget`, `stats` tools
+- `forget`, `stats`, `reflect` (staleness audit + contradiction alerts) tools
 - Staleness scoring (age + access + validation recency)
 - Staleness levels (fresh/aging/stale) with configurable thresholds
 - Access-time validation refresh
 - Freshness metadata annotation on recall results
-- Decay scoring, deduplication on write, eviction policy
-- `reflect` tool (cluster + surface + staleness audit + contradiction alerts)
+- Decay scoring, eviction policy
 
-### Phase 5: Polish (~400 LOC)
+### Phase 5: Polish (~300 LOC)
 - Semantic caching on recall (LRU, embed-hash keyed)
-- Parallel retrieval (vector + BM25 + kNN + graph concurrently via tokio::join!)
 - Nix build with ONNX runtime + Qdrant binary
 - Integration tests
 - MCP Inspector validation
+- Retrieval quality instrumentation (for measuring v2 improvements)

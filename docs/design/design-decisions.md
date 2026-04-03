@@ -2,24 +2,23 @@
 
 Decisions made during design review, April 2026.
 
-## 1. kNN Links: Bidirectional Insert + Cap at 10
+## 1. kNN Links: Deferred to v2
 
-**Problem:** kNN links computed at insert time are forward-only — older memories never discover newer, better neighbors.
+**Original design:** Bidirectional insert + cap at 10. When memory B finds A as a neighbor, also add B to A's link list.
 
-**Decision:** When memory B finds A as a neighbor, also add B to A's link list. Cap each memory's link list at 10, evict the weakest link when exceeded.
+**Decision:** Deferred to v2. See `future-improvements.md`.
 
-**Why:** Simplest fix, maintains freshness naturally, no background jobs or retrieval latency hit. Extra writes are negligible.
+**Why:** Unproven contribution in isolation. Query-time second-pass search achieves similar results with zero insert cost. Add when retrieval quality measurements show recall misses that kNN expansion would fix.
 
-## 2. Recall Without Query: Smart Default
+## 2. Recall: Query Required, No Smart Default
 
 **Problem:** "Call recall at START of conversation" — but the agent has no query yet.
 
-**Decision:** Make `query` optional. When omitted, return a smart default based on:
-1. Semantic facts about the current project (detected from MCP workspace roots)
-2. Most recent episodic memories
-3. Any stale/contradicted facts needing attention
+**Original decision:** Make `query` optional with a smart default (project facts + recent episodics + stale items).
 
-**Why:** Clean UX, single tool, agent just calls `recall()` with no args. MCP clients expose workspace roots that identify the project.
+**Revised decision:** Keep `query` required on `recall`. The "what should I know?" use case is handled by `stats`, which already returns system health and can surface top recent memories + items needing attention. Overloading `recall` with two modes (search vs dashboard) creates ambiguous response shapes and scope creep.
+
+**Why:** Single-responsibility. `recall` searches, `stats` summarizes. The agent provides a query like "project context" or "recent decisions" rather than ferrex guessing what's relevant.
 
 ## 3. Entity Name Fragmentation: Alias Table
 
@@ -70,11 +69,13 @@ Decisions made during design review, April 2026.
 
 **Why:** Uses string comparison where it's reliable, embeddings only as a tiebreaker for ambiguous cases.
 
-## 6. Qdrant Sidecar: PID File + Connect-or-Start
+## 6. Qdrant Connection: Sidecar or External URL
 
-**Problem:** Orphan processes, concurrent instances, startup latency, port conflicts.
+**Problem:** Orphan processes, concurrent instances, startup latency, port conflicts. Also: some users already run Qdrant or prefer to manage it themselves.
 
-**Decision:**
+**Decision:** Two modes, selected by presence of `--qdrant-url`:
+
+**Sidecar mode (default, no flag):**
 1. On startup, check PID file at `~/.ferrex/qdrant.pid`
 2. If PID file exists and process is alive → reuse (connect to existing)
 3. If PID file exists but process is dead → clean up, start fresh
@@ -83,15 +84,20 @@ Decisions made during design review, April 2026.
 6. On ferrex exit → if we started Qdrant (not reused), send SIGTERM
 7. Data directory: `~/.ferrex/qdrant-data/` (deterministic, per-user)
 
-**Why:** Handles orphans (step 3), concurrent instances (step 2 — share the sidecar), startup latency (step 5), clean shutdown (step 6).
+**External mode (`--qdrant-url <url>`):**
+1. Skip all sidecar lifecycle management
+2. One connection attempt, 3-second timeout
+3. On failure: clear error message and exit (no retry — user manages the instance)
 
-## 7. SQLite + petgraph Consistency: SQLite as Source of Truth
+**Why:** Sidecar handles orphans (step 3), concurrent instances (step 2 — share the sidecar), startup latency (step 5), clean shutdown (step 6). External URL mode enables team deployments, existing infrastructure reuse, and avoids sidecar overhead entirely when the user prefers to manage Qdrant themselves.
 
-**Problem:** No transaction boundary spans both SQLite and petgraph. Crash between writes leaves them inconsistent.
+## 7. SQLite as Sole Graph Store (petgraph deferred)
 
-**Decision:** SQLite is the authoritative store. petgraph is a read-only cache rebuilt from SQLite on startup. Write ordering: SQLite first, petgraph second. If ferrex crashes after SQLite write but before petgraph update, restart rebuilds petgraph from SQLite.
+**Original design:** SQLite as source of truth + petgraph as in-memory read cache, rebuilt on startup.
 
-**Why:** Simple, correct, already implied by the design. The only "inconsistency" window is within a single crashed request, which is dead anyway.
+**Decision:** Use SQLite with proper indexes as the only graph store. No petgraph in v1.
+
+**Why:** Sub-millisecond SQLite queries are invisible next to 200ms+ reranking latency. petgraph added a consistency problem and startup rebuild cost for a performance benefit lost in pipeline noise. If graph traversal becomes a retrieval channel in v2 and SQLite latency is measurable, revisit petgraph then. See `future-improvements.md`.
 
 ## 8. Recency Boost: Type-Specific with Half-Life Decay
 
@@ -160,3 +166,26 @@ Decisions made during design review, April 2026.
 **Decision:** Prepend metadata to content before embedding: `[{type} | {namespace} | {date}] {content}`. Applied to both stored memories and recall queries for consistency. The prefix is for embedding only — stored content remains clean.
 
 **Why:** Anthropic's Contextual Retrieval research reported 67% reduction in retrieval failures. No LLM needed — just string concatenation. Cheapest possible retrieval quality improvement.
+
+**Note:** The prefix format `[type | namespace | date]` uses tokens out-of-distribution for BGE-base. Open Question #5 tracks benchmarking this against alternatives (no prefix, natural language prefix, payload filtering only).
+
+## 13. Memory Type Auto-Detection
+
+**Problem:** Forcing agents to classify memories as episodic/semantic/procedural at write time adds cognitive burden. Agents mis-classify — a fact can be both episodic (it happened) and semantic (it's a durable truth). Research (MemEvolve 2025) questions whether human cognitive categories are optimal for AI agents at all.
+
+**Decision:** `type` is optional on `store`. When omitted, auto-detect from provided fields:
+- `subject` + `predicate` + `object` present → semantic
+- `steps` or `conditions` present → procedural
+- Everything else → episodic
+
+Agent can still set type explicitly if it wants to override.
+
+**Why:** Shifts classification burden from agent to system. The field structure already implies the type unambiguously. Keeps the type system as an internal optimization detail while preserving backward compatibility for explicit callers.
+
+## 14. Deduplication on Store
+
+**Problem:** Agents over-store — the same fact gets stored repeatedly with slight rewording. Without deduplication, memory fills with near-identical entries that dilute retrieval quality.
+
+**Decision:** Before writing, embed the incoming memory and search existing same-type memories in Qdrant. If cosine similarity > 0.95 → reject with `"similar memory already exists: {id}"`. One extra Qdrant search per store call.
+
+**Why:** Cheapest defense against the most common memory bloat pattern. The 0.95 threshold is conservative — only rejects near-exact duplicates. The `supersedes` param bypasses this check for intentional updates. A-Mem (NeurIPS 2025) showed 85-93% token reduction by controlling what gets stored; this is the minimal version of that idea.
