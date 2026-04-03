@@ -90,7 +90,7 @@ Papers, benchmarks, and sources that informed the design. Organized by topic.
 - **Anthropic Contextual Retrieval**
   Anthropic blog, September 2024.
   Prepends LLM-generated chunk-specific context (50-100 tokens) before embedding. Combined with Contextual BM25: 49% reduction in retrieval failures, 67% with reranking.
-  *Used for:* context-enriched embedding design. Note: our metadata prefix `[type | namespace | date]` is a simpler variant — benchmarking against alternatives tracked as Open Question #5.
+  *Used for:* evaluating context-enriched embedding. Note: Anthropic's approach uses LLM-generated prose, not structured metadata. ferrex v1 uses plain-text embedding + Qdrant payload filtering instead (Decision #18). LLM-generated contextual preambles are a v2 candidate if payload filtering proves insufficient.
 
 - **"HeteRAG: A Heterogeneous RAG Framework"**
   Chen et al. arXiv:2504.10529, April 2025.
@@ -100,7 +100,7 @@ Papers, benchmarks, and sources that informed the design. Organized by topic.
 - **"Utilizing Metadata for Better Retrieval-Augmented Generation"**
   ECIR 2026, People/CS/VT.
   Dual-encoder with unified embeddings (metadata + content vectors summed) matches or exceeds text prefixing. Company and year metadata act as strong disambiguators.
-  *Used for:* Open Question #5 (benchmark prefix format alternatives).
+  *Used for:* informing Decision #18 (plain-text embedding + payload filtering). Dual-encoder approach is a v2 candidate.
 
 ## Cross-Encoder Reranking
 
@@ -236,7 +236,9 @@ Papers, benchmarks, and sources that informed the design. Organized by topic.
 
 ## BM25 & Sparse Vectors
 
-- **Qdrant BM25 Support** — First-class since v1.15. IDF modifier at query time. Sparse vector storage.
+- **Qdrant BM25 Support** — First-class since v1.15. Server-side tokenization + IDF via `Modifier::IDF` on `SparseVectorParams`. Client sends raw text, Qdrant computes sparse vectors.
+- **Qdrant Query API** — Universal Query API (since v1.10) supports `prefetch` with multiple retrieval stages + server-side fusion (`Fusion::RRF` or `Fusion::DBSF`) in a single API call. Eliminates client-side RRF implementation.
+  *Used for:* hybrid retrieval pipeline — one request for dense + sparse + RRF fusion.
 - **SPLADE** — Learned sparse model. 19% quality loss on domain shift (MS MARCO → e-commerce). GPU required.
 - **Qdrant BM42** — July 2024. Experimental BM25 + transformer hybrid.
   *Used for:* choosing Qdrant native BM25 over SPLADE for v1.

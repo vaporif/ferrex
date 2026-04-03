@@ -69,35 +69,12 @@ Features deferred from v1 to keep the initial implementation simple and measurab
 
 **When to add:** When reflect returns actionable suggestions (episodic clustering). The multi-roundtrip problem only manifests with the promotion workflow.
 
-## Entity Resolution
-
-### Fuzzy String Matching
-**What:** SequenceMatcher ratio > 0.85 against existing entity names and aliases. Catches "postgres" ↔ "postgresql".
-
-**Why deferred:** v1 uses normalization only (lowercase, trim, collapse). Good enough for most cases. Fuzzy matching adds false positive risk.
-
-**When to add:** If `stats` shows entity fragmentation (many entities with similar names but different IDs). Check entity table for near-duplicates periodically.
-
-### Embedding-Based Entity Resolution
-**What:** Embed entity names, cosine > 0.92 → merge, 0.80-0.92 → alias candidates surfaced in reflect.
-
-**Why deferred:** Requires embedding every entity name (small cost per entity but adds insert latency). v1 normalization handles the obvious cases.
-
-**When to add:** Together with fuzzy matching, when entity fragmentation is measured. The full layered pipeline (normalize → fuzzy → embedding → manual review) is well-designed — just not needed at launch.
-
-### Alias Table
-**What:** Each entity has a canonical name + list of aliases. All lookups check aliases first.
-
-**Why deferred:** Aliases are the output of fuzzy + embedding resolution. Without those resolution steps, aliases have no source.
-
-**When to add:** Together with the resolution pipeline above.
-
 ## Embedding
 
-### Embedding Prefix Format Benchmarking
-**What:** Current `[type | namespace | date]` prefix may use tokens out-of-distribution for BGE-base. Alternatives: (a) no prefix, (b) natural language prefix ("This is a record of an event in the api-server project from April 2026:"), (c) Qdrant payload filtering instead of embedding the metadata.
+### Contextual Embedding (LLM-Generated Prefix)
+**What:** Use a local LLM (e.g., Ollama) to generate a natural language preamble for each memory before embedding, following Anthropic's Contextual Retrieval approach. Example: "This memory records a debugging session in the api-server project where a deadlock was resolved using tokio::sync::Semaphore."
 
-**Why important:** HeteRAG (arXiv:2504.10529) argues for decoupling retrieval and generation representations. ECIR 2026 paper shows dual-encoder with unified embeddings matches text prefixing. The current approach is the cheapest possible improvement — but it may not be an improvement at all.
+**Why deferred:** v1 uses plain-text embedding + Qdrant payload filtering (Decision #18). The structured metadata prefix `[type | namespace | date]` was found to be out-of-distribution for BGE-base and likely harmful. LLM-generated prose would be in-distribution but requires LLM integration, contradicting ferrex's LLM-free design.
 
 **When to do:** Early in v1 usage. A/B test with a handful of real memories. Compare recall@5 with and without prefix on representative queries.
 
@@ -141,4 +118,4 @@ All v2 features should be gated on data. The `stats` tool and retrieval instrume
 | **Episodic memory growth** | Rate of episodic accumulation without promotion | Reflect clustering + semantic promotion |
 | **Channel contribution** | Per-query: did vector or BM25 find the winning result? | Channel weight tuning, additional channels |
 | **Reranking lift** | Score delta between RRF rank and final reranked position | Reranker model selection |
-| **Embedding prefix impact** | Retrieval quality with/without prefix | Prefix format decision |
+| **Contextual embedding impact** | Retrieval quality with LLM-generated preamble vs plain text | Contextual embedding decision |

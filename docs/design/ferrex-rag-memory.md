@@ -90,7 +90,7 @@ ferrex communicates with Qdrant via gRPC using `qdrant-client`. Two modes:
 
 When `--qdrant-url` is set, sidecar management is skipped entirely. The same `qdrant-client` code handles both modes — the only difference is the connection target.
 
-This trades pure single-binary for access to Qdrant's full feature set: HNSW with fused payload filtering, sparse vectors for BM25, and named vectors for hybrid search.
+This trades pure single-binary for access to Qdrant's full feature set: HNSW with fused payload filtering, sparse vectors for BM25 (server-side tokenization + IDF), named vectors for hybrid search, and the Query API for server-side RRF fusion in a single request.
 
 ## Memory Types
 
@@ -184,10 +184,9 @@ MCP tool descriptions are loaded into the agent's context at session start. They
 
 **On store, the ingestion pipeline**:
 1. **Type resolution**: if `type` omitted, auto-detect from provided fields
-2. **Context-enriched embedding**: prepend metadata before embedding (see Embedding Strategy)
-3. **Deduplication check**: search existing same-type memories by embedding similarity. If cosine > 0.95 → reject with `"similar memory already exists: {id}"`. Prevents agents from storing the same fact repeatedly with slight rewording.
-4. **Chunking** (if needed): apply type-aware chunking (see Chunking Strategy)
-5. Embed via fastembed → write to Qdrant (dense + sparse/BM25 vectors)
+2. **Deduplication check**: search existing same-type memories by embedding similarity. If cosine > 0.95 → reject with `"similar memory already exists: {id}"`. Prevents agents from storing the same fact repeatedly with slight rewording.
+3. **Chunking** (if needed): apply type-aware chunking (see Chunking Strategy)
+5. Embed via fastembed → write dense vector to Qdrant. BM25 sparse vectors are computed server-side by Qdrant (send raw text, Qdrant handles tokenization + IDF via `Modifier::IDF` on `SparseVectorParams`)
 6. Store entities as Qdrant payload metadata + SQLite entity table (with normalization — see Entity Resolution)
 7. Write metadata to SQLite (timestamps, access counts, staleness fields)
 8. For semantic type: run conflict detection (see Conflict Resolution)
@@ -210,9 +209,9 @@ MCP tool descriptions are loaded into the agent's context at session start. They
 
 **Retrieval pipeline** (see Retrieval Pipeline Detail for full walkthrough):
 1. Embed query via fastembed
-2. Parallel search: vector top-K (Qdrant dense), BM25 top-K (Qdrant sparse)
-3. Reciprocal Rank Fusion (k=60) to merge results
-4. Cross-encoder reranking with **multiplicative** recency and temporal proximity boosts
+2. Single Qdrant Query API call: prefetch dense + sparse, fuse via server-side RRF (k=60)
+3. Staleness filter (exclude stale/invalidated unless requested)
+4. Cross-encoder reranking (top-20 candidates) with **multiplicative** recency and temporal proximity boosts
 5. Staleness annotation on each result
 6. Return top-N with scores, provenance, and freshness metadata
 
@@ -237,12 +236,11 @@ MCP tool descriptions are loaded into the agent's context at session start. They
 ### `forget`
 
 **MCP description** (what the agent sees):
-> Delete or invalidate memories that are no longer accurate or relevant. Use this when you discover a memory is wrong, outdated, or the user asks you to forget something. Provide specific memory IDs for targeted deletion, or a query to find and remove matching memories.
+> Delete or invalidate memories that are no longer accurate or relevant. Use this when you discover a memory is wrong, outdated, or the user asks you to forget something. First use recall to find the memory IDs, then pass them here.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `ids` | string[] | no | Specific memory IDs to delete |
-| `query` | string | no | Delete memories matching this query (requires confirmation) |
+| `ids` | string[] | yes | Specific memory IDs to delete |
 | `cascade` | bool | no | Also remove graph edges involving forgotten entities |
 
 ### `reflect`
@@ -266,6 +264,25 @@ Returns:
 > Memory system health and overview. Call this at the START of every conversation to get a snapshot of what ferrex knows, or anytime you need to understand memory state. Returns counts by type, staleness distribution, contradictions, recent memories, and items needing attention. Useful before deciding whether to run reflect or forget.
 
 Returns: total memories by type, staleness distribution (fresh/aging/stale counts), conflict count, most/least accessed, storage size, entity count, top-5 most recent memories (brief), count of stale/contradicted items needing attention.
+
+```json
+{
+  "counts": { "episodic": 142, "semantic": 87, "procedural": 12 },
+  "staleness": { "fresh": 198, "aging": 31, "stale": 12 },
+  "conflicts": 3,
+  "entities": 64,
+  "storage_mb": 42.1,
+  "recent": [
+    { "id": "mem_241", "type": "episodic", "summary": "debugged connection pool deadlock", "age_days": 0 },
+    { "id": "mem_240", "type": "semantic", "summary": "api-server uses tokio 1.38", "age_days": 2 }
+  ],
+  "needs_attention": {
+    "stale_count": 12,
+    "conflict_count": 3,
+    "unvalidated_count": 8
+  }
+}
+```
 
 ## Entity Storage
 
@@ -292,35 +309,33 @@ struct Entity {
 
 Agents provide inconsistent entity names ("tokio" vs "Tokio" vs "tokio runtime"). Without resolution, filtering fragments across variant names.
 
-v1 uses normalization only:
+Layered resolution pipeline:
 1. **Normalize** — lowercase, trim whitespace, collapse separators. `"Tokio"` → `"tokio"`. Check for exact match against existing entities → merge silently.
-2. **No match** → create as new entity.
+2. **Fuzzy match** — SequenceMatcher ratio > 0.85 against existing entity names and aliases → merge. Catches "postgres" ↔ "postgresql".
+3. **Embedding similarity** — cosine > 0.92 → merge. Catches semantically equivalent but lexically different names.
+4. **Ambiguous** — embedding similarity 0.80-0.92 → store both, add as alias candidates, surface in `reflect` for agent review.
+5. **No match** → create as new entity.
 
-Fuzzy string matching and embedding-based resolution are deferred to v2 (see `future-improvements.md`).
+Each entity has a canonical name + list of aliases. All lookups check aliases first.
 
 ## Embedding Strategy
 
-### Context-Enriched Embedding
+### Plain-Text Embedding + Payload Filtering
 
-Before embedding any memory, prepend metadata context to the content. This gives the embedding model type, project, and temporal information, improving retrieval precision. Anthropic's Contextual Retrieval research reported 67% reduction in retrieval failures with this approach — and it requires no LLM, just string concatenation.
+Memories are embedded as **plain text only** — no metadata prefixes. Type, namespace, and date are stored as Qdrant payload fields and filtered at query time using Qdrant's payload filtering.
 
-Format:
-```
-[{type} | {namespace} | {date}] {content}
-```
+**Why not metadata prefixes?** BGE-base-en-v1.5 expects plain text on the document side (it was trained with a specific query instruction prefix, not arbitrary metadata). Structured prefixes like `[type | namespace | date]` are out-of-distribution and likely degrade embedding quality. Anthropic's Contextual Retrieval (which reported 67% improvement) uses LLM-generated natural language prose, not structured metadata concatenation — a fundamentally different technique.
 
-Examples:
-```
-[episodic | api-server | 2026-04-03] user debugged a deadlock in the connection pool by switching to tokio::sync::Semaphore
+**Embed text by type:**
+- Episodic: embed the `content` field directly
+- Semantic: embed `{subject} {predicate} {object}` as a natural sentence
+- Procedural: embed the `content` field directly
 
-[semantic | api-server | 2026-04-01] api-server uses tokio 1.38
-
-[procedural | api-server | 2026-03-15] deploy-to-staging: 1) build release 2) push to registry 3) apply k8s manifest
-```
-
-For semantic memories, the embed text is constructed from the triple: `[semantic | {namespace} | {date}] {subject} {predicate} {object}`.
-
-This metadata prefix is added only for embedding — the stored content remains clean. The prefix is also applied to recall queries for consistency: `[query | {namespace}] {query_text}`.
+**Query-time filtering** via Qdrant payload:
+- `type` filter: restrict to specific memory types
+- `namespace` filter: scope to project/workspace
+- `entities` filter: restrict to memories mentioning specific entities
+- Temporal filters: `t_valid`/`t_invalid` for semantic facts, timestamp ranges for episodic
 
 ## Chunking Strategy
 
@@ -339,7 +354,9 @@ Procedural memories are structured as steps. When content exceeds the model's co
 
 ```
 on store(memory):
-  embed_text = format_with_context(memory)  # prepend metadata
+  embed_text = match memory.type:
+    "semantic" => "{subject} {predicate} {object}"
+    "episodic" | "procedural" => memory.content
   
   match memory.type:
     "semantic" =>
@@ -357,8 +374,7 @@ on store(memory):
       else:
         # Split on step boundaries (steps are already structured)
         for (i, step) in split_steps(memory.content):
-          step_text = format_with_context_step(memory, step)
-          embed(step_text) → 1 vector (same memory_id, step_index=i)
+          embed(step) → 1 vector (same memory_id, step_index=i)
 ```
 
 At retrieval time: Qdrant returns the best-matching chunk. ferrex deduplicates by `memory_id` (keeps highest-scoring chunk per memory), returns the full memory content from SQLite.
@@ -383,29 +399,36 @@ Query: "how did we fix the connection pool issue?"
 
 Step 1: Embed query → [0.12, -0.34, 0.56, ...]
 
-Step 2: Parallel retrieval (via tokio::join!)
-  ├── Vector search (Qdrant dense) → [mem_7, mem_12, mem_3, mem_19, mem_44]
-  └── BM25 search (Qdrant sparse) → [mem_12, mem_8, mem_3, mem_27, mem_15]
-
-Step 3: Reciprocal Rank Fusion (k=60)
-  Merge two ranked lists. Documents appearing in both get boosted.
+Step 2: Hybrid retrieval via Qdrant Query API (single request)
+  prefetch: [
+    { query: dense_vector, using: "dense", limit: 30 },
+    { query: sparse_vector, using: "sparse", limit: 30 }
+  ]
+  query: Fusion::RRF (k=60, server-side)
   → [mem_12, mem_7, mem_3, mem_8, mem_19, ...]
 
-Step 4: Staleness filter
+  Qdrant fuses dense + BM25 results server-side using RRF in one round-trip.
+  No client-side fusion code needed. BM25 sparse vectors are also computed
+  server-side (Qdrant handles tokenization + IDF since v1.15).
+
+Step 3: Staleness filter
   Remove memories with staleness="stale" (unless include_stale=true).
   Flag "aging" memories for annotation.
   Filter out semantic facts with t_invalid set (unless include_invalidated=true).
 
-Step 5: Reranking (fastembed cross-encoder)
-  Score top-10 candidates with cross-encoder(query, memory_content)
+Step 4: Reranking (fastembed cross-encoder)
+  Score top-20 candidates with cross-encoder(query, memory_content)
   Apply multiplicative boosts (not additive — keeps secondary signals proportional):
     final_score = rerank_score × recency_boost × temporal_proximity_boost
   Where:
-    recency_boost = 1.0 + 0.1 × (1 - age_days/365)  // ±10% over a year
+    recency_boost (type-specific, half-life decay, floor at 1.0):
+      episodic:   1.0 + 0.1 × 2^(-age_days/30)    // half-life 30d, range 1.0-1.1
+      semantic:   1.0 + 0.05 × 2^(-age_days/180)   // half-life 180d, range 1.0-1.05
+      procedural: 1.0                                // no boost
     temporal_proximity_boost = 1.0 + 0.1 × temporal_relevance  // ±10%
   → [mem_12: 0.94, mem_7: 0.91, mem_3: 0.87, mem_8: 0.72, mem_19: 0.68]
 
-Step 6: Annotate and return top-5
+Step 5: Annotate and return top-5
   Each result includes freshness metadata (age, last_accessed, staleness level).
   If multiple active semantic facts exist for the same subject+predicate, flag as contradiction.
 ```
@@ -510,7 +533,7 @@ Deferred to v2 (see `future-improvements.md`). Requires episodic clustering and 
 Three fates for stale memory, depending on type:
 
 **Episodic (evict aggressively)**:
-Once an episodic memory reaches `stale` status (>90 days, rarely accessed), it becomes an eviction candidate. Before deleting, check if it is referenced as `source` by any semantic fact — if so, the episodic memory has already been distilled into durable knowledge and can safely go. Unreferenced stale episodic memories are evicted first when storage budget is exceeded.
+Once an episodic memory reaches computed `stale` staleness level (based on age + access frequency + validation recency, not raw age alone), it becomes an eviction candidate. Before deleting, check if it is referenced as `source` by any semantic fact — if so, the episodic memory has already been distilled into durable knowledge and can safely go. Unreferenced stale episodic memories are evicted first when storage budget is exceeded.
 
 **Semantic (never auto-evict active facts)**:
 A semantic fact with `t_invalid = null` (still current) is **never auto-evicted**, even if its staleness score is high. "Stale" for an active semantic fact means "unvalidated for a while" — it might still be true. The `reflect` tool surfaces these for the agent to confirm, update, or explicitly invalidate.
@@ -538,7 +561,7 @@ ferrex/
 │   │
 │   ├── ferrex-core/         # memory system logic
 │   │   ├── memory.rs        # memory types, store/recall/forget
-│   │   ├── retrieval.rs     # hybrid retrieval pipeline, RRF, reranking
+│   │   ├── retrieval.rs     # retrieval pipeline orchestration, reranking boosts (RRF is server-side in Qdrant)
 │   │   ├── conflict.rs      # contradiction detection and temporal validity
 │   │   ├── lifecycle.rs     # decay, staleness scoring, compaction, eviction
 │   │   └── staleness.rs     # staleness safeguards, validation tracking
@@ -563,8 +586,8 @@ ferrex/
 
 | Component | Choice | Why | Service scaling path |
 |---|---|---|---|
-| **MCP SDK** | `rmcp` | Official Rust SDK, `#[tool]` macros, stdio transport | Add SSE transport |
-| **Vector + BM25** | Qdrant (sidecar or external) | Built-in hybrid search (dense + sparse + BM25 since v1.15), rich payload filtering, one write path for both indexes. Sidecar for local, `--qdrant-url` for external. | Already a service — replication, sharding, multi-client |
+| **MCP SDK** | `rmcp` | Official Rust SDK, `#[tool]` macros, stdio transport | Add Streamable HTTP transport |
+| **Vector + BM25** | Qdrant (sidecar or external) | Built-in hybrid search via Query API (prefetch dense + sparse, server-side RRF fusion in one request). BM25 tokenization + IDF computed server-side since v1.15. Rich payload filtering. Sidecar for local, `--qdrant-url` for external. | Already a service — replication, sharding, multi-client |
 | **Metadata + entities** | SQLite (`rusqlite`) | Debuggable (`sqlite3` CLI), one file, one connection pool. Entity tables, temporal validity, staleness metadata. | Same schema moves to Postgres trivially |
 | **Embedding** | `fastembed` | 44 embedding models + 6 reranker models, ONNX quantized, local, no API keys. Maintained by Qdrant team. | Wrap in gRPC service if needed |
 | **Entity extraction** | Caller provides via tool params (v1) | MCP clients (Claude) already know the entities. Zero latency, clean API contract. | Add optional NER model in v2 |
@@ -602,13 +625,16 @@ Quantized variants (suffix `Q`) are ~50% smaller with ~2% accuracy loss.
 
 Cross-encoder rerankers re-score retrieval candidates for final ranking. Always enabled. Configurable at startup. Reranking uses **multiplicative** recency/temporal boosts (not additive) to keep secondary signals proportional to primary relevance.
 
-| Tier | Model | Size | BEIR nDCG@10 | License |
-|---|---|---|---|---|
-| **small** | `ms-marco-MiniLM-L-6-v2` | 80MB | ~38 | Apache-2.0 |
-| **mid** | `ms-marco-MiniLM-L-12-v2` | 120MB | ~40 | Apache-2.0 |
-| **best** | `jina-reranker-v3` | 0.6B | 61.94 | — |
+| Tier | Model | Size | BEIR nDCG@10 | License | fastembed enum |
+|---|---|---|---|---|---|
+| **default** | `BAAI/bge-reranker-base` | 278MB | ~52 | MIT | `BGERerankerBase` |
+| **multilingual** | `jinaai/jina-reranker-v2-base-multilingual` | ~560MB | ~55 | — | `JINARerankerV2BaseMultiligual` |
 
-**2025-2026 findings**: Jina Reranker v3 (0.6B, Sept 2025) is the new winner — best BEIR score at smallest size among modern rerankers. Uses "last but not late interaction" architecture on a Qwen3 backbone. Significantly outperforms bge-reranker-base (previously our "best" tier). **Check fastembed-rs support; if unavailable, use `ort` crate directly with the ONNX model from HuggingFace.**
+Other fastembed built-in rerankers:
+- `rozgo/bge-reranker-v2-m3` (multilingual, `BGERerankerV2M3`)
+- `jinaai/jina-reranker-v1-turbo-en` (English, `JINARerankerV1TurboEn`)
+
+**2025-2026 contenders** (not in fastembed built-ins — require `UserDefinedRerankingModel` with ONNX files from HuggingFace, or direct `ort` crate loading):
 
 Other notable rerankers:
 - `mxbai-rerank-large-v2` (1.5B, BEIR 61.44) — close second
@@ -658,15 +684,11 @@ uuid = { version = "1", features = ["v7", "serde"] }
 
 ## Open Questions
 
-1. **Reranker model selection**: Jina Reranker v3 is the quality leader but may not be in fastembed-rs yet. Check availability; if not, benchmark `ms-marco-MiniLM-L-12-v2` (fastembed built-in) vs loading Jina v3 via `ort` directly.
+1. **Reranker model selection**: fastembed built-in rerankers are `bge-reranker-base` (default), `bge-reranker-v2-m3`, `jina-reranker-v1-turbo-en`, and `jina-reranker-v2-base-multilingual`. Jina Reranker v3 and ms-marco-MiniLM are NOT built-in — they require `UserDefinedRerankingModel` with ONNX files or direct `ort` crate loading. Benchmark `bge-reranker-base` as v1 default; evaluate jina-v3 via custom loading if quality insufficient.
 
-2. **fastembed ONNX Runtime in Nix**: needs `onnxruntime` in `flake.nix` buildInputs. May require system library or static linking. Needs investigation for the Nix build.
+2. **Qdrant sidecar packaging**: how to distribute the Qdrant binary alongside ferrex? Options: (a) expect user to install Qdrant separately, (b) download on first run, (c) bundle in Nix flake. Nix makes (c) straightforward.
 
-3. **Qdrant sidecar packaging**: how to distribute the Qdrant binary alongside ferrex? Options: (a) expect user to install Qdrant separately, (b) download on first run, (c) bundle in Nix flake. Nix makes (c) straightforward.
-
-4. **BGE-M3 as unified model**: BGE-M3 outputs dense + sparse + ColBERT from a single forward pass. This could replace the separate BM25 index entirely (Qdrant's sparse vector support can ingest the sparse output directly). Worth benchmarking vs separate BGE-base + Qdrant BM25 tokenization.
-
-5. **Embedding prefix format**: current `[type | namespace | date]` prefix uses tokens out-of-distribution for BGE-base. Benchmark against (a) no prefix, (b) natural language prefix, (c) Qdrant payload filtering only. May be doing more harm than good — needs measurement.
+3. **BGE-M3 as unified model**: BGE-M3 outputs dense + sparse + ColBERT from a single forward pass. This could replace the separate BM25 index entirely (Qdrant's sparse vector support can ingest the sparse output directly). Worth benchmarking vs separate BGE-base + Qdrant server-side BM25.
 
 ## Non-Goals (v1)
 
@@ -678,7 +700,7 @@ uuid = { version = "1", features = ["v7", "serde"] }
 - Community detection / Leiden algorithm (v2)
 - Automatic entity extraction from free text (require explicit entities in v1)
 - Multimodal embeddings (text only in v1)
-- SSE transport (stdio only in v1)
+- Streamable HTTP transport (stdio only in v1)
 - LLM-based memory extraction (mem0's approach — intentionally avoided due to detail loss)
 
 ## Implementation Phases
@@ -692,12 +714,10 @@ uuid = { version = "1", features = ["v7", "serde"] }
 - Basic `store` (all types) and `recall` (vector-only) MCP tools
 - stdio transport via rmcp
 
-### Phase 2: Hybrid Retrieval + Reranking (~600 LOC)
-- BM25 via Qdrant built-in sparse index
-- Reciprocal Rank Fusion (k=60) merging vector + BM25 results
-- Cross-encoder reranking with multiplicative recency boosts
-- Parallel retrieval (vector + BM25 concurrently via tokio::join!)
-- Context-enriched embedding (metadata prefix on embed)
+### Phase 2: Hybrid Retrieval + Reranking (~400 LOC)
+- BM25 via Qdrant built-in sparse index (server-side tokenization + IDF)
+- Hybrid retrieval via Qdrant Query API: prefetch dense + sparse, server-side RRF (k=60) in one request
+- Cross-encoder reranking (top-20 candidates) with multiplicative recency boosts
 
 ### Phase 3: Conflict Resolution + Semantic Facts (~500 LOC)
 - `store` semantic type: conflict detection with temporal validity (`t_valid`/`t_invalid`)

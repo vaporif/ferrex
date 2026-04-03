@@ -20,17 +20,20 @@ Decisions made during design review, April 2026.
 
 **Why:** Single-responsibility. `recall` searches, `stats` summarizes. The agent provides a query like "project context" or "recent decisions" rather than ferrex guessing what's relevant.
 
-## 3. Entity Name Fragmentation: Alias Table
+## 3. Entity Name Fragmentation: Full Layered Resolution
 
 **Problem:** Agents store inconsistent entity names ("tokio" vs "Tokio" vs "tokio runtime").
 
-**Decision:** Each entity has a canonical name + list of aliases. On entity creation:
-1. Normalize (lowercase, trim) → check for exact match
+**Decision:** Each entity has a canonical name + list of aliases. Full layered pipeline in v1:
+1. Normalize (lowercase, trim, collapse separators) → check for exact match → merge
 2. Fuzzy match against existing entities (SequenceMatcher ratio > 0.85) → merge
 3. Embedding similarity > 0.92 → merge
 4. Embedding similarity 0.80-0.92 → store both, add as alias candidates, surface in `reflect`
+5. No match → create as new entity
 
-**Why:** Layered approach uses the right tool for each case. Deterministic for obvious matches, embedding-based for semantic equivalence, human review for ambiguous cases.
+All lookups check aliases first. This is the full pipeline — not deferred.
+
+**Why:** Layered approach uses the right tool for each case. Deterministic for obvious matches, embedding-based for semantic equivalence, human review for ambiguous cases. Entity fragmentation compounds over time and is harder to fix retroactively than to prevent upfront.
 
 ## 4. Reflect: Agent-Side LLM (ferrex stays LLM-free)
 
@@ -159,15 +162,11 @@ Decisions made during design review, April 2026.
 
 **Rejected alternatives:** Sliding window (memories aren't documents), semantic chunking (over-fragments short text), late chunking (solves cross-reference problems we don't have), propositional chunking (requires LLM, our memories are already near-atomic), RAG fusion (gains vanish after reranking per arXiv:2603.02153).
 
-## 12. Context-Enriched Embedding
+## 12. Context-Enriched Embedding → Superseded by Decision #18
 
-**Problem:** Embedding bare content loses type, project, and temporal context. Two memories from different projects about "connection pool" are indistinguishable in embedding space.
+**Original decision:** Prepend `[{type} | {namespace} | {date}]` metadata to content before embedding.
 
-**Decision:** Prepend metadata to content before embedding: `[{type} | {namespace} | {date}] {content}`. Applied to both stored memories and recall queries for consistency. The prefix is for embedding only — stored content remains clean.
-
-**Why:** Anthropic's Contextual Retrieval research reported 67% reduction in retrieval failures. No LLM needed — just string concatenation. Cheapest possible retrieval quality improvement.
-
-**Note:** The prefix format `[type | namespace | date]` uses tokens out-of-distribution for BGE-base. Open Question #5 tracks benchmarking this against alternatives (no prefix, natural language prefix, payload filtering only).
+**Superseded by Decision #18:** Plain-text embedding + Qdrant payload filtering. The metadata prefix was found to be out-of-distribution for BGE-base and likely harmful. Anthropic's Contextual Retrieval uses LLM-generated prose, not structured metadata tokens. See Decision #18 for full rationale.
 
 ## 13. Memory Type Auto-Detection
 
@@ -189,3 +188,49 @@ Agent can still set type explicitly if it wants to override.
 **Decision:** Before writing, embed the incoming memory and search existing same-type memories in Qdrant. If cosine similarity > 0.95 → reject with `"similar memory already exists: {id}"`. One extra Qdrant search per store call.
 
 **Why:** Cheapest defense against the most common memory bloat pattern. The 0.95 threshold is conservative — only rejects near-exact duplicates. The `supersedes` param bypasses this check for intentional updates. A-Mem (NeurIPS 2025) showed 85-93% token reduction by controlling what gets stored; this is the minimal version of that idea.
+
+## 15. Server-Side RRF via Qdrant Query API
+
+**Original design:** Client-side RRF — two separate Qdrant queries (dense + sparse) via `tokio::join!`, then merge results in ferrex with custom RRF implementation.
+
+**Decision:** Use Qdrant's Universal Query API (available since v1.10) with `prefetch` stages for dense and sparse retrieval, fused via `Fusion::RRF` server-side in a single request.
+
+**Why:** Eliminates ~200 LOC of client-side RRF code. One round-trip instead of two. Server-side fusion is more efficient (Qdrant can optimize internally). Also eliminates the imbalanced-result-list problem (where one channel returns fewer results than another) — Qdrant handles this internally.
+
+## 16. BM25 Tokenization: Server-Side (No Client-Side Sparse Vectors)
+
+**Decision:** Send raw text to Qdrant for BM25 indexing. Qdrant computes TF-based sparse vectors server-side and maintains collection-level IDF via `Modifier::IDF` on `SparseVectorParams` (available since v1.15).
+
+**Why:** ferrex doesn't need any BM25/tokenization logic. The ingestion pipeline sends text once; Qdrant handles both dense vector storage and sparse/BM25 indexing. This simplifies `ferrex-store/qdrant.rs` — one write path, no client-side tokenizer dependency.
+
+## 17. Reranking Pool: Top-20 (Not Top-10)
+
+**Original design:** Rerank top-10 candidates after RRF.
+
+**Decision:** Rerank top-20 candidates. Research consensus is 50-75 for large corpora; for small personal memory corpora, 20 is the sweet spot.
+
+**Why:** Top-10 risks missing relevant results that RRF ranked low but the cross-encoder would promote. Cross-encoder latency on 20 candidates with quantized ONNX is negligible (~50ms). The quality improvement outweighs the minimal latency cost.
+
+## 18. No Embedding Prefix — Use Qdrant Payload Filtering
+
+**Original design:** Prepend `[type | namespace | date]` to content before embedding, inspired by Anthropic's Contextual Retrieval.
+
+**Decision:** Embed plain text only. Use Qdrant payload filtering for type, namespace, and temporal constraints.
+
+**Why:** BGE-base-en-v1.5 expects plain text on the document side. The `[type | namespace | date]` format is out-of-distribution — structured metadata tokens shift vectors unpredictably and waste the 512-token budget. Anthropic's Contextual Retrieval uses LLM-generated natural language prose (50-100 tokens of semantic context), which is a fundamentally different technique. For ferrex's use case, Qdrant payload filtering achieves the same scoping with zero embedding quality degradation.
+
+## 19. `forget` Tool: ID-Only (No Query-Based Deletion)
+
+**Original design:** `forget` accepted either `ids` (targeted) or `query` (search-and-delete with "confirmation").
+
+**Decision:** `forget` requires explicit `ids` only. No query-based batch deletion.
+
+**Why:** MCP tools can't prompt for interactive confirmation — they return results, not input dialogs. Query-based deletion with no real confirmation mechanism is a mass-delete footgun. The agent can `recall` first to find IDs, then `forget` specific ones. This is safer and simpler. Query-based batch delete can be a v2 convenience feature if needed.
+
+## 20. Reranker Tiers: Use fastembed Built-Ins
+
+**Original design:** Listed ms-marco-MiniLM and jina-reranker-v3 as reranker tiers.
+
+**Decision:** Use fastembed built-in rerankers only. Default: `bge-reranker-base`. Multilingual: `jina-reranker-v2-base-multilingual`.
+
+**Why:** ms-marco-MiniLM and jina-reranker-v3 are not fastembed built-ins. They require `UserDefinedRerankingModel` with manually sourced ONNX files or direct `ort` crate loading — extra complexity for v1. The built-in `bge-reranker-base` is a solid default. Evaluate jina-v3 via custom loading post-v1 if quality is insufficient.
