@@ -158,23 +158,19 @@ impl VectorStore {
         let name = Self::collection_name(namespace)?;
         let prefetch_limit = (limit as u64).max(MIN_PREFETCH_LIMIT);
 
-        let make_prefetch =
-            |query, using, f: Option<Filter>| -> PrefetchQueryBuilder {
-                let mut b = PrefetchQueryBuilder::default()
-                    .query(query)
-                    .using(using)
-                    .limit(prefetch_limit);
-                if let Some(f) = f {
-                    b = b.filter(f);
-                }
-                b
-            };
+        let make_prefetch = |query, using, f: Option<Filter>| -> PrefetchQueryBuilder {
+            let mut b = PrefetchQueryBuilder::default()
+                .query(query)
+                .using(using)
+                .limit(prefetch_limit);
+            if let Some(f) = f {
+                b = b.filter(f);
+            }
+            b
+        };
 
-        let dense_prefetch = make_prefetch(
-            VectorInput::new_dense(vector),
-            DENSE_VECTOR,
-            filter.clone(),
-        );
+        let dense_prefetch =
+            make_prefetch(VectorInput::new_dense(vector), DENSE_VECTOR, filter.clone());
         let sparse_prefetch = make_prefetch(
             VectorInput::from(Document::new(query_text, BM25_TOKENIZER)),
             SPARSE_VECTOR,
