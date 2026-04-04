@@ -60,6 +60,7 @@
       pkg = craneLib.buildPackage (commonArgs
         // {
           inherit cargoArtifacts;
+          cargoTestExtraArgs = "--workspace --exclude ferrex-embed";
         });
 
       toolchain = fenixPkgs.stable.withComponents [
