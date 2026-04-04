@@ -72,6 +72,8 @@ All lookups check aliases first. This is the full pipeline — not deferred.
 
 **Why:** Uses string comparison where it's reliable, embeddings only as a tiebreaker for ambiguous cases.
 
+**Predicate normalization:** Conflict matching uses normalized predicates, not raw strings. A static synonym map groups common equivalents ("uses"/"depends-on"/"requires" → `depends_on`), with fuzzy matching (ratio > 0.85) as fallback. Without this, ("api-server", "uses", "tokio 1.36") and ("api-server", "depends-on", "tokio 1.38") would be treated as unrelated facts instead of a version update. See main design doc Conflict Resolution section for the full predicate normalization pipeline.
+
 ## 6. Qdrant Connection: Sidecar or External URL
 
 **Problem:** Orphan processes, concurrent instances, startup latency, port conflicts. Also: some users already run Qdrant or prefer to manage it themselves.
@@ -185,9 +187,9 @@ Agent can still set type explicitly if it wants to override.
 
 **Problem:** Agents over-store — the same fact gets stored repeatedly with slight rewording. Without deduplication, memory fills with near-identical entries that dilute retrieval quality.
 
-**Decision:** Before writing, embed the incoming memory and search existing same-type memories in Qdrant. If cosine similarity > 0.95 → reject with `"similar memory already exists: {id}"`. One extra Qdrant search per store call.
+**Decision:** Before writing, embed the incoming memory and search existing same-type memories in Qdrant. If cosine similarity exceeds a configurable threshold (default 0.95) → reject with `"similar memory already exists: {id}"`. One extra Qdrant search per store call. Threshold configurable via `ferrex.toml` (`deduplication.threshold`) or `--dedup-threshold` CLI flag.
 
-**Why:** Cheapest defense against the most common memory bloat pattern. The 0.95 threshold is conservative — only rejects near-exact duplicates. The `supersedes` param bypasses this check for intentional updates. A-Mem (NeurIPS 2025) showed 85-93% token reduction by controlling what gets stored; this is the minimal version of that idea.
+**Why:** Cheapest defense against the most common memory bloat pattern. The default 0.95 is conservative — only rejects near-exact duplicates. The `supersedes` param bypasses this check for intentional updates. A-Mem (NeurIPS 2025) showed 85-93% token reduction by controlling what gets stored; this is the minimal version of that idea. The optimal threshold depends on the embedding model and content length distribution — empirical tuning on real workloads is expected. Making it configurable avoids baking in an untested assumption.
 
 ## 15. Server-Side RRF via Qdrant Query API
 
@@ -234,3 +236,48 @@ Agent can still set type explicitly if it wants to override.
 **Decision:** Use fastembed built-in rerankers only. Default: `bge-reranker-base`. Multilingual: `jina-reranker-v2-base-multilingual`.
 
 **Why:** ms-marco-MiniLM and jina-reranker-v3 are not fastembed built-ins. They require `UserDefinedRerankingModel` with manually sourced ONNX files or direct `ort` crate loading — extra complexity for v1. The built-in `bge-reranker-base` is a solid default. Evaluate jina-v3 via custom loading post-v1 if quality is insufficient.
+
+## 21. Retrieval ≠ Validation: Separate Signals
+
+**Original design:** Retrieving a memory via `recall` bumps `last_validated`, creating a feedback loop where frequently-retrieved memories stay fresh.
+
+**Problem:** ferrex can't distinguish "agent read this and found it useful" from "agent read this and ignored it." Treating retrieval as implicit validation means popular-but-wrong memories never age out — the same failure mode we criticize in other systems.
+
+**Decision:** `last_accessed` and `last_validated` are separate signals:
+- `last_accessed` bumped on every `recall` hit. Used for decay scoring (popularity signal).
+- `last_validated` bumped only by explicit agent actions: `store(supersedes: id)`, `reflect` confirmation, `store(source: "memory:id")`.
+
+**Why:** Retrieval is a popularity signal, not a correctness signal. Separating them means stale-but-popular memories still drift toward staleness based on validation age, while frequently-used memories get a mild decay benefit without false freshness.
+
+## 22. Stats Brief/Detail Modes
+
+**Original design:** `stats` returns full diagnostics (counts, staleness distribution, storage size, recent memories, needs_attention) on every call.
+
+**Problem:** Agents call `stats` at conversation start. Full diagnostics waste tokens on information irrelevant to 90% of conversations (storage_mb, entity count, full staleness breakdown).
+
+**Decision:** `stats` has a `detail` parameter (default `false`):
+- **Brief mode** (default): returns `total` count, top-5 `recent` memories, and `needs_attention` section only.
+- **Detailed mode** (`detail=true`): returns full diagnostics including counts by type, staleness distribution, storage size, entity count.
+
+**Why:** Brief mode gives the agent enough context to orient (recent memories + what needs attention) without burning tokens on system health metrics. Detailed mode available on demand for health checks and debugging.
+
+## 23. Predicate Normalization for Conflict Detection
+
+**Problem:** Agents use inconsistent predicates ("uses" vs "depends-on" vs "requires"). Conflict detection on exact (subject, predicate) match misses obvious contradictions when the same relationship is expressed with different predicate wording.
+
+**Decision:** Normalize predicates before conflict matching:
+1. Lowercase, trim, collapse separators
+2. Static synonym map for common predicate families (extensible via config)
+3. Fuzzy match (SequenceMatcher ratio > 0.85) against existing predicates for the same subject
+
+**Why:** Without predicate normalization, ("api-server", "uses", "tokio 1.36") and ("api-server", "depends-on", "tokio 1.38") are treated as unrelated facts instead of a version update. The synonym map handles the common cases cheaply; fuzzy matching catches the rest.
+
+## 24. Configurable Staleness Thresholds (Per-Namespace)
+
+**Original design:** Type-based staleness thresholds only (episodic: 90d, semantic: 180d, procedural: 365d).
+
+**Problem:** Type-based thresholds are a proxy for domain-specific staleness. A CI/CD workflow (procedural) could go stale in a week. A historical fact (semantic) like "company founded in 2020" never goes stale. One-size-fits-all-per-type doesn't capture this.
+
+**Decision:** Type-based defaults remain, but namespaces can override thresholds via `ferrex.toml`. Fast-moving projects set aggressive thresholds; stable reference projects relax them.
+
+**Why:** Per-namespace overrides let users tune staleness to their domain without adding per-memory complexity. The type-based defaults are reasonable fallbacks for users who don't configure anything.

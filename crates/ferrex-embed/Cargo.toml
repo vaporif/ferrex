@@ -1,0 +1,24 @@
+[package]
+name = "ferrex-embed"
+description = "Embedding layer for ferrex — thin wrapper around fastembed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+default = ["onnx"]
+onnx = ["fastembed/ort-load-dynamic"]
+onnx-fetch = []
+
+[dependencies]
+fastembed = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
