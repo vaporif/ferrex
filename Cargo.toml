@@ -43,7 +43,7 @@ tokio = { version = "1", features = ["full"] }
 fastembed = "5"
 
 # Vector store
-qdrant-client = "1"
+qdrant-client = { version = "1", default-features = false, features = ["serde"] }
 
 # SQLite
 rusqlite = { version = "0.32", features = ["bundled"] }
