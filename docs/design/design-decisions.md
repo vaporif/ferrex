@@ -109,11 +109,13 @@ All lookups check aliases first. This is the full pipeline — not deferred.
 **Problem:** Linear recency formula has no floor, penalizes old memories arbitrarily. Procedural memories are timeless but get penalized.
 
 **Decision:** Type-specific multiplicative boosts using half-life decay:
-- Episodic: `1.0 + 0.1 * 2^(-age_days/30)` (half-life 30 days, range 1.0-1.1)
-- Semantic: `1.0 + 0.05 * 2^(-age_days/180)` (half-life 180 days, range 1.0-1.05)
+- Episodic: `1.0 + 0.3 * 2^(-age_days/30)` (half-life 30 days, range 1.0-1.3)
+- Semantic: `1.0 + 0.15 * 2^(-age_days/180)` (half-life 180 days, range 1.0-1.15)
 - Procedural: `1.0` (no boost)
 
-**Why:** Each memory type has different temporal semantics. Exponential decay is mathematically clean, never goes negative, and is configurable per type.
+**Why:** Each memory type has different temporal semantics. Exponential decay is mathematically clean, never goes negative, and is configurable per type. The boost ranges are large enough to actually shift rankings — cross-encoder scores typically vary by 0.2-0.5 between candidates, so a 15-30% boost can promote recent relevant results above older ones. Ranges too small (e.g., 5-10%) would be lost in reranker noise.
+
+**Dropped: temporal proximity boost.** The original design included a `temporal_proximity_boost = 1.0 + 0.1 × temporal_relevance` but `temporal_relevance` was never defined (proximity to what?). The recency boost already captures the time signal. Time-scoped queries are handled by the `time_range` filter on recall at the Qdrant level.
 
 ## 9. Tool Description Priming: Layered Reinforcement
 
@@ -201,7 +203,7 @@ Agent can still set type explicitly if it wants to override.
 
 ## 16. BM25 Tokenization: Server-Side (No Client-Side Sparse Vectors)
 
-**Decision:** Send raw text to Qdrant for BM25 indexing. Qdrant computes TF-based sparse vectors server-side and maintains collection-level IDF via `Modifier::IDF` on `SparseVectorParams` (available since v1.15).
+**Decision:** Send raw text to Qdrant for BM25 indexing via the `Document` API with `model: "Qdrant/bm25"`. Qdrant tokenizes the text and computes BM25 sparse vectors server-side. `Modifier::IDF` on `SparseVectorParams` maintains collection-level IDF statistics and applies IDF weighting at query/scoring time. BM25 is the one model built into the Qdrant engine itself — this works on self-hosted Qdrant, not just Cloud.
 
 **Why:** ferrex doesn't need any BM25/tokenization logic. The ingestion pipeline sends text once; Qdrant handles both dense vector storage and sparse/BM25 indexing. This simplifies `ferrex-store/qdrant.rs` — one write path, no client-side tokenizer dependency.
 

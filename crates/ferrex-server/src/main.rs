@@ -4,7 +4,7 @@ use std::sync::Arc;
 use clap::Parser;
 use ferrex_core::{
     CoreError, FerrexConfig, ForgetRequest, MemoryService, ModelTier, RecallRequest,
-    ReflectRequest, StatsRequest, StoreRequest, TimeRange,
+    ReflectRequest, RerankerTier, StatsRequest, StoreRequest, TimeRange,
 };
 use rmcp::{
     ErrorData, ServerHandler, ServiceExt, handler::server::wrapper::Parameters, tool, tool_handler,
@@ -27,6 +27,9 @@ struct Cli {
 
     #[arg(long, env = "FERREX_MODEL_TIER", default_value = "best")]
     model_tier: ModelTier,
+
+    #[arg(long, env = "FERREX_RERANKER_TIER", default_value = "default")]
+    reranker_tier: RerankerTier,
 
     #[arg(long, env = "FERREX_NAMESPACE", default_value = "default")]
     namespace: String,
@@ -74,11 +77,11 @@ struct RecallParams {
     namespace: Option<String>,
     /// Max results (default 10).
     limit: Option<usize>,
-    /// Include stale memories (Phase 4).
+    /// Include stale memories (not yet implemented).
     include_stale: Option<bool>,
-    /// Include invalidated memories (Phase 4).
+    /// Include invalidated memories (not yet implemented).
     include_invalidated: Option<bool>,
-    /// Time range filter (Phase 2).
+    /// Time range filter (not yet implemented).
     time_range: Option<McpTimeRange>,
 }
 
@@ -276,6 +279,7 @@ fn main() -> eyre::Result<()> {
         qdrant_bin: cli.qdrant_bin,
         qdrant_port: cli.qdrant_port,
         model_tier: cli.model_tier,
+        reranker_tier: cli.reranker_tier,
         namespace: cli.namespace,
         db_path,
     };

@@ -16,18 +16,21 @@
 
 **Spec**: `docs/superpowers/specs/2026-04-03-phase1-foundation-design.md`
 
-## Phase 2: Hybrid Retrieval + Reranking
+## Phase 2: Reranking + Hybrid Retrieval
 
-**Delivers**: Dramatically better recall quality. BM25 catches exact keyword matches that vector search misses. Cross-encoder reranking promotes the best results.
+**Delivers**: Better recall quality. Cross-encoder reranking is the primary win — promotes the best results from a larger candidate pool. BM25 is a secondary addition that helps with exact keyword/identifier matches.
 
+- Cross-encoder reranking: fastembed's `bge-reranker-base` on top-20 candidates
 - Add BM25 sparse vectors to Qdrant (server-side tokenization + IDF via `Modifier::Idf` on `SparseVectorParams`)
 - Hybrid recall: prefetch dense + sparse, fuse via Qdrant `Fusion::Rrf` (k=60) in one API call
-- Cross-encoder reranking: fastembed's `bge-reranker-base` on top-20 candidates
-- Multiplicative boosts: `final_score = rerank_score x recency_boost x temporal_proximity_boost`
-- Type-specific recency: episodic (half-life 30d), semantic (half-life 180d), procedural (none)
-- Staleness annotation on recall results (fresh/aging/stale)
+- Multiplicative recency boosts: `final_score = rerank_score x recency_boost`
+- Type-specific recency: episodic (half-life 30d, range 1.0-1.3), semantic (half-life 180d, range 1.0-1.15), procedural (none)
 
-**Migration**: Sparse vectors can be added to existing Qdrant collections without recreation.
+**Note on BM25**: ferrex memories are short (50-300 chars), so BGE-base already captures most keyword signal. BM25's main value is for exact identifiers and entity names. The cross-encoder reranker is where most retrieval quality improvement comes from.
+
+**Not in Phase 2**: Staleness filtering/annotation (requires Phase 4 scoring machinery), temporal proximity boost (underspecified, recency boost covers the time signal).
+
+**Migration**: Not needed — not live yet. Collections are recreated with both dense and sparse config.
 
 ## Phase 3: Conflict Resolution + Deduplication
 

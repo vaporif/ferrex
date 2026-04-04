@@ -231,12 +231,23 @@ MCP tool descriptions are loaded into the agent's context at session start. They
 **Retrieval pipeline** (see Retrieval Pipeline Detail for full walkthrough):
 1. Embed query via fastembed
 2. Single Qdrant Query API call: prefetch dense + sparse, fuse via server-side RRF (k=60)
-3. Staleness filter (exclude stale/invalidated unless requested)
-4. Cross-encoder reranking (top-20 candidates) with **multiplicative** recency and temporal proximity boosts
-5. Staleness annotation on each result
-6. Return top-N with scores, provenance, and freshness metadata
+3. Cross-encoder reranking (top-20 candidates) with **multiplicative** recency boost
+4. Return top-N with scores and metadata
+5. (Phase 4 adds: staleness filter, staleness annotation, freshness metadata)
 
-**Each result includes freshness metadata:**
+**Each result includes metadata (Phase 2: basic, Phase 4: full freshness):**
+
+Phase 2 response shape:
+```json
+{
+  "id": "mem_12",
+  "content": "...",
+  "score": 0.94,
+  "age_days": 45
+}
+```
+
+Phase 4 adds freshness metadata:
 ```json
 {
   "id": "mem_12",
@@ -252,7 +263,7 @@ MCP tool descriptions are loaded into the agent's context at session start. They
 }
 ```
 
-`staleness` field values: `"fresh"`, `"aging"` (approaching staleness threshold), `"stale"` (exceeded threshold, returned only if `include_stale=true`), `"superseded"` (a newer fact exists for the same subject+predicate).
+`staleness` field values (Phase 4): `"fresh"`, `"aging"` (approaching staleness threshold), `"stale"` (exceeded threshold, returned only if `include_stale=true`), `"superseded"` (a newer fact exists for the same subject+predicate).
 
 ### `forget`
 
@@ -453,26 +464,23 @@ Step 2: Hybrid retrieval via Qdrant Query API (single request)
   No client-side fusion code needed. BM25 sparse vectors are also computed
   server-side (Qdrant handles tokenization + IDF since v1.15).
 
-Step 3: Staleness filter
-  Remove memories with staleness="stale" (unless include_stale=true).
-  Flag "aging" memories for annotation.
-  Filter out semantic facts with t_invalid set (unless include_invalidated=true).
-
-Step 4: Reranking (fastembed cross-encoder)
+Step 3: Reranking (fastembed cross-encoder)
   Score top-20 candidates with cross-encoder(query, memory_content)
-  Apply multiplicative boosts (not additive — keeps secondary signals proportional):
-    final_score = rerank_score × recency_boost × temporal_proximity_boost
+  Apply multiplicative recency boost (not additive — keeps secondary signal proportional):
+    final_score = rerank_score × recency_boost
   Where:
     recency_boost (type-specific, half-life decay, floor at 1.0):
-      episodic:   1.0 + 0.1 × 2^(-age_days/30)    // half-life 30d, range 1.0-1.1
-      semantic:   1.0 + 0.05 × 2^(-age_days/180)   // half-life 180d, range 1.0-1.05
+      episodic:   1.0 + 0.3 × 2^(-age_days/30)    // half-life 30d, range 1.0-1.3
+      semantic:   1.0 + 0.15 × 2^(-age_days/180)   // half-life 180d, range 1.0-1.15
       procedural: 1.0                                // no boost
-    temporal_proximity_boost = 1.0 + 0.1 × temporal_relevance  // ±10%
   → [mem_12: 0.94, mem_7: 0.91, mem_3: 0.87, mem_8: 0.72, mem_19: 0.68]
 
-Step 5: Annotate and return top-5
-  Each result includes freshness metadata (age, last_accessed, staleness level).
-  If multiple active semantic facts exist for the same subject+predicate, flag as contradiction.
+Step 4: Return top-5
+  Results include memory content, scores, and basic metadata.
+
+  Note: Staleness filtering and freshness annotations are added in Phase 4
+  when the staleness scoring machinery exists. Phase 2 returns all matched
+  results without staleness metadata.
 ```
 
 ## Conflict Resolution
@@ -646,14 +654,14 @@ ferrex/
 │   │
 │   ├── ferrex-core/         # memory system logic
 │   │   ├── memory.rs        # memory types, store/recall/forget
-│   │   ├── retrieval.rs     # retrieval pipeline orchestration, reranking boosts (RRF is server-side in Qdrant)
+│   │   ├── retrieval.rs     # retrieval pipeline orchestration, recency boosts, final scoring (RRF is server-side in Qdrant)
 │   │   ├── conflict.rs      # contradiction detection and temporal validity
 │   │   ├── lifecycle.rs     # decay, staleness scoring, compaction, eviction
 │   │   └── staleness.rs     # staleness safeguards, validation tracking
 │   │
 │   ├── ferrex-embed/        # embedding engine
 │   │   ├── embed.rs         # fastembed wrapper
-│   │   └── rerank.rs        # cross-encoder reranking with multiplicative boosts
+│   │   └── rerank.rs        # fastembed TextRerank wrapper (raw relevance scores only)
 │   │
 │   └── ferrex-store/        # storage backends
 │       ├── qdrant.rs        # Qdrant client (sidecar gRPC or remote URL)
@@ -708,7 +716,7 @@ Quantized variants (suffix `Q`) are ~50% smaller with ~2% accuracy loss.
 
 ### Reranker Model Tiers
 
-Cross-encoder rerankers re-score retrieval candidates for final ranking. Always enabled. Configurable at startup. Reranking uses **multiplicative** recency/temporal boosts (not additive) to keep secondary signals proportional to primary relevance.
+Cross-encoder rerankers re-score retrieval candidates for final ranking. Always enabled. Configurable at startup. ferrex-embed exposes raw reranker scores only. Recency boosts and final scoring live in ferrex-core/retrieval.rs where memory type and timestamp data is available.
 
 | Tier | Model | Size | BEIR nDCG@10 | License | fastembed enum |
 |---|---|---|---|---|---|
@@ -837,11 +845,12 @@ Tests are written alongside each implementation phase, not deferred to the end. 
 - everything else → episodic
 - Explicit type overrides auto-detection
 
-**Recency boost formulas** (`ferrex-embed/rerank.rs`):
-- Episodic at age 0: boost = 1.1, at age 30d: boost = 1.05, at age 300d: boost ≈ 1.0
-- Semantic at age 0: boost = 1.05, at age 180d: boost = 1.025
+**Recency boost formulas** (`ferrex-core/retrieval.rs`):
+- Episodic at age 0: boost = 1.3, at age 30d: boost = 1.15, at age 300d: boost ≈ 1.0
+- Semantic at age 0: boost = 1.15, at age 180d: boost = 1.075
 - Procedural: always 1.0
 - Boosts are multiplicative with rerank score
+- Ranges large enough to shift rankings (cross-encoder scores vary by 0.2-0.5 between candidates)
 
 ### Integration Tests (require Qdrant)
 
@@ -908,10 +917,10 @@ Target: recall@3 >= 0.7 on the golden set. If a code change drops below this, in
 - Basic `store` (all types) and `recall` (vector-only) MCP tools
 - stdio transport via rmcp
 
-### Phase 2: Hybrid Retrieval + Reranking (~400 LOC)
+### Phase 2: Reranking + Hybrid Retrieval (~400 LOC)
+- Cross-encoder reranking (top-20 candidates) with multiplicative recency boosts (ferrex-embed: raw scores, ferrex-core: boost computation)
 - BM25 via Qdrant built-in sparse index (server-side tokenization + IDF)
 - Hybrid retrieval via Qdrant Query API: prefetch dense + sparse, server-side RRF (k=60) in one request
-- Cross-encoder reranking (top-20 candidates) with multiplicative recency boosts
 
 ### Phase 3: Conflict Resolution + Entity Resolution (~600 LOC)
 - `store` semantic type: conflict detection with temporal validity (`t_valid`/`t_invalid`)

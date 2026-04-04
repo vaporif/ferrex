@@ -59,7 +59,6 @@ pub trait MetadataStore: Send + Sync {
         limit: usize,
     ) -> impl Future<Output = Result<Vec<Memory>, StoreError>> + Send;
 
-    // --- Phase 3 stubs ---
     fn delete_memory(&self, _id: &str) -> impl Future<Output = Result<bool, StoreError>> + Send {
         async { Ok(false) }
     }
@@ -84,7 +83,6 @@ pub trait MetadataStore: Send + Sync {
         async { Ok(()) }
     }
 
-    // --- Phase 4 stubs ---
     fn get_stale_memories(
         &self,
         _threshold_days: u64,
@@ -239,7 +237,7 @@ impl MetadataStore for SqliteStore {
                     memory.object,
                     memory.confidence,
                     memory.source,
-                    memory.context.as_ref().map(std::string::ToString::to_string),
+                    memory.context.as_ref().map(ToString::to_string),
                     memory.created_at.to_rfc3339(),
                     memory.updated_at.to_rfc3339(),
                     memory.t_valid.map(|d| d.to_rfc3339()),

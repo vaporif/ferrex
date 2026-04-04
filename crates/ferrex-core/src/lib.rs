@@ -1,18 +1,21 @@
 mod entity;
 mod error;
+mod retrieval;
 mod types;
 
 pub use entity::EntityResolver;
 pub use error::CoreError;
+use retrieval::SECONDS_PER_DAY;
+pub use retrieval::compute_recency_boost;
 pub use types::*;
 
-pub use ferrex_embed::ModelTier;
+pub use ferrex_embed::{ModelTier, RerankerTier};
 pub use ferrex_store::{Entity, Memory, MemoryType};
 
 use std::collections::HashMap;
 
 use chrono::Utc;
-use ferrex_embed::Embedder;
+use ferrex_embed::{Embedder, Reranker};
 use ferrex_store::{MetadataStore, QdrantSidecar, SqliteStore, VectorStore};
 use qdrant_client::Payload;
 use qdrant_client::qdrant::{Condition, Filter};
@@ -20,10 +23,12 @@ use uuid::Uuid;
 
 const MAX_CONTENT_LENGTH: usize = 4096;
 const DEFAULT_RECALL_LIMIT: usize = 10;
+const MIN_RERANK_POOL_SIZE: usize = 20;
 const STATS_RECENT_COUNT: usize = 5;
 
 pub struct MemoryService {
     embedder: Embedder,
+    reranker: Reranker,
     metadata_store: SqliteStore,
     vector_store: VectorStore,
     sidecar: Option<QdrantSidecar>,
@@ -39,6 +44,7 @@ impl MemoryService {
         }
 
         let embedder = Embedder::new(config.model_tier)?;
+        let reranker = Reranker::new(config.reranker_tier)?;
 
         let (vector_store, sidecar) = if let Some(ref url) = config.qdrant_url {
             let vs = VectorStore::new(url, embedder.dimension())?;
@@ -51,7 +57,6 @@ impl MemoryService {
 
         let metadata_store = SqliteStore::open(&config.db_path)?;
 
-        // Check embedding model compatibility
         let model_key = "embedding_model";
         let current_model = config.model_tier.model_name();
         let stored_model = metadata_store.get_metadata(model_key).await?;
@@ -73,6 +78,7 @@ impl MemoryService {
 
         Ok(Self {
             embedder,
+            reranker,
             metadata_store,
             vector_store,
             sidecar,
@@ -89,19 +95,6 @@ impl MemoryService {
         let id = Uuid::now_v7();
         let confidence = clamp_confidence(req.confidence);
 
-        let embed_text = match memory_type {
-            MemoryType::Semantic => format!(
-                "{} {} {}",
-                req.subject.as_deref().unwrap_or(""),
-                req.predicate.as_deref().unwrap_or(""),
-                req.object.as_deref().unwrap_or(""),
-            ),
-            _ => req.content.clone().unwrap_or_default(),
-        };
-
-        let embedding = self.embedder.embed(&embed_text).await?;
-
-        // Entity resolution
         let resolved_entities = if req.entities.is_empty() {
             vec![]
         } else {
@@ -113,7 +106,7 @@ impl MemoryService {
             };
             resolver.resolve(&req.entities, namespace).await?
         };
-        let entity_names: Vec<String> = resolved_entities.iter().map(|e| e.name.clone()).collect();
+        let entity_names = resolved_entities.iter().map(|e| e.name.clone()).collect();
 
         let memory = Memory {
             id: id.to_string(),
@@ -136,7 +129,10 @@ impl MemoryService {
             access_count: 0,
         };
 
-        // Insert metadata first (easier to roll back) before vector upsert
+        let embed_text = memory.searchable_text();
+        let embedding = self.embedder.embed(&embed_text).await?;
+
+        // Metadata first: easier to roll back than a vector upsert
         self.metadata_store.insert_memory(&memory).await?;
 
         for entity in &resolved_entities {
@@ -149,7 +145,7 @@ impl MemoryService {
             "memory_id": id.to_string(),
             "memory_type": memory_type.as_str(),
             "namespace": namespace,
-            "content": embed_text,
+            "searchable_text": embed_text,
             "entities": &memory.entities,
             "created_at": now.to_rfc3339(),
             ferrex_store::POINT_TYPE_FIELD: ferrex_store::POINT_TYPE_MEMORY,
@@ -157,15 +153,32 @@ impl MemoryService {
         .map_err(|e| CoreError::Validation(e.to_string()))?;
 
         self.vector_store
-            .upsert(namespace, id, embedding, payload)
+            .upsert(namespace, id, embedding, &embed_text, payload)
             .await?;
 
         Ok(memory)
     }
 
     pub async fn recall(&self, req: RecallRequest) -> Result<Vec<(Memory, f32)>, CoreError> {
+        if req.time_range.is_some() {
+            return Err(CoreError::Validation(
+                "time_range filtering is not yet implemented".into(),
+            ));
+        }
+        if req.include_stale.is_some() {
+            return Err(CoreError::Validation(
+                "include_stale filtering is not yet implemented".into(),
+            ));
+        }
+        if req.include_invalidated.is_some() {
+            return Err(CoreError::Validation(
+                "include_invalidated filtering is not yet implemented".into(),
+            ));
+        }
+
         let namespace = req.namespace.as_deref().unwrap_or(&self.config.namespace);
         let limit = req.limit.unwrap_or(DEFAULT_RECALL_LIMIT);
+        let candidate_pool_size = limit.max(MIN_RERANK_POOL_SIZE);
 
         let embedding = self.embedder.embed(&req.query).await?;
 
@@ -193,7 +206,13 @@ impl MemoryService {
 
         let results = self
             .vector_store
-            .search(namespace, embedding, limit, Some(filter))
+            .search(
+                namespace,
+                embedding,
+                &req.query,
+                candidate_pool_size,
+                Some(filter),
+            )
             .await?;
 
         if results.is_empty() {
@@ -203,16 +222,46 @@ impl MemoryService {
         let ids: Vec<String> = results.iter().map(|(id, _)| id.clone()).collect();
         let memories = self.metadata_store.get_memories_by_ids(&ids).await?;
 
-        self.metadata_store.update_last_accessed(&ids).await?;
-
         let memory_map: HashMap<&str, &Memory> =
             memories.iter().map(|m| (m.id.as_str(), m)).collect();
-        let paired: Vec<(Memory, f32)> = results
+
+        let ordered: Vec<&Memory> = results
             .iter()
-            .filter_map(|(id, score)| memory_map.get(id.as_str()).map(|m| ((*m).clone(), *score)))
+            .filter_map(|(id, _)| memory_map.get(id.as_str()).copied())
             .collect();
 
-        Ok(paired)
+        if ordered.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let doc_texts: Vec<String> = ordered.iter().map(|m| m.searchable_text()).collect();
+        let doc_refs: Vec<&str> = doc_texts.iter().map(String::as_str).collect();
+
+        let reranked = self.reranker.rerank(&req.query, &doc_refs, limit).await?;
+
+        let now = Utc::now();
+        let mut scored: Vec<(Memory, f32)> = reranked
+            .iter()
+            .filter_map(|r| {
+                let memory = ordered.get(r.index)?;
+                #[allow(clippy::cast_precision_loss)]
+                let age_days = (now - memory.created_at).num_seconds() as f64 / SECONDS_PER_DAY;
+                let recency = compute_recency_boost(memory.memory_type, age_days);
+                #[allow(clippy::cast_possible_truncation)]
+                let final_score = (f64::from(r.score) * recency) as f32;
+                Some(((*memory).clone(), final_score))
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+        scored.truncate(limit);
+
+        let accessed_ids: Vec<String> = scored.iter().map(|(m, _)| m.id.clone()).collect();
+        self.metadata_store
+            .update_last_accessed(&accessed_ids)
+            .await?;
+
+        Ok(scored)
     }
 
     pub async fn stats(&self, _req: StatsRequest) -> Result<StatsResponse, CoreError> {
@@ -259,13 +308,12 @@ impl MemoryService {
 }
 
 const fn detect_memory_type(req: &StoreRequest) -> MemoryType {
-    if let Some(t) = req.memory_type {
-        return t;
-    }
-    if req.subject.is_some() && req.predicate.is_some() && req.object.is_some() {
-        MemoryType::Semantic
-    } else {
-        MemoryType::Episodic
+    match req.memory_type {
+        Some(t) => t,
+        None if req.subject.is_some() && req.predicate.is_some() && req.object.is_some() => {
+            MemoryType::Semantic
+        }
+        None => MemoryType::Episodic,
     }
 }
 
@@ -284,9 +332,10 @@ fn validate_store_request(req: &StoreRequest, memory_type: MemoryType) -> Result
             }
         }
         MemoryType::Semantic => {
-            if req.subject.is_none() || req.predicate.is_none() || req.object.is_none() {
+            let non_empty = |opt: &Option<String>| opt.as_deref().is_some_and(|s| !s.is_empty());
+            if !non_empty(&req.subject) || !non_empty(&req.predicate) || !non_empty(&req.object) {
                 return Err(CoreError::Validation(
-                    "semantic memory requires subject, predicate, and object".into(),
+                    "semantic memory requires non-empty subject, predicate, and object".into(),
                 ));
             }
         }

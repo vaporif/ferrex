@@ -27,7 +27,6 @@ impl QdrantSidecar {
         let data_dir = ferrex_dir.join("qdrant-data");
         let config_path = ferrex_dir.join("qdrant-config.yaml");
 
-        // Check existing PID
         if let Some(existing_pid) = read_pid(&pid_file) {
             if is_process_alive(existing_pid) {
                 tracing::info!(pid = existing_pid, "reusing existing Qdrant process");
@@ -49,7 +48,6 @@ impl QdrantSidecar {
             )));
         }
 
-        // Write config
         fs::create_dir_all(&data_dir)
             .map_err(|e| StoreError::Sidecar(format!("failed to create qdrant-data: {e}")))?;
         let http_port = port - 1;
@@ -60,7 +58,6 @@ impl QdrantSidecar {
         fs::write(&config_path, config)
             .map_err(|e| StoreError::Sidecar(format!("failed to write qdrant config: {e}")))?;
 
-        // Spawn Qdrant
         tracing::info!(bin = bin, port = port, "starting Qdrant sidecar");
         let child = Command::new(bin)
             .arg("--config-path")

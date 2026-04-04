@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use ferrex_embed::ModelTier;
+use ferrex_embed::{ModelTier, RerankerTier};
 use ferrex_store::{Memory, MemoryType};
 use serde::Serialize;
 
@@ -11,6 +11,7 @@ pub struct FerrexConfig {
     pub qdrant_bin: String,
     pub qdrant_port: u16,
     pub model_tier: ModelTier,
+    pub reranker_tier: RerankerTier,
     pub namespace: String,
     pub db_path: PathBuf,
 }
