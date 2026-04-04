@@ -43,30 +43,52 @@ impl<M: MetadataStore> EntityResolver<'_, M> {
             return Err(CoreError::Validation("empty entity name".to_string()));
         }
 
-        // Stage 1: exact match (canonical name + aliases)
-        if let Some(entity) = self.metadata_store.get_entity_by_name(&normalized).await? {
+        if let Some(entity) = self.match_exact(&normalized).await? {
             return Ok(entity);
         }
 
-        // Stage 2: fuzzy match (Jaro-Winkler)
-        if let Some((entity, _score)) =
-            best_fuzzy_match(&normalized, all_entities, FUZZY_MATCH_THRESHOLD)
-        {
-            self.metadata_store
-                .add_entity_alias(&entity.id, &normalized)
-                .await?;
+        if let Some(entity) = self.match_fuzzy(&normalized, all_entities).await? {
             return Ok(entity);
         }
 
-        // Stage 3: embedding similarity > 0.92
-        let embedding = self.embedder.embed(&normalized).await?;
+        self.match_embedding_or_create(&normalized, namespace, all_entities)
+            .await
+    }
+
+    async fn match_exact(&self, normalized: &str) -> Result<Option<Entity>, CoreError> {
+        Ok(self.metadata_store.get_entity_by_name(normalized).await?)
+    }
+
+    async fn match_fuzzy(
+        &self,
+        normalized: &str,
+        all_entities: &[Entity],
+    ) -> Result<Option<Entity>, CoreError> {
+        let Some((entity, _score)) =
+            best_fuzzy_match(normalized, all_entities, FUZZY_MATCH_THRESHOLD)
+        else {
+            return Ok(None);
+        };
+        self.metadata_store
+            .add_entity_alias(&entity.id, normalized)
+            .await?;
+        Ok(Some(entity))
+    }
+
+    async fn match_embedding_or_create(
+        &self,
+        normalized: &str,
+        namespace: &str,
+        all_entities: &[Entity],
+    ) -> Result<Entity, CoreError> {
+        let embedding = self.embedder.embed(normalized).await?;
         let filter = Filter::must([Condition::matches(
             ferrex_store::POINT_TYPE_FIELD,
             ferrex_store::POINT_TYPE_ENTITY.to_string(),
         )]);
         let results = self
             .vector_store
-            .search(namespace, embedding.clone(), 1, Some(filter))
+            .search(namespace, embedding.clone(), normalized, 1, Some(filter))
             .await?;
 
         if let Some((point_id, score)) = results.first() {
@@ -74,22 +96,21 @@ impl<M: MetadataStore> EntityResolver<'_, M> {
                 && let Some(entity) = find_entity_by_point_id(all_entities, point_id)
             {
                 self.metadata_store
-                    .add_entity_alias(&entity.id, &normalized)
+                    .add_entity_alias(&entity.id, normalized)
                     .await?;
                 return Ok(entity);
             }
 
-            // Stage 4: ambiguous (0.80-0.92) — create separate entity, don't cross-link
+            // Ambiguous range — create separate entity rather than cross-linking
             if *score > AMBIGUOUS_MATCH_THRESHOLD {
-                let new_entity = self.create_entity(&normalized).await?;
+                let new_entity = self.create_entity(normalized).await?;
                 self.upsert_entity_point(&new_entity, namespace, embedding)
                     .await?;
                 return Ok(new_entity);
             }
         }
 
-        // Stage 5: no match — create new
-        let new_entity = self.create_entity(&normalized).await?;
+        let new_entity = self.create_entity(normalized).await?;
         self.upsert_entity_point(&new_entity, namespace, embedding)
             .await?;
         Ok(new_entity)
@@ -128,7 +149,7 @@ impl<M: MetadataStore> EntityResolver<'_, M> {
         .map_err(|e| CoreError::Validation(e.to_string()))?;
 
         self.vector_store
-            .upsert(namespace, id, embedding, payload)
+            .upsert(namespace, id, embedding, &entity.name, payload)
             .await?;
         Ok(())
     }
@@ -154,7 +175,7 @@ fn best_fuzzy_match(name: &str, entities: &[Entity], threshold: f64) -> Option<(
                 .map(move |candidate| (entity, strsim::jaro_winkler(candidate, name)))
         })
         .filter(|(_, score)| *score > threshold)
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|(_, a), (_, b)| a.total_cmp(b))
         .map(|(entity, score)| (entity.clone(), score))
 }
 
@@ -162,7 +183,6 @@ fn find_entity_by_point_id(entities: &[Entity], point_id: &str) -> Option<Entity
     entities.iter().find(|e| e.id == point_id).cloned()
 }
 
-/// Stages 1-2 only, for unit testing without Qdrant.
 #[cfg(test)]
 async fn resolve_entities_stages_1_2<M: MetadataStore>(
     metadata_store: &M,
@@ -175,13 +195,11 @@ async fn resolve_entities_stages_1_2<M: MetadataStore>(
             return Err(CoreError::Validation("empty entity name".to_string()));
         }
 
-        // Stage 1
         if let Some(entity) = metadata_store.get_entity_by_name(&normalized).await? {
             resolved.push(entity);
             continue;
         }
 
-        // Stage 2
         let all_entities = metadata_store.get_all_entities().await?;
         if let Some((entity, _)) =
             best_fuzzy_match(&normalized, &all_entities, FUZZY_MATCH_THRESHOLD)
@@ -193,7 +211,6 @@ async fn resolve_entities_stages_1_2<M: MetadataStore>(
             continue;
         }
 
-        // Create new (stages 3-5 need Qdrant)
         let now = Utc::now();
         let entity = Entity {
             id: Uuid::now_v7().to_string(),

@@ -59,7 +59,6 @@ pub trait MetadataStore: Send + Sync {
         limit: usize,
     ) -> impl Future<Output = Result<Vec<Memory>, StoreError>> + Send;
 
-    // --- Phase 3 stubs ---
     fn delete_memory(&self, _id: &str) -> impl Future<Output = Result<bool, StoreError>> + Send {
         async { Ok(false) }
     }
@@ -84,7 +83,6 @@ pub trait MetadataStore: Send + Sync {
         async { Ok(()) }
     }
 
-    // --- Phase 4 stubs ---
     fn get_stale_memories(
         &self,
         _threshold_days: u64,
