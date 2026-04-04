@@ -14,7 +14,7 @@ const QDRANT_CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 const DENSE_VECTOR: &str = "dense";
 const SPARSE_VECTOR: &str = "sparse";
 const BM25_TOKENIZER: &str = "Qdrant/bm25";
-const MIN_PREFETCH_LIMIT: u64 = 30;
+const MIN_PREFETCH_LIMIT: u64 = 20;
 
 pub struct VectorStore {
     client: Qdrant,
@@ -250,7 +250,7 @@ mod tests {
             "memory_id": id.to_string(),
             "memory_type": "episodic",
             "namespace": ns,
-            "content": content,
+            "searchable_text": content,
             "entities": Vec::<String>::new(),
             "created_at": "2026-01-01T00:00:00Z",
             crate::POINT_TYPE_FIELD: crate::POINT_TYPE_MEMORY,
@@ -309,7 +309,7 @@ mod tests {
             "memory_id": id.to_string(),
             "memory_type": "episodic",
             "namespace": ns,
-            "content": content,
+            "searchable_text": content,
             "entities": Vec::<String>::new(),
             "created_at": "2026-01-01T00:00:00Z",
             crate::POINT_TYPE_FIELD: crate::POINT_TYPE_MEMORY,

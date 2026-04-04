@@ -199,14 +199,16 @@ impl Reranker {
             let results = model
                 .rerank(query.as_str(), doc_refs.as_slice(), false, None)
                 .map_err(|e| EmbedError::Rerank(e.to_string()))?;
-            Ok(results
+            let mut mapped: Vec<RerankResult> = results
                 .into_iter()
-                .take(top_n)
                 .map(|r| RerankResult {
                     index: r.index,
                     score: r.score,
                 })
-                .collect())
+                .collect();
+            mapped.sort_by(|a, b| b.score.total_cmp(&a.score));
+            mapped.truncate(top_n);
+            Ok(mapped)
         })
         .await
         .map_err(|e| EmbedError::Rerank(e.to_string()))?

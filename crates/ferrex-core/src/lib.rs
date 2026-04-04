@@ -145,7 +145,7 @@ impl MemoryService {
             "memory_id": id.to_string(),
             "memory_type": memory_type.as_str(),
             "namespace": namespace,
-            "content": embed_text,
+            "searchable_text": embed_text,
             "entities": &memory.entities,
             "created_at": now.to_rfc3339(),
             ferrex_store::POINT_TYPE_FIELD: ferrex_store::POINT_TYPE_MEMORY,
