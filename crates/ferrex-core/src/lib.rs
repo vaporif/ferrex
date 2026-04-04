@@ -5,8 +5,7 @@ mod types;
 
 pub use entity::EntityResolver;
 pub use error::CoreError;
-pub use retrieval::compute_recency_boost;
-use retrieval::age_in_days;
+pub use retrieval::{age_in_days, compute_recency_boost};
 pub use types::*;
 
 pub use ferrex_embed::{ModelTier, RerankerTier};
@@ -237,7 +236,10 @@ impl MemoryService {
         let doc_texts: Vec<String> = ordered.iter().map(|m| m.searchable_text()).collect();
         let doc_refs: Vec<&str> = doc_texts.iter().map(String::as_str).collect();
 
-        let reranked = self.reranker.rerank(&req.query, &doc_refs, limit).await?;
+        let reranked = self
+            .reranker
+            .rerank(&req.query, &doc_refs, candidate_pool_size)
+            .await?;
 
         let mut scored: Vec<(Memory, f32)> = reranked
             .iter()
