@@ -158,8 +158,8 @@ impl VectorStore {
         let name = Self::collection_name(namespace)?;
         let prefetch_limit = (limit as u64).max(MIN_PREFETCH_LIMIT);
 
-        let (dense_filter, sparse_filter) =
-            filter.map_or((None, None), |f| (Some(f.clone()), Some(f)));
+        let dense_filter = filter.clone();
+        let sparse_filter = filter;
 
         let dense_prefetch = {
             let mut b = PrefetchQueryBuilder::default()

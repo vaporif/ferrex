@@ -241,7 +241,7 @@ impl MemoryService {
 
         let reranked = self
             .reranker
-            .rerank(&req.query, &doc_refs, candidate_pool_size)
+            .rerank(&req.query, &doc_refs, doc_refs.len())
             .await?;
 
         let now = Utc::now();
