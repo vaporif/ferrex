@@ -63,6 +63,8 @@
       pkg = craneLib.buildPackage (commonArgs
         // {
           inherit cargoArtifacts;
+          # embed tests need ONNX runtime + model downloads; covered by CI coverage job
+          cargoTestExtraArgs = "--workspace --exclude ferrex-embed";
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [pkgs.openssl];
