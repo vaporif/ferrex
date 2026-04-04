@@ -9,7 +9,6 @@ use crate::CoreError;
 
 const FUZZY_MATCH_THRESHOLD: f64 = 0.85;
 const EMBEDDING_MATCH_THRESHOLD: f32 = 0.92;
-const AMBIGUOUS_MATCH_THRESHOLD: f32 = 0.80;
 
 pub struct EntityResolver<'a, M: MetadataStore> {
     pub metadata_store: &'a M,
@@ -91,23 +90,14 @@ impl<M: MetadataStore> EntityResolver<'_, M> {
             .search(namespace, embedding.clone(), normalized, 1, Some(filter))
             .await?;
 
-        if let Some((point_id, score)) = results.first() {
-            if *score > EMBEDDING_MATCH_THRESHOLD
-                && let Some(entity) = find_entity_by_point_id(all_entities, point_id)
-            {
-                self.metadata_store
-                    .add_entity_alias(&entity.id, normalized)
-                    .await?;
-                return Ok(entity);
-            }
-
-            // Ambiguous range — create separate entity rather than cross-linking
-            if *score > AMBIGUOUS_MATCH_THRESHOLD {
-                let new_entity = self.create_entity(normalized).await?;
-                self.upsert_entity_point(&new_entity, namespace, embedding)
-                    .await?;
-                return Ok(new_entity);
-            }
+        if let Some((point_id, score)) = results.first()
+            && *score > EMBEDDING_MATCH_THRESHOLD
+            && let Some(entity) = find_entity_by_point_id(all_entities, point_id)
+        {
+            self.metadata_store
+                .add_entity_alias(&entity.id, normalized)
+                .await?;
+            return Ok(entity);
         }
 
         let new_entity = self.create_entity(normalized).await?;

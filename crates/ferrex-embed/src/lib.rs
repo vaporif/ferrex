@@ -149,18 +149,6 @@ impl Embedder {
         .map_err(|e| EmbedError::Embed(e.to_string()))?
     }
 
-    pub async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbedError> {
-        let model = Arc::clone(&self.model);
-        tokio::task::spawn_blocking(move || {
-            let mut model = model.lock().expect("embedding model lock poisoned");
-            model
-                .embed(texts, None)
-                .map_err(|e| EmbedError::Embed(e.to_string()))
-        })
-        .await
-        .map_err(|e| EmbedError::Embed(e.to_string()))?
-    }
-
     pub const fn dimension(&self) -> usize {
         self.tier.dimension()
     }
@@ -227,25 +215,6 @@ mod tests {
 
         let embedding = embedder.embed("hello world").await.expect("embed failed");
         assert_eq!(embedding.len(), 384);
-    }
-
-    #[tokio::test]
-    #[ignore = "requires ONNX runtime"]
-    async fn test_embed_batch() {
-        let embedder = Embedder::new(ModelTier::Small).expect("failed to create embedder");
-        let texts = vec![
-            "first document".to_owned(),
-            "second document".to_owned(),
-            "third document".to_owned(),
-        ];
-        let embeddings = embedder
-            .embed_batch(texts)
-            .await
-            .expect("batch embed failed");
-        assert_eq!(embeddings.len(), 3);
-        for emb in &embeddings {
-            assert_eq!(emb.len(), 384);
-        }
     }
 
     #[tokio::test]

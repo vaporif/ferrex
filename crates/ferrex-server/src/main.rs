@@ -77,11 +77,11 @@ struct RecallParams {
     namespace: Option<String>,
     /// Max results (default 10).
     limit: Option<usize>,
-    /// Include stale memories (Phase 4).
+    /// Include stale memories (not yet implemented).
     include_stale: Option<bool>,
-    /// Include invalidated memories (Phase 4).
+    /// Include invalidated memories (not yet implemented).
     include_invalidated: Option<bool>,
-    /// Time range filter (Phase 2).
+    /// Time range filter (not yet implemented).
     time_range: Option<McpTimeRange>,
 }
 
