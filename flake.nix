@@ -55,12 +55,17 @@
           ];
       };
 
-      cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+      cargoArtifacts = craneLib.buildDepsOnly (commonArgs
+        // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [pkgs.openssl];
+        });
 
       pkg = craneLib.buildPackage (commonArgs
         // {
           inherit cargoArtifacts;
-          cargoTestExtraArgs = "--workspace --exclude ferrex-embed";
+        }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [pkgs.openssl];
         });
 
       toolchain = fenixPkgs.stable.withComponents [
