@@ -248,7 +248,7 @@ impl MemoryService {
                 let recency = compute_recency_boost(memory.memory_type, age_in_days(memory.created_at));
                 #[allow(clippy::cast_possible_truncation)]
                 let final_score = (f64::from(r.score) * recency) as f32;
-                Some(((*memory).clone(), final_score))
+                Some((Memory::clone(memory), final_score))
             })
             .collect();
 
