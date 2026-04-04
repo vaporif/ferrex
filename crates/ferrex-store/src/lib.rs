@@ -87,7 +87,7 @@ impl Memory {
             .flatten()
             .collect::<Vec<_>>()
             .join(" "),
-            _ => self.content.as_deref().unwrap_or_default().to_string(),
+            _ => self.content.clone().unwrap_or_default(),
         }
     }
 }
