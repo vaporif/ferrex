@@ -101,8 +101,7 @@ impl<M: MetadataStore> EntityResolver<'_, M> {
         }
 
         let new_entity = self.create_entity(normalized).await?;
-        self.upsert_entity_point(&new_entity, namespace, embedding)
-            .await?;
+        self.upsert_entity_point(&new_entity, namespace, embedding).await?;
         Ok(new_entity)
     }
 

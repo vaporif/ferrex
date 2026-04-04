@@ -219,6 +219,35 @@ fn get_entity_names_for_memory(
     Ok(names)
 }
 
+fn get_entity_names_for_memories(
+    conn: &Connection,
+    memory_ids: &[String],
+) -> Result<HashMap<String, Vec<String>>, rusqlite::Error> {
+    if memory_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders: Vec<String> = (1..=memory_ids.len()).map(|i| format!("?{i}")).collect();
+    let sql = format!(
+        "SELECT me.memory_id, e.name FROM entities e
+         INNER JOIN memory_entities me ON e.id = me.entity_id
+         WHERE me.memory_id IN ({})",
+        placeholders.join(", ")
+    );
+    let params: Vec<&dyn rusqlite::types::ToSql> = memory_ids
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(params.as_slice())?;
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    while let Some(row) = rows.next()? {
+        let mem_id: String = row.get(0)?;
+        let name: String = row.get(1)?;
+        map.entry(mem_id).or_default().push(name);
+    }
+    Ok(map)
+}
+
 #[allow(clippy::needless_pass_by_value)]
 impl MetadataStore for SqliteStore {
     async fn insert_memory(&self, memory: &Memory) -> Result<(), StoreError> {
@@ -272,6 +301,7 @@ impl MetadataStore for SqliteStore {
         }
         let ids = ids.to_vec();
         self.with_conn(move |conn| {
+            let entity_map = get_entity_names_for_memories(conn, &ids)?;
             let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{i}")).collect();
             let sql = format!(
                 "SELECT * FROM memories WHERE id IN ({})",
@@ -286,7 +316,7 @@ impl MetadataStore for SqliteStore {
             let mut memories = Vec::new();
             while let Some(row) = rows.next()? {
                 let mem_id: String = row.get("id")?;
-                let entities = get_entity_names_for_memory(conn, &mem_id)?;
+                let entities = entity_map.get(&mem_id).cloned().unwrap_or_default();
                 memories.push(row_to_memory(row, entities)?);
             }
             Ok(memories)
@@ -342,23 +372,14 @@ impl MetadataStore for SqliteStore {
     async fn get_entity_by_name(&self, name: &str) -> Result<Option<Entity>, StoreError> {
         let name = name.to_string();
         self.with_conn(move |conn| {
-            let mut stmt = conn.prepare("SELECT * FROM entities WHERE name = ?1")?;
+            let mut stmt = conn.prepare(
+                "SELECT * FROM entities WHERE name = ?1 OR aliases LIKE '%' || ?1 || '%'",
+            )?;
             let mut rows = stmt.query(rusqlite::params![name])?;
-            if let Some(row) = rows.next()? {
-                return Ok(Some(row_to_entity(row)?));
+            match rows.next()? {
+                Some(row) => Ok(Some(row_to_entity(row)?)),
+                None => Ok(None),
             }
-
-            let mut stmt = conn.prepare("SELECT * FROM entities")?;
-            let mut rows = stmt.query([])?;
-            while let Some(row) = rows.next()? {
-                let aliases_str: String = row.get("aliases")?;
-                let aliases: Vec<String> = serde_json::from_str(&aliases_str).unwrap_or_default();
-                if aliases.iter().any(|a| a == &name) {
-                    return Ok(Some(row_to_entity(row)?));
-                }
-            }
-
-            Ok(None)
         })
         .await
     }
@@ -451,13 +472,20 @@ impl MetadataStore for SqliteStore {
             let mut stmt =
                 conn.prepare("SELECT * FROM memories ORDER BY created_at DESC LIMIT ?1")?;
             let mut rows = stmt.query(rusqlite::params![limit])?;
-            let mut memories = Vec::new();
+            let mut raw_memories = Vec::new();
             while let Some(row) = rows.next()? {
                 let mem_id: String = row.get("id")?;
-                let entities = get_entity_names_for_memory(conn, &mem_id)?;
-                memories.push(row_to_memory(row, entities)?);
+                raw_memories.push((mem_id, row_to_memory(row, vec![])?));
             }
-            Ok(memories)
+            let ids: Vec<String> = raw_memories.iter().map(|(id, _)| id.clone()).collect();
+            let entity_map = get_entity_names_for_memories(conn, &ids)?;
+            Ok(raw_memories
+                .into_iter()
+                .map(|(id, mut mem)| {
+                    mem.entities = entity_map.get(&id).cloned().unwrap_or_default();
+                    mem
+                })
+                .collect())
         })
         .await
     }

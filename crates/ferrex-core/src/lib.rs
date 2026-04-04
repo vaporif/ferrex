@@ -300,7 +300,7 @@ impl MemoryService {
         })
     }
 
-    pub const fn into_parts(mut self) -> (Self, Option<QdrantSidecar>) {
+    pub fn into_parts(mut self) -> (Self, Option<QdrantSidecar>) {
         let sidecar = self.sidecar.take();
         (self, sidecar)
     }
