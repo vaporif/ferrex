@@ -9,6 +9,8 @@ pub use types::*;
 pub use ferrex_embed::ModelTier;
 pub use ferrex_store::{Entity, Memory, MemoryType};
 
+use std::collections::HashMap;
+
 use chrono::Utc;
 use ferrex_embed::Embedder;
 use ferrex_store::{MetadataStore, QdrantSidecar, SqliteStore, VectorStore};
@@ -18,6 +20,7 @@ use uuid::Uuid;
 
 const MAX_CONTENT_LENGTH: usize = 4096;
 const DEFAULT_RECALL_LIMIT: usize = 10;
+const STATS_RECENT_COUNT: usize = 5;
 
 pub struct MemoryService {
     embedder: Embedder,
@@ -52,10 +55,10 @@ impl MemoryService {
         let model_key = "embedding_model";
         let current_model = config.model_tier.model_name();
         let stored_model = metadata_store.get_metadata(model_key).await?;
-        if let Some(stored_model) = stored_model {
-            if stored_model != current_model {
+        if let Some(stored) = stored_model {
+            if stored != current_model {
                 return Err(CoreError::Validation(format!(
-                    "embedding model mismatch: stored={stored_model}, current={current_model}. \
+                    "embedding model mismatch: stored={stored}, current={current_model}. \
                      Changing models would corrupt vector similarity. \
                      Use the same model or start with a fresh database."
                 )));
@@ -98,24 +101,9 @@ impl MemoryService {
 
         let embedding = self.embedder.embed(&embed_text).await?;
 
-        let payload = Payload::try_from(serde_json::json!({
-            "memory_id": id.to_string(),
-            "memory_type": memory_type.as_str(),
-            "namespace": namespace,
-            "content": embed_text,
-            "entities": &req.entities,
-            "created_at": now.to_rfc3339(),
-            "point_type": "memory",
-        }))
-        .map_err(|e| CoreError::Validation(e.to_string()))?;
-
-        self.vector_store
-            .upsert(namespace, id, embedding, payload)
-            .await?;
-
         // Entity resolution
-        let resolved_entity_names = if req.entities.is_empty() {
-            (vec![], vec![])
+        let resolved_entities = if req.entities.is_empty() {
+            vec![]
         } else {
             self.vector_store.ensure_collection(namespace).await?;
             let resolver = EntityResolver {
@@ -123,10 +111,9 @@ impl MemoryService {
                 vector_store: &self.vector_store,
                 embedder: &self.embedder,
             };
-            let resolved = resolver.resolve(&req.entities, namespace).await?;
-            let names: Vec<String> = resolved.iter().map(|e| e.name.clone()).collect();
-            (resolved, names)
+            resolver.resolve(&req.entities, namespace).await?
         };
+        let entity_names: Vec<String> = resolved_entities.iter().map(|e| e.name.clone()).collect();
 
         let memory = Memory {
             id: id.to_string(),
@@ -139,7 +126,7 @@ impl MemoryService {
             confidence,
             source: req.source,
             context: req.context,
-            entities: resolved_entity_names.1,
+            entities: entity_names,
             created_at: now,
             updated_at: now,
             t_valid: None,
@@ -149,13 +136,29 @@ impl MemoryService {
             access_count: 0,
         };
 
+        // Insert metadata first (easier to roll back) before vector upsert
         self.metadata_store.insert_memory(&memory).await?;
 
-        for entity in &resolved_entity_names.0 {
+        for entity in &resolved_entities {
             self.metadata_store
                 .link_memory_entity(&memory.id, &entity.id)
                 .await?;
         }
+
+        let payload = Payload::try_from(serde_json::json!({
+            "memory_id": id.to_string(),
+            "memory_type": memory_type.as_str(),
+            "namespace": namespace,
+            "content": embed_text,
+            "entities": &memory.entities,
+            "created_at": now.to_rfc3339(),
+            ferrex_store::POINT_TYPE_FIELD: ferrex_store::POINT_TYPE_MEMORY,
+        }))
+        .map_err(|e| CoreError::Validation(e.to_string()))?;
+
+        self.vector_store
+            .upsert(namespace, id, embedding, payload)
+            .await?;
 
         Ok(memory)
     }
@@ -166,7 +169,10 @@ impl MemoryService {
 
         let embedding = self.embedder.embed(&req.query).await?;
 
-        let mut must_conditions = vec![Condition::matches("point_type", "memory".to_string())];
+        let mut must_conditions = vec![Condition::matches(
+            ferrex_store::POINT_TYPE_FIELD,
+            ferrex_store::POINT_TYPE_MEMORY.to_string(),
+        )];
 
         if let Some(ref types) = req.types {
             let type_strings: Vec<String> = types.iter().map(|t| t.as_str().to_string()).collect();
@@ -199,19 +205,19 @@ impl MemoryService {
 
         self.metadata_store.update_last_accessed(&ids).await?;
 
-        let mut paired: Vec<(Memory, f32)> = Vec::new();
-        for (id, score) in &results {
-            if let Some(mem) = memories.iter().find(|m| m.id == *id) {
-                paired.push((mem.clone(), *score));
-            }
-        }
+        let memory_map: HashMap<&str, &Memory> =
+            memories.iter().map(|m| (m.id.as_str(), m)).collect();
+        let paired: Vec<(Memory, f32)> = results
+            .iter()
+            .filter_map(|(id, score)| memory_map.get(id.as_str()).map(|m| ((*m).clone(), *score)))
+            .collect();
 
         Ok(paired)
     }
 
     pub async fn stats(&self, _req: StatsRequest) -> Result<StatsResponse, CoreError> {
         let total = self.metadata_store.memory_count().await?;
-        let recent = self.metadata_store.recent_memories(5).await?;
+        let recent = self.metadata_store.recent_memories(STATS_RECENT_COUNT).await?;
         Ok(StatsResponse {
             total_memories: total,
             recent_memories: recent,
@@ -243,16 +249,15 @@ impl MemoryService {
         })
     }
 
-    pub fn shutdown(&mut self) {
-        if let Some(ref mut sc) = self.sidecar {
-            sc.shutdown();
-        }
+    pub const fn into_parts(mut self) -> (Self, Option<QdrantSidecar>) {
+        let sidecar = self.sidecar.take();
+        (self, sidecar)
     }
 }
 
 const fn detect_memory_type(req: &StoreRequest) -> MemoryType {
-    if let Some(ref t) = req.memory_type {
-        return *t;
+    if let Some(t) = req.memory_type {
+        return t;
     }
     if req.subject.is_some() && req.predicate.is_some() && req.object.is_some() {
         MemoryType::Semantic
@@ -264,22 +269,21 @@ const fn detect_memory_type(req: &StoreRequest) -> MemoryType {
 fn validate_store_request(req: &StoreRequest, memory_type: MemoryType) -> Result<(), CoreError> {
     match memory_type {
         MemoryType::Episodic | MemoryType::Procedural => {
-            let content = req.content.as_deref().unwrap_or("");
-            if content.is_empty() {
+            let Some(content) = req.content.as_deref().filter(|c| !c.is_empty()) else {
                 return Err(CoreError::Validation(format!(
                     "{memory_type} memory requires content"
                 )));
-            }
+            };
             if content.len() > MAX_CONTENT_LENGTH {
                 return Err(CoreError::Validation(format!(
-                    "content exceeds {MAX_CONTENT_LENGTH} character limit"
+                    "content exceeds {MAX_CONTENT_LENGTH} byte limit"
                 )));
             }
         }
         MemoryType::Semantic => {
             if req.subject.is_none() || req.predicate.is_none() || req.object.is_none() {
                 return Err(CoreError::Validation(
-                    "semantic memory requires subject, predicate, and object".to_string(),
+                    "semantic memory requires subject, predicate, and object".into(),
                 ));
             }
         }

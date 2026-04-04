@@ -10,4 +10,6 @@ pub enum StoreError {
     NotFound(String),
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+    #[error("task join error: {0}")]
+    TaskJoin(String),
 }

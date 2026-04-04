@@ -35,8 +35,6 @@ struct Cli {
     db_path: Option<PathBuf>,
 }
 
-// --- MCP param types (server-owned, derive JsonSchema for MCP schema generation) ---
-
 #[derive(Deserialize, JsonSchema)]
 struct StoreParams {
     /// The memory content. Required for episodic and procedural memories.
@@ -114,8 +112,6 @@ struct StatsParams {
     detail: Option<bool>,
 }
 
-// --- Server handler ---
-
 #[derive(Clone)]
 struct FerrexServer {
     service: Arc<MemoryService>,
@@ -180,11 +176,15 @@ impl FerrexServer {
         description = "Search memories by semantic similarity. Returns the most relevant memories matching your query. Filter by type or entity names. Use this when you need to remember something."
     )]
     async fn recall(&self, Parameters(p): Parameters<RecallParams>) -> Result<String, ErrorData> {
-        let types = p.types.map(|ts| {
-            ts.iter()
-                .filter_map(|s| s.parse::<ferrex_core::MemoryType>().ok())
-                .collect()
-        });
+        let types = p
+            .types
+            .map(|ts| {
+                ts.iter()
+                    .map(|s| s.parse::<ferrex_core::MemoryType>())
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()
+            .map_err(|e| ErrorData::invalid_params(e, None))?;
 
         let req = RecallRequest {
             query: p.query,
@@ -293,16 +293,26 @@ fn main() -> eyre::Result<()> {
         .build()?
         .block_on(async {
             let service = MemoryService::from_config(config).await?;
+            let (service, mut sidecar) = service.into_parts();
             let server = FerrexServer::new(service);
             let (stdin, stdout) = stdio();
             let running = server
                 .serve((stdin, stdout))
                 .await
                 .map_err(|e| eyre::eyre!("MCP server error: {e}"))?;
-            running
-                .waiting()
-                .await
-                .map_err(|e| eyre::eyre!("MCP server error: {e}"))?;
+
+            tokio::select! {
+                result = running.waiting() => {
+                    result.map_err(|e| eyre::eyre!("MCP server error: {e}"))?;
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("received SIGINT, shutting down");
+                }
+            }
+
+            if let Some(ref mut sc) = sidecar {
+                sc.shutdown();
+            }
             Ok(())
         })
 }

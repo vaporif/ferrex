@@ -8,6 +8,8 @@ use uuid::Uuid;
 
 use crate::StoreError;
 
+const QDRANT_CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 pub struct VectorStore {
     client: Qdrant,
     dimension: usize,
@@ -16,18 +18,27 @@ pub struct VectorStore {
 impl VectorStore {
     pub fn new(url: &str, dimension: usize) -> Result<Self, StoreError> {
         let client = Qdrant::from_url(url)
-            .timeout(std::time::Duration::from_secs(3))
+            .timeout(QDRANT_CLIENT_TIMEOUT)
             .build()
             .map_err(|e| StoreError::Qdrant(e.to_string()))?;
         Ok(Self { client, dimension })
     }
 
-    fn collection_name(namespace: &str) -> String {
-        format!("ferrex_{namespace}")
+    fn collection_name(namespace: &str) -> Result<String, StoreError> {
+        if namespace.is_empty()
+            || !namespace
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(StoreError::Qdrant(format!(
+                "invalid namespace: {namespace:?} (only alphanumeric, underscore, hyphen allowed)"
+            )));
+        }
+        Ok(format!("ferrex_{namespace}"))
     }
 
     pub async fn ensure_collection(&self, namespace: &str) -> Result<(), StoreError> {
-        let name = Self::collection_name(namespace);
+        let name = Self::collection_name(namespace)?;
 
         if self
             .client
@@ -45,7 +56,7 @@ impl VectorStore {
             .await
             .map_err(|e| StoreError::Qdrant(e.to_string()))?;
 
-        for field in ["memory_type", "namespace", "entities", "point_type"] {
+        for field in ["memory_type", "namespace", "entities", crate::POINT_TYPE_FIELD] {
             self.client
                 .create_field_index(CreateFieldIndexCollectionBuilder::new(
                     &name,
@@ -66,7 +77,7 @@ impl VectorStore {
         vector: Vec<f32>,
         payload: Payload,
     ) -> Result<(), StoreError> {
-        let name = Self::collection_name(namespace);
+        let name = Self::collection_name(namespace)?;
         let point = PointStruct::new(id.to_string(), vector, payload);
         self.client
             .upsert_points(UpsertPointsBuilder::new(&name, vec![point]).wait(true))
@@ -82,7 +93,7 @@ impl VectorStore {
         limit: usize,
         filter: Option<Filter>,
     ) -> Result<Vec<(String, f32)>, StoreError> {
-        let name = Self::collection_name(namespace);
+        let name = Self::collection_name(namespace)?;
         let mut builder = QueryPointsBuilder::new(&name)
             .query(vector)
             .limit(limit as u64)
@@ -113,7 +124,7 @@ impl VectorStore {
     }
 
     pub async fn delete(&self, namespace: &str, id: Uuid) -> Result<(), StoreError> {
-        let name = Self::collection_name(namespace);
+        let name = Self::collection_name(namespace)?;
         self.client
             .delete_points(
                 DeletePointsBuilder::new(&name)
@@ -160,13 +171,13 @@ mod tests {
             "content": "test memory",
             "entities": Vec::<String>::new(),
             "created_at": "2026-01-01T00:00:00Z",
-            "point_type": "memory",
+            crate::POINT_TYPE_FIELD: crate::POINT_TYPE_MEMORY,
         }))
         .unwrap();
 
         store.upsert(ns, id, test_vector(), payload).await.unwrap();
 
-        let filter = Filter::must([Condition::matches("point_type", "memory".to_string())]);
+        let filter = Filter::must([Condition::matches(crate::POINT_TYPE_FIELD, crate::POINT_TYPE_MEMORY.to_string())]);
         let results = store
             .search(ns, test_vector(), 10, Some(filter))
             .await
@@ -183,7 +194,7 @@ mod tests {
 
         let id = Uuid::now_v7();
         let payload = Payload::try_from(serde_json::json!({
-            "point_type": "memory",
+            crate::POINT_TYPE_FIELD: crate::POINT_TYPE_MEMORY,
         }))
         .unwrap();
         store.upsert(ns, id, test_vector(), payload).await.unwrap();

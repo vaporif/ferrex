@@ -97,9 +97,8 @@ impl Embedder {
         .map_err(|e| EmbedError::Embed(e.to_string()))?
     }
 
-    pub async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
+    pub async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbedError> {
         let model = Arc::clone(&self.model);
-        let texts: Vec<String> = texts.to_vec();
         tokio::task::spawn_blocking(move || {
             let mut model = model.lock().expect("embedding model lock poisoned");
             model
@@ -141,7 +140,7 @@ mod tests {
             "third document".to_owned(),
         ];
         let embeddings = embedder
-            .embed_batch(&texts)
+            .embed_batch(texts)
             .await
             .expect("batch embed failed");
         assert_eq!(embeddings.len(), 3);

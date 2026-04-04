@@ -7,6 +7,10 @@ use uuid::Uuid;
 
 use crate::CoreError;
 
+const FUZZY_MATCH_THRESHOLD: f64 = 0.85;
+const EMBEDDING_MATCH_THRESHOLD: f32 = 0.92;
+const AMBIGUOUS_MATCH_THRESHOLD: f32 = 0.80;
+
 pub struct EntityResolver<'a, M: MetadataStore> {
     pub metadata_store: &'a M,
     pub vector_store: &'a VectorStore,
@@ -19,15 +23,23 @@ impl<M: MetadataStore> EntityResolver<'_, M> {
         entity_names: &[String],
         namespace: &str,
     ) -> Result<Vec<Entity>, CoreError> {
-        let mut resolved = Vec::new();
+        let all_entities = self.metadata_store.get_all_entities().await?;
+        let mut resolved = Vec::with_capacity(entity_names.len());
         for name in entity_names {
-            let entity = self.resolve_single(name, namespace).await?;
+            let entity = self
+                .resolve_single(name, namespace, &all_entities)
+                .await?;
             resolved.push(entity);
         }
         Ok(resolved)
     }
 
-    async fn resolve_single(&self, name: &str, namespace: &str) -> Result<Entity, CoreError> {
+    async fn resolve_single(
+        &self,
+        name: &str,
+        namespace: &str,
+        all_entities: &[Entity],
+    ) -> Result<Entity, CoreError> {
         let normalized = normalize(name);
         if normalized.is_empty() {
             return Err(CoreError::Validation("empty entity name".to_string()));
@@ -38,9 +50,10 @@ impl<M: MetadataStore> EntityResolver<'_, M> {
             return Ok(entity);
         }
 
-        // Stage 2: fuzzy match (Jaro-Winkler > 0.85)
-        let all_entities = self.metadata_store.get_all_entities().await?;
-        if let Some((entity, _score)) = best_fuzzy_match(&normalized, &all_entities, 0.85) {
+        // Stage 2: fuzzy match (Jaro-Winkler)
+        if let Some((entity, _score)) =
+            best_fuzzy_match(&normalized, all_entities, FUZZY_MATCH_THRESHOLD)
+        {
             self.metadata_store
                 .add_entity_alias(&entity.id, &normalized)
                 .await?;
@@ -49,15 +62,18 @@ impl<M: MetadataStore> EntityResolver<'_, M> {
 
         // Stage 3: embedding similarity > 0.92
         let embedding = self.embedder.embed(&normalized).await?;
-        let filter = Filter::must([Condition::matches("point_type", "entity".to_string())]);
+        let filter = Filter::must([Condition::matches(
+            ferrex_store::POINT_TYPE_FIELD,
+            ferrex_store::POINT_TYPE_ENTITY.to_string(),
+        )]);
         let results = self
             .vector_store
             .search(namespace, embedding.clone(), 1, Some(filter))
             .await?;
 
         if let Some((point_id, score)) = results.first() {
-            if *score > 0.92
-                && let Some(entity) = find_entity_by_point_id(&all_entities, point_id)
+            if *score > EMBEDDING_MATCH_THRESHOLD
+                && let Some(entity) = find_entity_by_point_id(all_entities, point_id)
             {
                 self.metadata_store
                     .add_entity_alias(&entity.id, &normalized)
@@ -65,16 +81,11 @@ impl<M: MetadataStore> EntityResolver<'_, M> {
                 return Ok(entity);
             }
 
-            // Stage 4: ambiguous (0.80-0.92)
-            if *score > 0.80 {
+            // Stage 4: ambiguous (0.80-0.92) — create separate entity, don't cross-link
+            if *score > AMBIGUOUS_MATCH_THRESHOLD {
                 let new_entity = self.create_entity(&normalized).await?;
                 self.upsert_entity_point(&new_entity, namespace, embedding)
                     .await?;
-                if let Some(near_match) = find_entity_by_point_id(&all_entities, point_id) {
-                    self.metadata_store
-                        .add_entity_alias(&new_entity.id, &near_match.name)
-                        .await?;
-                }
                 return Ok(new_entity);
             }
         }
@@ -113,7 +124,7 @@ impl<M: MetadataStore> EntityResolver<'_, M> {
         let payload = Payload::try_from(serde_json::json!({
             "entity_id": entity.id,
             "name": entity.name,
-            "point_type": "entity",
+            ferrex_store::POINT_TYPE_FIELD: ferrex_store::POINT_TYPE_ENTITY,
             "namespace": namespace,
         }))
         .map_err(|e| CoreError::Validation(e.to_string()))?;
@@ -135,20 +146,18 @@ fn normalize(name: &str) -> String {
 }
 
 fn best_fuzzy_match(name: &str, entities: &[Entity], threshold: f64) -> Option<(Entity, f64)> {
-    let mut best: Option<(Entity, f64)> = None;
-    for entity in entities {
-        let score = strsim::jaro_winkler(&entity.name, name);
-        if score > threshold && best.as_ref().is_none_or(|(_, s)| score > *s) {
-            best = Some((entity.clone(), score));
-        }
-        for alias in &entity.aliases {
-            let score = strsim::jaro_winkler(alias, name);
-            if score > threshold && best.as_ref().is_none_or(|(_, s)| score > *s) {
-                best = Some((entity.clone(), score));
-            }
-        }
-    }
-    best
+    entities
+        .iter()
+        .flat_map(|entity| {
+            let canonical = std::iter::once(&entity.name);
+            let aliases = entity.aliases.iter();
+            canonical
+                .chain(aliases)
+                .map(move |candidate| (entity, strsim::jaro_winkler(candidate, name)))
+        })
+        .filter(|(_, score)| *score > threshold)
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(entity, score)| (entity.clone(), score))
 }
 
 fn find_entity_by_point_id(entities: &[Entity], point_id: &str) -> Option<Entity> {
@@ -176,7 +185,8 @@ async fn resolve_entities_stages_1_2<M: MetadataStore>(
 
         // Stage 2
         let all_entities = metadata_store.get_all_entities().await?;
-        if let Some((entity, _)) = best_fuzzy_match(&normalized, &all_entities, 0.85) {
+        if let Some((entity, _)) = best_fuzzy_match(&normalized, &all_entities, FUZZY_MATCH_THRESHOLD)
+        {
             metadata_store
                 .add_entity_alias(&entity.id, &normalized)
                 .await?;

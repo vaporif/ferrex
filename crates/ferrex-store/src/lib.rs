@@ -9,6 +9,10 @@ pub use metadata::{MetadataStore, SqliteStore};
 pub use sidecar::QdrantSidecar;
 pub use vector::VectorStore;
 
+pub const POINT_TYPE_FIELD: &str = "point_type";
+pub const POINT_TYPE_MEMORY: &str = "memory";
+pub const POINT_TYPE_ENTITY: &str = "entity";
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 

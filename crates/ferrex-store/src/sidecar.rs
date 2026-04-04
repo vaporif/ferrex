@@ -5,6 +5,12 @@ use std::time::Duration;
 
 use crate::StoreError;
 
+const HEALTH_CHECK_CLIENT_TIMEOUT: Duration = Duration::from_secs(2);
+const HEALTH_CHECK_INITIAL_DELAY: Duration = Duration::from_millis(100);
+const HEALTH_CHECK_MAX_TIMEOUT: Duration = Duration::from_secs(5);
+const HEALTH_CHECK_MAX_DELAY: Duration = Duration::from_secs(1);
+const MIN_PORT: u16 = 2;
+
 pub struct QdrantSidecar {
     pid_file: PathBuf,
     process: Option<Child>,
@@ -35,6 +41,12 @@ impl QdrantSidecar {
             }
             tracing::info!(pid = existing_pid, "cleaning stale PID file");
             let _ = fs::remove_file(&pid_file);
+        }
+
+        if port < MIN_PORT {
+            return Err(StoreError::Sidecar(format!(
+                "port must be >= {MIN_PORT} (got {port}), http_port is port - 1"
+            )));
         }
 
         // Write config
@@ -79,12 +91,11 @@ impl QdrantSidecar {
     async fn health_check(&self) -> Result<(), StoreError> {
         let url = self.url();
         let client = qdrant_client::Qdrant::from_url(&url)
-            .timeout(Duration::from_secs(2))
+            .timeout(HEALTH_CHECK_CLIENT_TIMEOUT)
             .build()
             .map_err(|e| StoreError::Sidecar(e.to_string()))?;
 
-        let mut delay = Duration::from_millis(100);
-        let max_total = Duration::from_secs(5);
+        let mut delay = HEALTH_CHECK_INITIAL_DELAY;
         let start = std::time::Instant::now();
 
         loop {
@@ -94,35 +105,31 @@ impl QdrantSidecar {
                     return Ok(());
                 }
                 Err(e) => {
-                    if start.elapsed() > max_total {
+                    if start.elapsed() > HEALTH_CHECK_MAX_TIMEOUT {
                         return Err(StoreError::Sidecar(format!(
-                            "Qdrant health check timed out after 5s: {e}"
+                            "Qdrant health check timed out after {HEALTH_CHECK_MAX_TIMEOUT:?}: {e}"
                         )));
                     }
                     tokio::time::sleep(delay).await;
-                    delay = (delay * 2).min(Duration::from_secs(1));
+                    delay = (delay * 2).min(HEALTH_CHECK_MAX_DELAY);
                 }
             }
         }
     }
 
     pub fn shutdown(&mut self) {
-        if let Some(ref mut child) = self.process {
+        if let Some(mut child) = self.process.take() {
             let _ = child.kill();
             let _ = child.wait();
+            let _ = fs::remove_file(&self.pid_file);
             tracing::info!("Qdrant sidecar stopped");
         }
-        let _ = fs::remove_file(&self.pid_file);
     }
 }
 
 impl Drop for QdrantSidecar {
     fn drop(&mut self) {
-        if let Some(ref mut child) = self.process {
-            let _ = child.kill();
-            let _ = child.try_wait();
-            let _ = fs::remove_file(&self.pid_file);
-        }
+        self.shutdown();
     }
 }
 
