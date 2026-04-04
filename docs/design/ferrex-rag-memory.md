@@ -19,25 +19,49 @@ The goal is not another vector store with an MCP wrapper. It is a memory system 
 
 The landscape (as of April 2026):
 
-| System | Approach | Limitation ferrex solves |
-|---|---|---|
-| **mem0** | LLM-based extraction → vector store | Summarization destroys detail; ~2-3% recall on long contexts |
-| **Hindsight** | 4-network retrieval, Python/FastAPI, Postgres | Heavy Python stack; SQL-join-based graph hits scaling limits |
-| **Cognee** | KG + vector, Python, 30+ connectors | Heavy Python stack, not embeddable |
-| **Zep/Graphiti** | Temporal KG, Neo4j | Zep Cloud killed self-hosted; Graphiti OSS but requires Neo4j |
-| **Letta/MemGPT** | Self-editing memory, agent controls recall | No knowledge graph, no hybrid search |
-| **memory-mcp-rs** | Rust + SQLite KG | No vector search, no embeddings |
-| **A-Mem** | Zettelkasten-style linked notes (NeurIPS 2025) | No hybrid search, no temporal awareness |
-| **Memobase.ai** | MCP-native memory-as-a-service | Cloud dependency, no local-first option |
+### Retrieval-Based Memory Systems
 
-ferrex's unique position: **Rust-native + Qdrant (sidecar or external) + hybrid search (vector + BM25) + temporal validity + staleness safeguards + MCP-native**.
+| System | Approach | ferrex differentiator |
+|---|---|---|
+| **mem0** | LLM-based extraction → vector store | No LLM dependency; preserves original detail |
+| **Hindsight** | 4-network retrieval, Python/FastAPI, Postgres. SOTA on BEAM 10M (64.1%) | Single Rust binary, no Python runtime |
+| **Honcho** | Continual learning with custom reasoning models (Neuromancer). LLM-heavy, cloud-first. 90.4% LongMemEval-S, 40.6% BEAM 10M | LLM-free, local-first. ferrex keeps reasoning in the calling agent, not the server |
+| **Cognee** | KG + vector, Python, 30+ connectors | Lightweight, embeddable, MCP-native |
+| **Zep/Graphiti** | Temporal KG, Neo4j. 71.2% LongMemEval-S | No Neo4j; SQLite + Qdrant sidecar |
+| **Letta/MemGPT** | Self-editing memory, agent controls recall | Hybrid search (vector + BM25), temporal validity |
+| **Supermemory** | MCP-native, ~85% LongMemEval-S (gpt-4o) | Local-first, no cloud dependency, temporal validity |
+| **A-Mem** | Zettelkasten-style linked notes (NeurIPS 2025) | Hybrid search, temporal awareness, staleness safeguards |
+| **Memobase.ai** | MCP-native memory-as-a-service | Local-first, no cloud dependency |
+
+### Compaction-Based Memory (Different Problem Class)
+
+| System | Approach | Why ferrex is complementary, not competing |
+|---|---|---|
+| **Mastra OM** | Two background LLM agents compress conversation into dense observation log. No retrieval. 84.2% LongMemEval-S (gpt-4o), 94.9% (gpt-5-mini) | OM manages intra-session context windows; ferrex provides persistent cross-session queryable memory. OM can't recall facts from a different project or last month — it compresses what's in the current window. The two are complementary |
+
+### Rust MCP Memory Servers
+
+| System | Approach | What ferrex adds |
+|---|---|---|
+| **memory-mcp-rs** | Rust + SQLite KG, FTS5 search | Vector search, BM25, reranking, temporal validity, memory types |
+| **memory-mcp** | Markdown files in git + fastembed | Hybrid search, entity resolution, staleness detection, conflict resolution |
+| **rusty-mcp** | Qdrant + Ollama embeddings | No Ollama dependency, BM25, memory type semantics, temporal awareness |
+| **sqlite-mcp-rs** | SQLite + optional vector/fastembed | Memory-typed API, entity resolution, lifecycle management |
+
+These are thin wrappers — vector store or KG with MCP glue. None combine memory type semantics, temporal validity, staleness detection, entity resolution, conflict detection, hybrid search with server-side RRF, and cross-encoder reranking.
+
+### Benchmark Landscape
+
+LongMemEval-S (~115k tokens) is approaching obsolescence as context windows grow beyond 128k. BEAM at 10M tokens is the emerging stress test where context stuffing is impossible and only real memory architectures survive. Current BEAM 10M leaders: Hindsight (64.1%), Honcho (40.6%).
+
+ferrex's position: **Rust-native + Qdrant (sidecar or external) + hybrid search (vector + BM25) + temporal validity + staleness safeguards + LLM-free + MCP-native**. No published benchmark scores yet — BEAM 10M and LongMemEval evaluation planned post-v1.
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────┐
 │                    MCP Transport                     │
-│              (rmcp, stdio / SSE)                     │
+│              (rmcp, stdio)                            │
 └────────────────────────┬────────────────────────────┘
                          │
 ┌────────────────────────▼────────────────────────────┐
@@ -105,10 +129,7 @@ Records of specific events and interactions. Timestamped, contextual, append-onl
   "content": "user debugged a deadlock in the connection pool by switching to tokio::sync::Semaphore | 2026-04-03 | api-server project | outcome: success",
   "context": { "task": "bug-fix", "project": "api-server", "outcome": "success" },
   "timestamp": "2026-04-03T10:30:00Z",
-  "entities": ["connection-pool", "tokio::sync::Semaphore", "api-server"],
-  "causal_links": [
-    { "predicate": "caused_by", "target": "deadlock bug", "weight": 0.9 }
-  ]
+  "entities": ["connection-pool", "tokio::sync::Semaphore", "api-server"]
 }
 ```
 
@@ -186,11 +207,11 @@ MCP tool descriptions are loaded into the agent's context at session start. They
 1. **Type resolution**: if `type` omitted, auto-detect from provided fields
 2. **Deduplication check**: search existing same-type memories by embedding similarity. If cosine > 0.95 → reject with `"similar memory already exists: {id}"`. Prevents agents from storing the same fact repeatedly with slight rewording.
 3. **Chunking** (if needed): apply type-aware chunking (see Chunking Strategy)
-5. Embed via fastembed → write dense vector to Qdrant. BM25 sparse vectors are computed server-side by Qdrant (send raw text, Qdrant handles tokenization + IDF via `Modifier::IDF` on `SparseVectorParams`)
-6. Store entities as Qdrant payload metadata + SQLite entity table (with normalization — see Entity Resolution)
-7. Write metadata to SQLite (timestamps, access counts, staleness fields)
-8. For semantic type: run conflict detection (see Conflict Resolution)
-9. For procedural type: create new version if name already exists
+4. Embed via fastembed → write dense vector to Qdrant. BM25 sparse vectors are computed server-side by Qdrant (send raw text, Qdrant handles tokenization + IDF via `Modifier::IDF` on `SparseVectorParams`)
+5. **Entity resolution**: resolve entity names via layered pipeline (normalize → fuzzy → embedding → alias), store as Qdrant payload metadata + SQLite entity table (see Entity Resolution)
+6. Write metadata to SQLite (timestamps, access counts, staleness fields)
+7. For semantic type: run conflict detection (see Conflict Resolution)
+8. For procedural type: create new version if name already exists
 
 ### `recall`
 
@@ -241,7 +262,7 @@ MCP tool descriptions are loaded into the agent's context at session start. They
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `ids` | string[] | yes | Specific memory IDs to delete |
-| `cascade` | bool | no | Also remove graph edges involving forgotten entities |
+| `cascade` | bool | no | Also remove entity-memory links for entities only referenced by forgotten memories |
 
 ### `reflect`
 
@@ -261,9 +282,30 @@ Returns:
 ### `stats`
 
 **MCP description** (what the agent sees):
-> Memory system health and overview. Call this at the START of every conversation to get a snapshot of what ferrex knows, or anytime you need to understand memory state. Returns counts by type, staleness distribution, contradictions, recent memories, and items needing attention. Useful before deciding whether to run reflect or forget.
+> Memory system overview. Call this at the START of every conversation for a quick status, or with `detail=true` for full diagnostics. Default (brief) mode returns just what needs attention and recent context — enough to orient without wasting tokens. Detailed mode adds counts, staleness distribution, and storage info.
 
-Returns: total memories by type, staleness distribution (fresh/aging/stale counts), conflict count, most/least accessed, storage size, entity count, top-5 most recent memories (brief), count of stale/contradicted items needing attention.
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `detail` | bool | no | Default `false` (brief mode). Set `true` for full diagnostics. |
+
+**Brief mode (default)** — optimized for conversation-start. Minimal token cost:
+
+```json
+{
+  "total": 241,
+  "recent": [
+    { "id": "mem_241", "type": "episodic", "summary": "debugged connection pool deadlock", "age_days": 0 },
+    { "id": "mem_240", "type": "semantic", "summary": "api-server uses tokio 1.38", "age_days": 2 }
+  ],
+  "needs_attention": {
+    "stale_count": 12,
+    "conflict_count": 3,
+    "unvalidated_count": 8
+  }
+}
+```
+
+**Detailed mode** (`detail=true`) — full diagnostics for health checks:
 
 ```json
 {
@@ -435,19 +477,38 @@ Step 5: Annotate and return top-5
 
 ## Conflict Resolution
 
-When `store` (type: semantic) is called and an existing fact shares the same (subject, predicate):
+When `store` (type: semantic) is called, conflict detection looks for existing facts that match on (subject, predicate) — with predicate normalization to catch semantic equivalents.
+
+### Predicate Normalization
+
+Agents use inconsistent predicates ("uses" vs "depends-on" vs "requires"). Without normalization, conflict detection misses obvious contradictions.
+
+Resolution pipeline (applied before conflict matching):
+1. **Normalize** — lowercase, trim, collapse separators, strip hyphens/underscores. `"depends-on"` → `"dependson"`.
+2. **Synonym map** — static canonical mapping for common predicate families:
+   - `uses`, `depends_on`, `requires`, `needs` → canonical `depends_on`
+   - `written_in`, `implemented_in`, `built_with` → canonical `built_with`
+   - `version`, `runs_version`, `at_version` → canonical `version`
+   - `owned_by`, `maintained_by`, `managed_by` → canonical `owned_by`
+3. **Fuzzy match** — SequenceMatcher ratio > 0.85 against existing predicates for the same subject → treat as same predicate.
+
+The synonym map is extensible via config. Unrecognized predicates pass through as-is — fuzzy matching catches most remaining equivalences.
+
+### Conflict Detection
 
 ```
 Existing: ("api-server", "uses", "tokio 1.36", confidence: 0.9, t_valid: 2026-01-15, t_invalid: null)
-Incoming: ("api-server", "uses", "tokio 1.38", confidence: 0.95, t_valid: 2026-04-01)
+Incoming: ("api-server", "depends-on", "tokio 1.38", confidence: 0.95, t_valid: 2026-04-01)
+         ↓ predicate normalization: "depends-on" → "depends_on", "uses" → "depends_on" → match!
 ```
 
 Resolution:
-1. Compute similarity between "tokio 1.36" and "tokio 1.38" embeddings
-2. Similarity < 0.95 → these are different values (not duplicates)
-3. **Invalidate** old fact: set `t_invalid = 2026-04-01` (the incoming fact's `t_valid`)
-4. **Insert** new fact with `t_valid = 2026-04-01`, `t_invalid = null`
-5. Log the transition for auditability
+1. Match existing facts by (resolved_subject, normalized_predicate)
+2. Compute similarity between object values ("tokio 1.36" vs "tokio 1.38")
+3. Similarity < 0.95 → these are different values (not duplicates)
+4. **Invalidate** old fact: set `t_invalid = 2026-04-01` (the incoming fact's `t_valid`)
+5. **Insert** new fact with `t_valid = 2026-04-01`, `t_invalid = null`
+6. Log the transition for auditability
 
 The old fact is NOT deleted — it remains queryable for historical queries ("what did we use before tokio 1.38?") via `include_invalidated=true` on recall.
 
@@ -456,6 +517,7 @@ Edge cases:
 - **Ambiguous** (e.g., subject has multiple valid values for a predicate): store both, tag as multi-valued
 - **Explicit supersede**: if the agent calls `store` with a `supersedes` param pointing to an existing memory ID, skip similarity check and invalidate directly
 - **Duplicate detection**: similarity >= 0.95 → deduplicate (keep higher confidence, bump `last_validated`)
+- **Unresolved predicates**: if predicates don't match via normalization, synonym map, or fuzzy match, treat as distinct predicates (no conflict)
 
 ## Staleness Safeguards
 
@@ -476,8 +538,8 @@ staleness_score = f(age, last_accessed, last_validated, access_count, type)
 | Signal | Weight | Description |
 |---|---|---|
 | `age` | High | Days since creation or last update |
-| `last_accessed` | Medium | Days since last retrieval (accessed memories stay fresh longer) |
-| `last_validated` | High | Days since an agent implicitly or explicitly confirmed this fact |
+| `last_accessed` | Low | Days since last retrieval (popularity signal, not correctness signal) |
+| `last_validated` | High | Days since an agent explicitly confirmed this fact (see Layer 3) |
 | `access_count` | Low | Total retrievals (frequently used facts are more likely current) |
 
 Staleness levels:
@@ -485,14 +547,37 @@ Staleness levels:
 - **aging**: approaching staleness threshold, still returned but annotated
 - **stale**: exceeded threshold, excluded from results by default
 
-Thresholds (configurable per memory type):
+Thresholds (configurable per memory type, overridable per namespace):
 - Episodic: fresh < 30d, aging < 90d, stale >= 90d
 - Semantic: fresh < 90d since last validation, aging < 180d, stale >= 180d
 - Procedural: fresh < 180d, aging < 365d, stale >= 365d
 
-### Layer 3: Access-Time Validation Refresh
+Per-namespace overrides allow projects to tune thresholds to their domain. A fast-moving CI/CD project might set procedural staleness to 30d; a reference knowledge base might set semantic staleness to 365d. Configured via `ferrex.toml` or `--staleness-config`:
 
-When a memory is retrieved via `recall` and the agent *uses* it (doesn't call `forget` on it), the `last_validated` timestamp is bumped. This creates a natural feedback loop: memories that keep being useful stay fresh; memories that are never retrieved drift toward staleness.
+```toml
+[staleness.defaults]
+episodic = { fresh = 30, aging = 90, stale = 90 }
+semantic = { fresh = 90, aging = 180, stale = 180 }
+procedural = { fresh = 180, aging = 365, stale = 365 }
+
+[staleness.namespaces."ci-infra"]
+procedural = { fresh = 7, aging = 14, stale = 30 }
+
+[staleness.namespaces."company-reference"]
+semantic = { fresh = 365, aging = 730, stale = 730 }
+```
+
+### Layer 3: Retrieval vs Validation (Separate Signals)
+
+Retrieval and validation are distinct signals with different meanings:
+
+- **`last_accessed`** — bumped on every `recall` hit. Used for decay scoring (frequently retrieved memories decay slower). This is a popularity signal, not a correctness signal.
+- **`last_validated`** — bumped only by explicit agent actions that confirm the memory is still accurate:
+  1. `store(supersedes: id)` — the agent updates a fact, implicitly confirming the subject area
+  2. `reflect` confirmation — the agent reviews a stale memory and confirms it
+  3. `store(source: "memory:id")` — the agent creates a new memory citing this one as source
+
+Retrieval alone does NOT bump `last_validated`. A popular-but-wrong memory that keeps appearing in results will still age toward staleness based on its validation timestamp. This prevents the positive feedback loop where frequently-retrieved stale facts perpetually appear fresh.
 
 ### Layer 4: Contradiction Detection at Query Time
 
@@ -628,7 +713,7 @@ Cross-encoder rerankers re-score retrieval candidates for final ranking. Always 
 | Tier | Model | Size | BEIR nDCG@10 | License | fastembed enum |
 |---|---|---|---|---|---|
 | **default** | `BAAI/bge-reranker-base` | 278MB | ~52 | MIT | `BGERerankerBase` |
-| **multilingual** | `jinaai/jina-reranker-v2-base-multilingual` | ~560MB | ~55 | — | `JINARerankerV2BaseMultiligual` |
+| **multilingual** | `jinaai/jina-reranker-v2-base-multilingual` | ~560MB | ~55 | — | `JINARerankerV2BaseMultilingual` |
 
 Other fastembed built-in rerankers:
 - `rozgo/bge-reranker-v2-m3` (multilingual, `BGERerankerV2M3`)
@@ -646,7 +731,7 @@ Other notable rerankers:
 ```toml
 [workspace.dependencies]
 # MCP
-rmcp = { version = "0.16", features = ["server", "transport-io", "macros"] }
+rmcp = { version = "1", features = ["server", "transport-io", "macros"] }  # verify feature flags against 1.x migration guide
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -703,6 +788,115 @@ uuid = { version = "1", features = ["v7", "serde"] }
 - Streamable HTTP transport (stdio only in v1)
 - LLM-based memory extraction (mem0's approach — intentionally avoided due to detail loss)
 
+## Testing Strategy
+
+Tests are written alongside each implementation phase, not deferred to the end. Each subsystem has unit tests; integration tests require a real Qdrant instance.
+
+### Unit Tests (no external dependencies)
+
+**Staleness scoring** (`ferrex-core/staleness.rs`):
+- Compute staleness levels for each memory type at boundary conditions (29d, 30d, 31d for episodic fresh/aging)
+- Verify `last_accessed` does NOT bump `last_validated`
+- Verify explicit validation actions (supersede, reflect confirm, source citation) DO bump `last_validated`
+- Per-namespace threshold overrides apply correctly
+- Decay formula produces expected scores (half-life math)
+
+**Conflict resolution** (`ferrex-core/conflict.rs`):
+- Exact (subject, predicate) match triggers conflict detection
+- Predicate normalization: "uses" and "depends-on" match via synonym map
+- Predicate fuzzy matching: "depends_on" and "dependson" match at ratio > 0.85
+- Unrelated predicates don't trigger false conflicts
+- Object similarity stages: exact dedup (>0.95), clear different (<0.5), middle-ground fallback to embedding
+- `t_invalid` set correctly on superseded facts
+- `supersedes` param bypasses similarity check
+- Multi-valued predicates handled (both stored, tagged)
+
+**Entity resolution** (`ferrex-core/entity.rs`):
+- Normalization: "Tokio" → "tokio", "  api  server  " → "api server"
+- Fuzzy match: "postgres" ↔ "postgresql" merges above 0.85
+- Alias lookup: querying by alias returns canonical entity
+- Ambiguous range (0.80-0.92 embedding similarity): both stored, alias candidate created
+- No match: new entity created
+
+**Deduplication** (`ferrex-core/memory.rs`):
+- Cosine > threshold rejects with existing ID
+- Cosine <= threshold allows store
+- `supersedes` param bypasses dedup check
+- Different memory types don't cross-deduplicate
+
+**Chunking** (`ferrex-core/chunking.rs`):
+- Episodic: rejects content exceeding model context window
+- Semantic: triples always produce single vector
+- Procedural: splits on step boundaries when exceeding context
+- Procedural: short content produces single vector
+- Step chunks share memory_id with correct step_index
+
+**Memory type auto-detection** (`ferrex-core/memory.rs`):
+- subject+predicate+object → semantic
+- steps or conditions → procedural
+- everything else → episodic
+- Explicit type overrides auto-detection
+
+**Recency boost formulas** (`ferrex-embed/rerank.rs`):
+- Episodic at age 0: boost = 1.1, at age 30d: boost = 1.05, at age 300d: boost ≈ 1.0
+- Semantic at age 0: boost = 1.05, at age 180d: boost = 1.025
+- Procedural: always 1.0
+- Boosts are multiplicative with rerank score
+
+### Integration Tests (require Qdrant)
+
+Run against a real Qdrant instance (sidecar mode — test starts/stops its own Qdrant). Use `#[ignore]` attribute for CI environments without Qdrant, or gate behind a `integration` feature flag.
+
+**Store → Recall round-trip**:
+- Store episodic memory, recall by semantic query, verify returned
+- Store semantic triple, recall by subject name, verify returned
+- Store procedural memory, recall by condition description, verify returned
+
+**Hybrid retrieval quality**:
+- Store 20 memories with known content. Query with terms that should match via BM25 (exact keywords) and via vector (semantic similarity). Verify both channels contribute — a result found only by BM25 and a result found only by vector search both appear in final results.
+
+**Deduplication end-to-end**:
+- Store a memory, attempt to store a near-identical rewording, verify rejection
+- Store with `supersedes` param, verify original invalidated
+
+**Conflict resolution end-to-end**:
+- Store ("X", "uses", "v1"), then ("X", "depends-on", "v2"). Verify first fact gets `t_invalid` set. Recall with `include_invalidated=true`, verify both returned. Recall without, verify only v2 returned.
+
+**Entity resolution end-to-end**:
+- Store memory with entity "Tokio", store another with "tokio runtime". Recall filtering by entity "tokio" returns both.
+
+**Staleness lifecycle**:
+- Store a memory, artificially age it (set timestamps in the past). Verify staleness level transitions. Verify stale memories excluded from default recall, included with `include_stale=true`.
+
+**Sidecar lifecycle**:
+- Start ferrex, verify Qdrant sidecar starts (PID file created)
+- Start second ferrex instance, verify it reuses existing sidecar
+- Stop first instance (the one that started sidecar), verify sidecar stops
+- Stop second instance, verify clean shutdown
+
+**Stats brief vs detailed**:
+- Store a mix of memory types. Call `stats()` (brief), verify minimal response shape. Call `stats(detail=true)`, verify full response with counts, staleness distribution, storage size.
+
+### Golden Set Retrieval Test
+
+A small hand-crafted test set (~20 memories + ~10 queries with expected results) to measure baseline retrieval quality and catch regressions. Not a full benchmark suite — just enough to verify that hybrid retrieval + reranking returns sensible results.
+
+```
+golden_set/
+├── memories.json    # 20 memories of mixed types
+├── queries.json     # 10 queries with expected memory IDs (top-3)
+└── run_golden.rs    # stores memories, runs queries, reports recall@3
+```
+
+Target: recall@3 >= 0.7 on the golden set. If a code change drops below this, investigate before merging.
+
+### MCP Protocol Tests
+
+- Verify all 5 tools register correctly via MCP Inspector
+- Verify tool parameter validation (required fields, type checks)
+- Verify error responses have correct MCP error format
+- Verify stdio transport round-trip (JSON-RPC request → response)
+
 ## Implementation Phases
 
 ### Phase 1: Foundation (~900 LOC)
@@ -719,10 +913,11 @@ uuid = { version = "1", features = ["v7", "serde"] }
 - Hybrid retrieval via Qdrant Query API: prefetch dense + sparse, server-side RRF (k=60) in one request
 - Cross-encoder reranking (top-20 candidates) with multiplicative recency boosts
 
-### Phase 3: Conflict Resolution + Semantic Facts (~500 LOC)
+### Phase 3: Conflict Resolution + Entity Resolution (~600 LOC)
 - `store` semantic type: conflict detection with temporal validity (`t_valid`/`t_invalid`)
 - Contradiction detection at query time
-- Entity storage (SQLite + Qdrant payload) with normalization
+- Entity resolution: full layered pipeline (normalize → fuzzy → embedding similarity → alias table)
+- Entity storage (SQLite + Qdrant payload) with resolution
 - Entity-based filtering on `recall`
 - Deduplication on write
 

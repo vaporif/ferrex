@@ -55,11 +55,19 @@
           ];
       };
 
-      cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+      cargoArtifacts = craneLib.buildDepsOnly (commonArgs
+        // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [pkgs.openssl];
+        });
 
       pkg = craneLib.buildPackage (commonArgs
         // {
           inherit cargoArtifacts;
+          # embed tests need ONNX runtime + model downloads; covered by CI coverage job
+          cargoTestExtraArgs = "--workspace --exclude ferrex-embed";
+        }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [pkgs.openssl];
         });
 
       toolchain = fenixPkgs.stable.withComponents [
@@ -118,6 +126,8 @@
             pkgs.cargo-deny
             pkgs.taplo
             pkgs.typos
+            pkgs.qdrant
+            pkgs.onnxruntime
           ]
           ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
             pkgs.pkg-config
@@ -131,6 +141,7 @@
           {
             RUST_BACKTRACE = "1";
             RUST_SRC_PATH = "${toolchain}/lib/rustlib/src/rust/library";
+            ORT_DYLIB_PATH = "${pkgs.onnxruntime}/lib/libonnxruntime${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}";
           }
           // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [pkgs.openssl pkgs.stdenv.cc.cc.lib];

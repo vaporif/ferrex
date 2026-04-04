@@ -76,7 +76,7 @@ Features deferred from v1 to keep the initial implementation simple and measurab
 
 **Why deferred:** v1 uses plain-text embedding + Qdrant payload filtering (Decision #18). The structured metadata prefix `[type | namespace | date]` was found to be out-of-distribution for BGE-base and likely harmful. LLM-generated prose would be in-distribution but requires LLM integration, contradicting ferrex's LLM-free design.
 
-**When to do:** Early in v1 usage. A/B test with a handful of real memories. Compare recall@5 with and without prefix on representative queries.
+**When to add:** Together with optional Ollama integration. Requires measuring retrieval quality first — if payload filtering + plain-text embedding achieves sufficient recall, this is unnecessary complexity.
 
 ### BGE-M3 Unified Model
 **What:** BGE-M3 outputs dense + sparse + ColBERT from a single forward pass. Could replace separate BGE-base embedding + Qdrant BM25 tokenization.
@@ -114,7 +114,7 @@ All v2 features should be gated on data. The `stats` tool and retrieval instrume
 |---|---|---|
 | **Recall miss rate** | Queries where the correct memory exists but isn't in top-5 | kNN links, graph expansion, adaptive routing |
 | **Query pattern distribution** | Ratio of exact/semantic/relational/temporal queries | Adaptive routing weights |
-| **Entity fragmentation** | Count of near-duplicate entities | Fuzzy + embedding entity resolution |
+| **Entity fragmentation** | Count of near-duplicate entities | Tuning resolution thresholds (fuzzy ratio, embedding cosine) |
 | **Episodic memory growth** | Rate of episodic accumulation without promotion | Reflect clustering + semantic promotion |
 | **Channel contribution** | Per-query: did vector or BM25 find the winning result? | Channel weight tuning, additional channels |
 | **Reranking lift** | Score delta between RRF rank and final reranked position | Reranker model selection |
