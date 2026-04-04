@@ -160,6 +160,22 @@ impl MemoryService {
     }
 
     pub async fn recall(&self, req: RecallRequest) -> Result<Vec<(Memory, f32)>, CoreError> {
+        if req.time_range.is_some() {
+            return Err(CoreError::Validation(
+                "time_range filtering is not yet implemented".into(),
+            ));
+        }
+        if req.include_stale.is_some() {
+            return Err(CoreError::Validation(
+                "include_stale filtering is not yet implemented".into(),
+            ));
+        }
+        if req.include_invalidated.is_some() {
+            return Err(CoreError::Validation(
+                "include_invalidated filtering is not yet implemented".into(),
+            ));
+        }
+
         let namespace = req.namespace.as_deref().unwrap_or(&self.config.namespace);
         let limit = req.limit.unwrap_or(DEFAULT_RECALL_LIMIT);
         let candidate_pool_size = limit.max(MIN_RERANK_POOL_SIZE);

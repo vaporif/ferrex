@@ -220,6 +220,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "requires ONNX runtime"]
     async fn test_embedder_small() {
         let embedder = Embedder::new(ModelTier::Small).expect("failed to create embedder");
         assert_eq!(embedder.dimension(), 384);
@@ -229,6 +230,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires ONNX runtime"]
     async fn test_embed_batch() {
         let embedder = Embedder::new(ModelTier::Small).expect("failed to create embedder");
         let texts = vec![
@@ -277,6 +279,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires ONNX runtime"]
     async fn test_reranker_basic() {
         let reranker = Reranker::new(RerankerTier::Default).expect("failed to create reranker");
         let results = reranker
@@ -297,6 +300,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires ONNX runtime"]
     async fn test_reranker_fewer_docs_than_top_n() {
         let reranker = Reranker::new(RerankerTier::Default).expect("failed to create reranker");
         let results = reranker
