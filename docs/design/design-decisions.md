@@ -172,7 +172,7 @@ All lookups check aliases first. This is the full pipeline — not deferred.
 
 ## 13. Memory Type Auto-Detection
 
-**Problem:** Forcing agents to classify memories as episodic/semantic/procedural at write time adds cognitive burden. Agents mis-classify — a fact can be both episodic (it happened) and semantic (it's a durable truth). Research (MemEvolve 2025) questions whether human cognitive categories are optimal for AI agents at all.
+**Problem:** Forcing agents to classify memories as episodic/semantic/procedural at write time adds cognitive burden. Agents misclassify — a fact can be both episodic (it happened) and semantic (it's a durable truth). Research (MemEvolve 2025) questions whether human cognitive categories are optimal for AI agents at all.
 
 **Decision:** `type` is optional on `store`. When omitted, auto-detect from provided fields:
 - `subject` + `predicate` + `object` present → semantic

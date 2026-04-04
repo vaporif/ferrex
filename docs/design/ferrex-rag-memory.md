@@ -713,7 +713,7 @@ Cross-encoder rerankers re-score retrieval candidates for final ranking. Always 
 | Tier | Model | Size | BEIR nDCG@10 | License | fastembed enum |
 |---|---|---|---|---|---|
 | **default** | `BAAI/bge-reranker-base` | 278MB | ~52 | MIT | `BGERerankerBase` |
-| **multilingual** | `jinaai/jina-reranker-v2-base-multilingual` | ~560MB | ~55 | — | `JINARerankerV2BaseMultiligual` |
+| **multilingual** | `jinaai/jina-reranker-v2-base-multilingual` | ~560MB | ~55 | — | `JINARerankerV2BaseMultilingual` |
 
 Other fastembed built-in rerankers:
 - `rozgo/bge-reranker-v2-m3` (multilingual, `BGERerankerV2M3`)

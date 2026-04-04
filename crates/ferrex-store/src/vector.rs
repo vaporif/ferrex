@@ -56,7 +56,12 @@ impl VectorStore {
             .await
             .map_err(|e| StoreError::Qdrant(e.to_string()))?;
 
-        for field in ["memory_type", "namespace", "entities", crate::POINT_TYPE_FIELD] {
+        for field in [
+            "memory_type",
+            "namespace",
+            "entities",
+            crate::POINT_TYPE_FIELD,
+        ] {
             self.client
                 .create_field_index(CreateFieldIndexCollectionBuilder::new(
                     &name,
@@ -177,7 +182,10 @@ mod tests {
 
         store.upsert(ns, id, test_vector(), payload).await.unwrap();
 
-        let filter = Filter::must([Condition::matches(crate::POINT_TYPE_FIELD, crate::POINT_TYPE_MEMORY.to_string())]);
+        let filter = Filter::must([Condition::matches(
+            crate::POINT_TYPE_FIELD,
+            crate::POINT_TYPE_MEMORY.to_string(),
+        )]);
         let results = store
             .search(ns, test_vector(), 10, Some(filter))
             .await

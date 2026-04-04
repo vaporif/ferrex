@@ -217,7 +217,10 @@ impl MemoryService {
 
     pub async fn stats(&self, _req: StatsRequest) -> Result<StatsResponse, CoreError> {
         let total = self.metadata_store.memory_count().await?;
-        let recent = self.metadata_store.recent_memories(STATS_RECENT_COUNT).await?;
+        let recent = self
+            .metadata_store
+            .recent_memories(STATS_RECENT_COUNT)
+            .await?;
         Ok(StatsResponse {
             total_memories: total,
             recent_memories: recent,

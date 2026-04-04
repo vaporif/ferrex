@@ -26,9 +26,7 @@ impl<M: MetadataStore> EntityResolver<'_, M> {
         let all_entities = self.metadata_store.get_all_entities().await?;
         let mut resolved = Vec::with_capacity(entity_names.len());
         for name in entity_names {
-            let entity = self
-                .resolve_single(name, namespace, &all_entities)
-                .await?;
+            let entity = self.resolve_single(name, namespace, &all_entities).await?;
             resolved.push(entity);
         }
         Ok(resolved)
@@ -185,7 +183,8 @@ async fn resolve_entities_stages_1_2<M: MetadataStore>(
 
         // Stage 2
         let all_entities = metadata_store.get_all_entities().await?;
-        if let Some((entity, _)) = best_fuzzy_match(&normalized, &all_entities, FUZZY_MATCH_THRESHOLD)
+        if let Some((entity, _)) =
+            best_fuzzy_match(&normalized, &all_entities, FUZZY_MATCH_THRESHOLD)
         {
             metadata_store
                 .add_entity_alias(&entity.id, &normalized)
