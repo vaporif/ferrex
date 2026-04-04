@@ -95,16 +95,6 @@ impl MemoryService {
         let id = Uuid::now_v7();
         let confidence = clamp_confidence(req.confidence);
 
-        let embed_text = searchable_text(
-            memory_type,
-            req.content.as_deref(),
-            req.subject.as_deref(),
-            req.predicate.as_deref(),
-            req.object.as_deref(),
-        );
-
-        let embedding = self.embedder.embed(&embed_text).await?;
-
         let resolved_entities = if req.entities.is_empty() {
             vec![]
         } else {
@@ -138,6 +128,9 @@ impl MemoryService {
             last_validated: None,
             access_count: 0,
         };
+
+        let embed_text = memory.searchable_text();
+        let embedding = self.embedder.embed(&embed_text).await?;
 
         // Metadata first: easier to roll back than a vector upsert
         self.metadata_store.insert_memory(&memory).await?;
@@ -225,23 +218,12 @@ impl MemoryService {
             return Ok(vec![]);
         }
 
-        let doc_texts: Vec<String> = ordered
-            .iter()
-            .map(|m| {
-                searchable_text(
-                    m.memory_type,
-                    m.content.as_deref(),
-                    m.subject.as_deref(),
-                    m.predicate.as_deref(),
-                    m.object.as_deref(),
-                )
-            })
-            .collect();
+        let doc_texts: Vec<String> = ordered.iter().map(|m| m.searchable_text()).collect();
         let doc_refs: Vec<&str> = doc_texts.iter().map(String::as_str).collect();
 
         let reranked = self
             .reranker
-            .rerank(&req.query, &doc_refs, doc_refs.len())
+            .rerank(&req.query, &doc_refs, limit)
             .await?;
 
         let now = Utc::now();
@@ -312,22 +294,6 @@ impl MemoryService {
     }
 }
 
-fn searchable_text(
-    memory_type: MemoryType,
-    content: Option<&str>,
-    subject: Option<&str>,
-    predicate: Option<&str>,
-    object: Option<&str>,
-) -> String {
-    match memory_type {
-        MemoryType::Semantic => [subject, predicate, object]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" "),
-        _ => content.unwrap_or_default().to_string(),
-    }
-}
 
 const fn detect_memory_type(req: &StoreRequest) -> MemoryType {
     match req.memory_type {

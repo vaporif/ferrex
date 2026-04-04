@@ -75,6 +75,23 @@ pub struct Memory {
     pub access_count: u64,
 }
 
+impl Memory {
+    pub fn searchable_text(&self) -> String {
+        match self.memory_type {
+            MemoryType::Semantic => [
+                self.subject.as_deref(),
+                self.predicate.as_deref(),
+                self.object.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" "),
+            _ => self.content.as_deref().unwrap_or_default().to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entity {
     pub id: String,
