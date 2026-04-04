@@ -5,8 +5,8 @@ mod types;
 
 pub use entity::EntityResolver;
 pub use error::CoreError;
-use retrieval::SECONDS_PER_DAY;
 pub use retrieval::compute_recency_boost;
+use retrieval::age_in_days;
 pub use types::*;
 
 pub use ferrex_embed::{ModelTier, RerankerTier};
@@ -239,14 +239,11 @@ impl MemoryService {
 
         let reranked = self.reranker.rerank(&req.query, &doc_refs, limit).await?;
 
-        let now = Utc::now();
         let mut scored: Vec<(Memory, f32)> = reranked
             .iter()
             .filter_map(|r| {
                 let memory = ordered.get(r.index)?;
-                #[allow(clippy::cast_precision_loss)]
-                let age_days = (now - memory.created_at).num_seconds() as f64 / SECONDS_PER_DAY;
-                let recency = compute_recency_boost(memory.memory_type, age_days);
+                let recency = compute_recency_boost(memory.memory_type, age_in_days(memory.created_at));
                 #[allow(clippy::cast_possible_truncation)]
                 let final_score = (f64::from(r.score) * recency) as f32;
                 Some(((*memory).clone(), final_score))

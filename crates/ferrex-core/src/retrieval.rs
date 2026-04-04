@@ -4,7 +4,11 @@ const EPISODIC_BOOST_WEIGHT: f64 = 0.3;
 const EPISODIC_HALF_LIFE_DAYS: f64 = 30.0;
 const SEMANTIC_BOOST_WEIGHT: f64 = 0.15;
 const SEMANTIC_HALF_LIFE_DAYS: f64 = 180.0;
-pub const SECONDS_PER_DAY: f64 = 24.0 * 60.0 * 60.0;
+const SECONDS_PER_DAY: f64 = 24.0 * 60.0 * 60.0;
+
+pub fn age_in_days(created_at: chrono::DateTime<chrono::Utc>) -> f64 {
+    (chrono::Utc::now() - created_at).num_seconds() as f64 / SECONDS_PER_DAY
+}
 
 pub fn compute_recency_boost(memory_type: MemoryType, age_days: f64) -> f64 {
     let age_days = age_days.max(0.0);

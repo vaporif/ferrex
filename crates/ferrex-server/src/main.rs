@@ -204,9 +204,13 @@ impl FerrexServer {
         };
 
         let results = self.service.recall(req).await.map_err(map_error)?;
+        let now = chrono::Utc::now();
         let output: Vec<serde_json::Value> = results
             .into_iter()
             .map(|(mem, score)| {
+                #[allow(clippy::cast_precision_loss)]
+                let age_days =
+                    (now - mem.created_at).num_seconds() as f64 / (24.0 * 60.0 * 60.0);
                 serde_json::json!({
                     "id": mem.id,
                     "type": mem.memory_type,
@@ -217,6 +221,7 @@ impl FerrexServer {
                     "score": score,
                     "entities": mem.entities,
                     "created_at": mem.created_at.to_rfc3339(),
+                    "age_days": (age_days * 10.0).round() / 10.0,
                 })
             })
             .collect();
