@@ -237,7 +237,7 @@ impl MetadataStore for SqliteStore {
                     memory.object,
                     memory.confidence,
                     memory.source,
-                    memory.context.as_ref().map(std::string::ToString::to_string),
+                    memory.context.as_ref().map(|c| c.to_string()),
                     memory.created_at.to_rfc3339(),
                     memory.updated_at.to_rfc3339(),
                     memory.t_valid.map(|d| d.to_rfc3339()),

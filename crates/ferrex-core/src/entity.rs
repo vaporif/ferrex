@@ -188,7 +188,7 @@ async fn resolve_entities_stages_1_2<M: MetadataStore>(
     metadata_store: &M,
     entity_names: &[String],
 ) -> Result<Vec<Entity>, CoreError> {
-    let mut resolved = Vec::new();
+    let mut resolved = Vec::with_capacity(entity_names.len());
     for name in entity_names {
         let normalized = normalize(name);
         if normalized.is_empty() {

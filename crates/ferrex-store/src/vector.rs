@@ -158,30 +158,28 @@ impl VectorStore {
         let name = Self::collection_name(namespace)?;
         let prefetch_limit = (limit as u64).max(MIN_PREFETCH_LIMIT);
 
-        let dense_filter = filter.clone();
-        let sparse_filter = filter;
+        let make_prefetch =
+            |query, using, f: Option<Filter>| -> PrefetchQueryBuilder {
+                let mut b = PrefetchQueryBuilder::default()
+                    .query(query)
+                    .using(using)
+                    .limit(prefetch_limit);
+                if let Some(f) = f {
+                    b = b.filter(f);
+                }
+                b
+            };
 
-        let dense_prefetch = {
-            let mut b = PrefetchQueryBuilder::default()
-                .query(VectorInput::new_dense(vector))
-                .using(DENSE_VECTOR)
-                .limit(prefetch_limit);
-            if let Some(f) = dense_filter {
-                b = b.filter(f);
-            }
-            b
-        };
-
-        let sparse_prefetch = {
-            let mut b = PrefetchQueryBuilder::default()
-                .query(VectorInput::from(Document::new(query_text, BM25_TOKENIZER)))
-                .using(SPARSE_VECTOR)
-                .limit(prefetch_limit);
-            if let Some(f) = sparse_filter {
-                b = b.filter(f);
-            }
-            b
-        };
+        let dense_prefetch = make_prefetch(
+            VectorInput::new_dense(vector),
+            DENSE_VECTOR,
+            filter.clone(),
+        );
+        let sparse_prefetch = make_prefetch(
+            VectorInput::from(Document::new(query_text, BM25_TOKENIZER)),
+            SPARSE_VECTOR,
+            filter,
+        );
 
         let builder = QueryPointsBuilder::new(&name)
             .add_prefetch(dense_prefetch)

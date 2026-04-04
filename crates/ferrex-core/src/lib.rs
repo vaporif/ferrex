@@ -116,7 +116,7 @@ impl MemoryService {
             };
             resolver.resolve(&req.entities, namespace).await?
         };
-        let entity_names: Vec<String> = resolved_entities.iter().map(|e| e.name.clone()).collect();
+        let entity_names = resolved_entities.iter().map(|e| e.name.clone()).collect();
 
         let memory = Memory {
             id: id.to_string(),
@@ -330,13 +330,12 @@ fn searchable_text(
 }
 
 const fn detect_memory_type(req: &StoreRequest) -> MemoryType {
-    if let Some(t) = req.memory_type {
-        return t;
-    }
-    if req.subject.is_some() && req.predicate.is_some() && req.object.is_some() {
-        MemoryType::Semantic
-    } else {
-        MemoryType::Episodic
+    match req.memory_type {
+        Some(t) => t,
+        None if req.subject.is_some() && req.predicate.is_some() && req.object.is_some() => {
+            MemoryType::Semantic
+        }
+        None => MemoryType::Episodic,
     }
 }
 
@@ -355,10 +354,8 @@ fn validate_store_request(req: &StoreRequest, memory_type: MemoryType) -> Result
             }
         }
         MemoryType::Semantic => {
-            let has_subject = req.subject.as_deref().is_some_and(|s| !s.is_empty());
-            let has_predicate = req.predicate.as_deref().is_some_and(|s| !s.is_empty());
-            let has_object = req.object.as_deref().is_some_and(|s| !s.is_empty());
-            if !has_subject || !has_predicate || !has_object {
+            let non_empty = |opt: &Option<String>| opt.as_deref().is_some_and(|s| !s.is_empty());
+            if !non_empty(&req.subject) || !non_empty(&req.predicate) || !non_empty(&req.object) {
                 return Err(CoreError::Validation(
                     "semantic memory requires non-empty subject, predicate, and object".into(),
                 ));
