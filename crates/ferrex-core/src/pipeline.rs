@@ -1,10 +1,3 @@
-// StoreContext plus the bag of config/normalizers each stage needs.
-// Submodules (validate, normalize_predicate, embed, dedup, conflict,
-// resolve_entities, write) are declared as they land in Tasks 11–15.
-//
-// Dead-code allowed until Task 16 wires MemoryService::store to the pipeline.
-#![allow(dead_code)]
-
 pub mod conflict;
 pub mod dedup;
 pub mod embed;
@@ -19,11 +12,6 @@ use uuid::Uuid;
 
 use crate::predicate::PredicateNormalizer;
 use crate::types::{ConflictConfig, DedupConfig, StoreRequest};
-
-pub enum StageOutcome {
-    Proceed,
-    SkipToWrite,
-}
 
 pub struct StoreContext<'a> {
     pub req: StoreRequest,

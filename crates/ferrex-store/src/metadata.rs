@@ -160,9 +160,7 @@ pub trait MetadataStore: Send + Sync {
     ) -> impl Future<Output = Result<(), StoreError>> + Send {
         async { Ok(()) }
     }
-    fn list_pending_ops(
-        &self,
-    ) -> impl Future<Output = Result<Vec<PendingOp>, StoreError>> + Send {
+    fn list_pending_ops(&self) -> impl Future<Output = Result<Vec<PendingOp>, StoreError>> + Send {
         async { Ok(vec![]) }
     }
     fn count_pending_ops_older_than(
@@ -293,7 +291,8 @@ impl SqliteStore {
         pool_size: usize,
     ) -> Result<Self, StoreError> {
         let path_ref = path.as_ref();
-        let is_memory = path_ref.to_str() == Some(":memory:");
+        let path_str = path_ref.to_str().unwrap_or("");
+        let is_memory = path_str == ":memory:" || path_str.contains("mode=memory");
 
         let (writer_conn, source, keepalive) = if is_memory {
             // Each SqliteStore gets its own isolated shared in-memory DB so that
@@ -368,7 +367,10 @@ impl SqliteStore {
 }
 
 fn parse_dt(s: &str) -> DateTime<Utc> {
-    s.parse::<DateTime<Utc>>().unwrap_or_default()
+    s.parse::<DateTime<Utc>>().unwrap_or_else(|_| {
+        tracing::warn!(value = %s, "failed to parse datetime, falling back to epoch");
+        DateTime::default()
+    })
 }
 
 fn parse_optional_dt(s: Option<String>) -> Option<DateTime<Utc>> {
@@ -883,11 +885,7 @@ impl MetadataStore for SqliteStore {
         .await
     }
 
-    async fn set_normalized_predicate(
-        &self,
-        id: &str,
-        normalized: &str,
-    ) -> Result<(), StoreError> {
+    async fn set_normalized_predicate(&self, id: &str, normalized: &str) -> Result<(), StoreError> {
         let id = id.to_string();
         let normalized = normalized.to_string();
         self.with_writer(move |conn| {

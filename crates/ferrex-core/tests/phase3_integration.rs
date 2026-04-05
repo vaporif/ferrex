@@ -71,9 +71,7 @@ async fn dedup_rejects_near_duplicate_episodic() {
     svc.store(episodic("The deployment happened at 3pm"))
         .await
         .unwrap();
-    let result = svc
-        .store(episodic("The deployment happened at 3 PM"))
-        .await;
+    let result = svc.store(episodic("The deployment happened at 3 PM")).await;
     assert!(
         matches!(result, Err(CoreError::Duplicate { .. })),
         "expected Duplicate, got {result:?}"
@@ -84,8 +82,14 @@ async fn dedup_rejects_near_duplicate_episodic() {
 #[ignore = "requires Qdrant"]
 async fn conflict_update_invalidates_old_fact() {
     let svc = test_service().await;
-    let first = svc.store(semantic("api", "uses", "tokio 1.38")).await.unwrap();
-    let second = svc.store(semantic("api", "uses", "tokio 1.40")).await.unwrap();
+    let first = svc
+        .store(semantic("api", "uses", "tokio 1.38"))
+        .await
+        .unwrap();
+    let second = svc
+        .store(semantic("api", "uses", "tokio 1.40"))
+        .await
+        .unwrap();
     assert!(
         second.superseded.contains(&first.id),
         "second should supersede first: {:?}",
@@ -109,7 +113,10 @@ async fn conflict_update_invalidates_old_fact() {
         ids.contains(&second.id.as_str()),
         "recall should return new fact"
     );
-    assert!(!ids.contains(&first.id.as_str()), "recall should not return old fact");
+    assert!(
+        !ids.contains(&first.id.as_str()),
+        "recall should not return old fact"
+    );
 }
 
 #[tokio::test]
@@ -132,7 +139,10 @@ async fn conflict_ambiguous_surfaces_error() {
 #[ignore = "requires Qdrant"]
 async fn supersedes_skips_dedup_and_conflict() {
     let svc = test_service().await;
-    let first = svc.store(semantic("api", "uses", "tokio 1.38")).await.unwrap();
+    let first = svc
+        .store(semantic("api", "uses", "tokio 1.38"))
+        .await
+        .unwrap();
 
     let mut req = semantic("api", "uses", "tokio 1.38");
     req.supersedes = Some(first.id.clone());
@@ -158,7 +168,10 @@ async fn supersedes_skips_dedup_and_conflict() {
         .await
         .unwrap();
     let ids: Vec<&str> = results.iter().map(|(m, _)| m.id.as_str()).collect();
-    assert!(!ids.contains(&first.id.as_str()), "old fact should not appear");
+    assert!(
+        !ids.contains(&first.id.as_str()),
+        "old fact should not appear"
+    );
 }
 
 #[tokio::test]
@@ -190,5 +203,8 @@ async fn forget_removes_from_both_stores() {
         .await
         .unwrap();
     let ids: Vec<&str> = results.iter().map(|(m, _)| m.id.as_str()).collect();
-    assert!(!ids.contains(&resp.id.as_str()), "forgotten memory should not be recalled");
+    assert!(
+        !ids.contains(&resp.id.as_str()),
+        "forgotten memory should not be recalled"
+    );
 }

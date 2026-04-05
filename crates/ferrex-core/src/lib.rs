@@ -8,8 +8,8 @@ mod types;
 
 pub use config::{ConfigError, LoadedConfig, load_or_init, resolve_namespace_groups};
 pub use entity::EntityResolver;
-pub use predicate::PredicateNormalizer;
 pub use error::CoreError;
+pub use predicate::PredicateNormalizer;
 use retrieval::SECONDS_PER_DAY;
 pub use retrieval::compute_recency_boost;
 pub use types::*;
@@ -83,7 +83,8 @@ impl MemoryService {
             (vs, Some(sc))
         };
 
-        let metadata_store = SqliteStore::open(&config.db_path)?;
+        let metadata_store =
+            SqliteStore::open_with_pool_size(&config.db_path, config.reader_pool_size)?;
 
         let model_key = "embedding_model";
         let current_model = config.model_tier.model_name();
@@ -124,8 +125,7 @@ impl MemoryService {
         };
 
         let report = service.recover_on_startup().await?;
-        if report.compensated_stores + report.rolled_forward_forgets + report.cleared_pre_qdrant
-            > 0
+        if report.compensated_stores + report.rolled_forward_forgets + report.cleared_pre_qdrant > 0
         {
             tracing::info!(
                 compensated_stores = report.compensated_stores,
@@ -271,6 +271,10 @@ impl MemoryService {
             .cloned()
             .unwrap_or_else(|| Arc::clone(&self.default_normalizer));
 
+        if namespace != self.config.namespace {
+            self.vector_store.ensure_collection(&namespace).await?;
+        }
+
         let mut ctx = StoreContext::new(
             req,
             namespace,
@@ -325,11 +329,6 @@ impl MemoryService {
         ctx: &StoreContext<'_>,
         target_id: &str,
     ) -> Result<Memory, CoreError> {
-        use ferrex_store::{
-            POINT_TYPE_FIELD, POINT_TYPE_MEMORY, PendingOp, PendingOpKind,
-        };
-        use qdrant_client::Payload;
-
         let target = self
             .metadata_store
             .get_memory(target_id)
@@ -349,81 +348,8 @@ impl MemoryService {
             )));
         }
 
-        let embedding = ctx
-            .embedding
-            .clone()
-            .ok_or_else(|| CoreError::Validation("supersede write requires embedding".into()))?;
-        let search_text = ctx.search_text.clone().unwrap_or_default();
-
-        let confidence = ctx.req.confidence.map_or(1.0, |c| c.clamp(0.0, 1.0));
-        let entity_names = ctx
-            .resolved_entities
-            .iter()
-            .map(|e| e.name.clone())
-            .collect();
-        let memory = Memory {
-            id: ctx.id.to_string(),
-            namespace: ctx.namespace.clone(),
-            memory_type: ctx.memory_type,
-            content: ctx.req.content.clone(),
-            subject: ctx.req.subject.clone(),
-            predicate: ctx.req.predicate.clone(),
-            object: ctx.req.object.clone(),
-            confidence,
-            source: ctx.req.source.clone(),
-            context: ctx.req.context.clone(),
-            entities: entity_names,
-            created_at: ctx.now,
-            updated_at: ctx.now,
-            t_valid: None,
-            t_invalid: None,
-            last_accessed: ctx.now,
-            last_validated: None,
-            access_count: 0,
-            normalized_predicate: ctx.normalized_predicate.clone(),
-        };
-
-        let op = PendingOp {
-            op_id: Uuid::now_v7().to_string(),
-            kind: PendingOpKind::Supersede,
-            memory_id: memory.id.clone(),
-            namespace: memory.namespace.clone(),
-            target_id: Some(target_id.to_string()),
-            qdrant_written: false,
-            started_at: Utc::now(),
-        };
-        self.metadata_store.insert_pending_op(&op).await?;
-
-        let payload = Payload::try_from(serde_json::json!({
-            "memory_id": memory.id,
-            "memory_type": memory.memory_type.as_str(),
-            "namespace": memory.namespace,
-            "searchable_text": search_text,
-            "entities": &memory.entities,
-            "created_at": memory.created_at.to_rfc3339(),
-            POINT_TYPE_FIELD: POINT_TYPE_MEMORY,
-        }))
-        .map_err(|e| CoreError::Validation(e.to_string()))?;
-
-        self.vector_store
-            .upsert(&memory.namespace, ctx.id, embedding, &search_text, payload)
-            .await?;
-        self.metadata_store
-            .mark_pending_op_qdrant_written(&op.op_id)
-            .await?;
-
-        self.metadata_store.insert_memory(&memory).await?;
-        for entity in &ctx.resolved_entities {
-            self.metadata_store
-                .link_memory_entity(&memory.id, &entity.id)
-                .await?;
-        }
-        self.metadata_store
-            .invalidate_memory(target_id, Utc::now())
-            .await?;
-        self.metadata_store.clear_pending_op(&op.op_id).await?;
-
-        Ok(memory)
+        pipeline::write::run_supersede(ctx, &self.metadata_store, &self.vector_store, target_id)
+            .await
     }
 
     pub async fn recall(&self, req: RecallRequest) -> Result<Vec<(Memory, f32)>, CoreError> {
@@ -489,8 +415,11 @@ impl MemoryService {
         let ids: Vec<String> = results.iter().map(|(id, _)| id.clone()).collect();
         let memories = self.metadata_store.get_memories_by_ids(&ids).await?;
 
-        let memory_map: HashMap<&str, &Memory> =
-            memories.iter().map(|m| (m.id.as_str(), m)).collect();
+        let memory_map: HashMap<&str, &Memory> = memories
+            .iter()
+            .filter(|m| m.t_invalid.is_none())
+            .map(|m| (m.id.as_str(), m))
+            .collect();
 
         let ordered: Vec<&Memory> = results
             .iter()
@@ -579,8 +508,7 @@ impl MemoryService {
             };
             self.metadata_store.insert_pending_op(&op).await?;
 
-            let uuid =
-                Uuid::parse_str(id).map_err(|e| CoreError::Validation(e.to_string()))?;
+            let uuid = Uuid::parse_str(id).map_err(|e| CoreError::Validation(e.to_string()))?;
             self.vector_store
                 .delete_by_ids(&memory.namespace, &[uuid])
                 .await?;
@@ -627,7 +555,6 @@ const fn detect_memory_type(req: &StoreRequest) -> MemoryType {
         None => MemoryType::Episodic,
     }
 }
-
 
 #[cfg(test)]
 mod tests {

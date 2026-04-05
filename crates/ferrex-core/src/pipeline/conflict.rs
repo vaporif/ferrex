@@ -6,7 +6,7 @@ use crate::types::ConflictConfig;
 
 pub enum Classification {
     NoConflict,
-    Duplicate(String),
+    Duplicate(String, f32),
     Update(String),
     Ambiguous { existing_id: String, ratio: f32 },
     MultiMatch(Vec<String>),
@@ -32,12 +32,12 @@ pub fn classify(
     let norm_in = normalize_object(incoming_object);
     let norm_ex = normalize_object(existing_obj);
     if norm_in == norm_ex {
-        return Classification::Duplicate(candidate.id.clone());
+        return Classification::Duplicate(candidate.id.clone(), 1.0);
     }
     #[allow(clippy::cast_possible_truncation)]
     let ratio = strsim::jaro_winkler(&norm_in, &norm_ex) as f32;
     if ratio >= config.object_fuzzy_duplicate {
-        Classification::Duplicate(candidate.id.clone())
+        Classification::Duplicate(candidate.id.clone(), ratio)
     } else if ratio < config.object_fuzzy_update {
         Classification::Update(candidate.id.clone())
     } else {
@@ -62,9 +62,9 @@ pub async fn run(ctx: &mut StoreContext<'_>, metadata: &SqliteStore) -> Result<(
     let incoming_object = ctx.req.object.as_deref().unwrap_or("");
     match classify(incoming_object, &existing, ctx.conflict_config) {
         Classification::NoConflict => Ok(()),
-        Classification::Duplicate(existing_id) => Err(CoreError::Duplicate {
+        Classification::Duplicate(existing_id, similarity) => Err(CoreError::Duplicate {
             existing_id,
-            similarity: 1.0,
+            similarity,
         }),
         Classification::Update(existing_id) => {
             ctx.superseded_ids.push(existing_id);
@@ -118,14 +118,19 @@ mod tests {
     fn test_classify_duplicate_exact() {
         let c = ConflictConfig::default();
         let outcome = classify("tokio 1.38", &[mem("e-1", "tokio 1.38")], &c);
-        assert!(matches!(outcome, Classification::Duplicate(ref id) if id == "e-1"));
+        #[allow(clippy::float_cmp)]
+        {
+            assert!(
+                matches!(outcome, Classification::Duplicate(ref id, s) if id == "e-1" && s == 1.0)
+            );
+        }
     }
 
     #[test]
     fn test_classify_duplicate_case_insensitive() {
         let c = ConflictConfig::default();
         let outcome = classify("  Tokio 1.38 ", &[mem("e-1", "tokio 1.38")], &c);
-        assert!(matches!(outcome, Classification::Duplicate(_)));
+        assert!(matches!(outcome, Classification::Duplicate(_, _)));
     }
 
     #[test]

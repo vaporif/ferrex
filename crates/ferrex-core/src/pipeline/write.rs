@@ -22,6 +22,32 @@ pub async fn run(
     metadata: &SqliteStore,
     vectors: &VectorStore,
 ) -> Result<Memory, CoreError> {
+    write_impl(ctx, metadata, vectors, PendingOpKind::Store, None).await
+}
+
+pub async fn run_supersede(
+    ctx: &StoreContext<'_>,
+    metadata: &SqliteStore,
+    vectors: &VectorStore,
+    target_id: &str,
+) -> Result<Memory, CoreError> {
+    write_impl(
+        ctx,
+        metadata,
+        vectors,
+        PendingOpKind::Supersede,
+        Some(target_id),
+    )
+    .await
+}
+
+async fn write_impl(
+    ctx: &StoreContext<'_>,
+    metadata: &SqliteStore,
+    vectors: &VectorStore,
+    op_kind: PendingOpKind,
+    target_id: Option<&str>,
+) -> Result<Memory, CoreError> {
     let embedding = ctx
         .embedding
         .clone()
@@ -33,10 +59,10 @@ pub async fn run(
     // 1. Pre-write journal.
     let op = PendingOp {
         op_id: Uuid::now_v7().to_string(),
-        kind: PendingOpKind::Store,
+        kind: op_kind,
         memory_id: memory.id.clone(),
         namespace: memory.namespace.clone(),
-        target_id: None,
+        target_id: target_id.map(String::from),
         qdrant_written: false,
         started_at: Utc::now(),
     };
@@ -54,10 +80,8 @@ pub async fn run(
     }))
     .map_err(|e| CoreError::Validation(e.to_string()))?;
 
-    let id_uuid =
-        Uuid::parse_str(&memory.id).map_err(|e| CoreError::Validation(e.to_string()))?;
     vectors
-        .upsert(&memory.namespace, id_uuid, embedding, &search_text, payload)
+        .upsert(&memory.namespace, ctx.id, embedding, &search_text, payload)
         .await?;
     metadata.mark_pending_op_qdrant_written(&op.op_id).await?;
 
@@ -66,8 +90,12 @@ pub async fn run(
     for entity in &ctx.resolved_entities {
         metadata.link_memory_entity(&memory.id, &entity.id).await?;
     }
+    // Invalidate superseded memories (from conflict auto-update or explicit supersede).
     for sup in &ctx.superseded_ids {
-        metadata.invalidate_memory(sup, Utc::now()).await?;
+        metadata.invalidate_memory(sup, ctx.now).await?;
+    }
+    if let Some(tid) = target_id {
+        metadata.invalidate_memory(tid, ctx.now).await?;
     }
     metadata.clear_pending_op(&op.op_id).await?;
 

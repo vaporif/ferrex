@@ -21,19 +21,25 @@ impl PredicateNormalizer {
     pub fn new(groups: HashMap<String, Vec<String>>) -> Self {
         let mut canonical_to_members: HashMap<String, Vec<String>> = HashMap::new();
         let mut lookup: HashMap<String, String> = HashMap::new();
-        for (canonical, members) in groups {
+        // Sort group keys for deterministic iteration order across runs.
+        let mut sorted_groups: Vec<_> = groups.into_iter().collect();
+        sorted_groups.sort_by(|(a, _), (b, _)| a.cmp(b));
+        for (canonical, members) in sorted_groups {
             let normalized_members: Vec<String> = std::iter::once(canonical.as_str())
                 .chain(members.iter().map(String::as_str))
                 .map(Self::text_normalize)
                 .collect();
             for nm in &normalized_members {
-                // First writer wins on collision — deterministic across HashMap
-                // iteration order is not guaranteed, so ambiguous configs (the
-                // same synonym assigned to two groups) are a config error we
-                // don't try to resolve here.
-                lookup
-                    .entry(nm.clone())
-                    .or_insert_with(|| canonical.clone());
+                if let Some(existing) = lookup.get(nm) {
+                    tracing::warn!(
+                        synonym = %nm,
+                        existing_group = %existing,
+                        new_group = %canonical,
+                        "ambiguous predicate config: synonym belongs to multiple groups, keeping first"
+                    );
+                    continue;
+                }
+                lookup.insert(nm.clone(), canonical.clone());
             }
             canonical_to_members.insert(canonical, normalized_members);
         }
