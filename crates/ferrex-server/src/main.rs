@@ -1,7 +1,10 @@
+mod audit;
+mod backfill;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use ferrex_core::{
     CoreError, FerrexConfig, ForgetRequest, MemoryService, ModelTier, RecallRequest,
     ReflectRequest, RerankerTier, StatsRequest, StoreRequest, TimeRange,
@@ -16,6 +19,9 @@ use serde::Deserialize;
 #[derive(Parser)]
 #[command(name = "ferrex", about = "Local-first MCP memory server for AI agents")]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     #[arg(long, env = "FERREX_QDRANT_URL")]
     qdrant_url: Option<String>,
 
@@ -36,6 +42,81 @@ struct Cli {
 
     #[arg(long, env = "FERREX_DB_PATH")]
     db_path: Option<PathBuf>,
+
+    #[arg(long, env = "FERREX_CONFIG_PATH")]
+    config_path: Option<PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Run the out-of-band symmetric-diff audit against Qdrant + `SQLite`.
+    Audit {
+        #[command(subcommand)]
+        audit: AuditCommand,
+    },
+    /// Backfill `normalized_predicate` for pre-Phase-3 semantic memories.
+    Backfill {
+        #[command(subcommand)]
+        backfill: BackfillCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuditCommand {
+    Reconcile {
+        #[arg(long)]
+        fix: bool,
+        #[arg(long)]
+        sample: Option<usize>,
+    },
+}
+
+#[derive(Subcommand)]
+enum BackfillCommand {
+    NormalizedPredicates {
+        #[arg(long)]
+        namespace: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+const SHIPPED_BASELINE: &str = include_str!("../config/ferrex.toml");
+
+fn resolve_config_path(cli: &Cli) -> PathBuf {
+    cli.config_path.clone().unwrap_or_else(|| {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".ferrex")
+            .join("ferrex.toml")
+    })
+}
+
+fn build_config(cli: Cli) -> eyre::Result<FerrexConfig> {
+    let db_path = cli.db_path.clone().unwrap_or_else(|| {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".ferrex")
+            .join("ferrex.db")
+    });
+    let config_path = resolve_config_path(&cli);
+    let loaded = ferrex_core::load_or_init(&config_path, SHIPPED_BASELINE)
+        .map_err(|e| eyre::eyre!("config load: {e}"))?;
+    Ok(FerrexConfig {
+        qdrant_url: cli.qdrant_url,
+        qdrant_bin: cli.qdrant_bin,
+        qdrant_port: cli.qdrant_port,
+        model_tier: cli.model_tier,
+        reranker_tier: cli.reranker_tier,
+        namespace: cli.namespace,
+        db_path,
+        config_path: Some(config_path),
+        deduplication: loaded.deduplication,
+        conflict: loaded.conflict,
+        predicates: loaded.predicates,
+        reconciliation: loaded.reconciliation,
+        reader_pool_size: loaded.reader_pool_size,
+    })
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -133,6 +214,32 @@ impl FerrexServer {
 fn map_error(e: CoreError) -> ErrorData {
     match e {
         CoreError::Validation(msg) => ErrorData::invalid_params(msg, None),
+        CoreError::Duplicate {
+            existing_id,
+            similarity,
+        } => ErrorData::invalid_params(
+            format!("duplicate: existing_id={existing_id} similarity={similarity:.4}"),
+            Some(serde_json::json!({
+                "code": "duplicate",
+                "existing_id": existing_id,
+                "similarity": similarity,
+            })),
+        ),
+        CoreError::ConflictAmbiguous { existing_id, ratio } => ErrorData::invalid_params(
+            format!("conflict_ambiguous: existing_id={existing_id} ratio={ratio:.4}"),
+            Some(serde_json::json!({
+                "code": "conflict_ambiguous",
+                "existing_id": existing_id,
+                "ratio": ratio,
+            })),
+        ),
+        CoreError::MultiMatchConflict { existing_ids } => ErrorData::invalid_params(
+            format!("multi_match_conflict: existing_ids={existing_ids:?}"),
+            Some(serde_json::json!({
+                "code": "multi_match_conflict",
+                "existing_ids": existing_ids,
+            })),
+        ),
         other => ErrorData::internal_error(other.to_string(), None),
     }
 }
@@ -165,11 +272,12 @@ impl FerrexServer {
             supersedes: p.supersedes,
         };
 
-        let memory = self.service.store(req).await.map_err(map_error)?;
+        let resp = self.service.store(req).await.map_err(map_error)?;
         Ok(serde_json::to_string_pretty(&serde_json::json!({
             "stored": true,
-            "id": memory.id,
-            "type": memory.memory_type,
+            "id": resp.id,
+            "type": resp.memory_type,
+            "superseded": resp.superseded,
         }))
         .unwrap_or_default())
     }
@@ -232,7 +340,7 @@ impl FerrexServer {
             ids: p.ids,
             cascade: p.cascade,
         };
-        let resp = self.service.forget(&req).map_err(map_error)?;
+        let resp = self.service.forget(req).await.map_err(map_error)?;
         Ok(serde_json::to_string_pretty(&resp).unwrap_or_default())
     }
 
@@ -265,24 +373,7 @@ impl ServerHandler for FerrexServer {}
 
 fn main() -> eyre::Result<()> {
     color_eyre::install()?;
-    let cli = Cli::parse();
-
-    let db_path = cli.db_path.unwrap_or_else(|| {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".ferrex")
-            .join("ferrex.db")
-    });
-
-    let config = FerrexConfig {
-        qdrant_url: cli.qdrant_url,
-        qdrant_bin: cli.qdrant_bin,
-        qdrant_port: cli.qdrant_port,
-        model_tier: cli.model_tier,
-        reranker_tier: cli.reranker_tier,
-        namespace: cli.namespace,
-        db_path,
-    };
+    let mut cli = Cli::parse();
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -292,10 +383,27 @@ fn main() -> eyre::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
+    match cli.command.take() {
+        Some(Command::Audit {
+            audit: AuditCommand::Reconcile { fix, sample },
+        }) => {
+            return audit::run_reconcile(build_config(cli)?, fix, sample);
+        }
+        Some(Command::Backfill {
+            backfill: BackfillCommand::NormalizedPredicates { namespace, dry_run },
+        }) => {
+            return backfill::run_normalized_predicates(build_config(cli)?, namespace, dry_run);
+        }
+        None => {}
+    }
+
+    let config = build_config(cli)?;
+
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
         .block_on(async {
+            // Recovery runs inside from_config.
             let service = MemoryService::from_config(config).await?;
             let (service, mut sidecar) = service.into_parts();
             let server = FerrexServer::new(service);

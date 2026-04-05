@@ -8,6 +8,8 @@ authors.workspace = true
 
 [dependencies]
 chrono = { workspace = true }
+deadpool = { version = "0.12", features = ["rt_tokio_1"] }
+deadpool-sync = "0.1"
 dirs = { workspace = true }
 qdrant-client = { workspace = true }
 rusqlite = { workspace = true }

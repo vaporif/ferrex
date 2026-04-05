@@ -1,9 +1,14 @@
+mod config;
 mod entity;
 mod error;
+mod pipeline;
+mod predicate;
 mod retrieval;
 mod types;
 
+pub use config::{ConfigError, LoadedConfig, load_or_init, resolve_namespace_groups};
 pub use entity::EntityResolver;
+pub use predicate::PredicateNormalizer;
 pub use error::CoreError;
 use retrieval::SECONDS_PER_DAY;
 pub use retrieval::compute_recency_boost;
@@ -13,18 +18,39 @@ pub use ferrex_embed::{ModelTier, RerankerTier};
 pub use ferrex_store::{Entity, Memory, MemoryType};
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use chrono::Utc;
 use ferrex_embed::{Embedder, Reranker};
 use ferrex_store::{MetadataStore, QdrantSidecar, SqliteStore, VectorStore};
-use qdrant_client::Payload;
 use qdrant_client::qdrant::{Condition, Filter};
 use uuid::Uuid;
 
-const MAX_CONTENT_LENGTH: usize = 4096;
+use crate::pipeline::StoreContext;
+
 const DEFAULT_RECALL_LIMIT: usize = 10;
 const MIN_RERANK_POOL_SIZE: usize = 20;
 const STATS_RECENT_COUNT: usize = 5;
+
+#[derive(Debug, Default)]
+pub struct AuditReport {
+    pub sqlite_only: u64,
+    pub qdrant_only: u64,
+    pub fixed: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct BackfillReport {
+    pub scanned: u64,
+    pub updated: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct RecoveryReport {
+    pub compensated_stores: u64,
+    pub rolled_forward_forgets: u64,
+    pub cleared_pre_qdrant: u64,
+}
 
 pub struct MemoryService {
     embedder: Embedder,
@@ -33,6 +59,8 @@ pub struct MemoryService {
     vector_store: VectorStore,
     sidecar: Option<QdrantSidecar>,
     config: FerrexConfig,
+    normalizers: HashMap<String, Arc<PredicateNormalizer>>,
+    default_normalizer: Arc<PredicateNormalizer>,
 }
 
 impl MemoryService {
@@ -76,85 +104,324 @@ impl MemoryService {
 
         vector_store.ensure_collection(&config.namespace).await?;
 
-        Ok(Self {
+        let default_normalizer =
+            Arc::new(PredicateNormalizer::new(config.predicates.groups.clone()));
+        let mut normalizers = HashMap::new();
+        for ns_name in config.predicates.namespaces.keys() {
+            let groups = resolve_namespace_groups(&config.predicates, ns_name);
+            normalizers.insert(ns_name.clone(), Arc::new(PredicateNormalizer::new(groups)));
+        }
+
+        let service = Self {
             embedder,
             reranker,
             metadata_store,
             vector_store,
             sidecar,
             config,
+            normalizers,
+            default_normalizer,
+        };
+
+        let report = service.recover_on_startup().await?;
+        if report.compensated_stores + report.rolled_forward_forgets + report.cleared_pre_qdrant
+            > 0
+        {
+            tracing::info!(
+                compensated_stores = report.compensated_stores,
+                rolled_forward_forgets = report.rolled_forward_forgets,
+                cleared_pre_qdrant = report.cleared_pre_qdrant,
+                "recovered pending ops on startup"
+            );
+        }
+
+        Ok(service)
+    }
+
+    pub async fn recover_on_startup(&self) -> Result<RecoveryReport, CoreError> {
+        use ferrex_store::PendingOpKind;
+
+        let pending = self.metadata_store.list_pending_ops().await?;
+        let mut report = RecoveryReport::default();
+        for op in pending {
+            match (op.kind, op.qdrant_written) {
+                (_, false) => {
+                    self.metadata_store.clear_pending_op(&op.op_id).await?;
+                    report.cleared_pre_qdrant += 1;
+                }
+                (PendingOpKind::Store | PendingOpKind::Supersede, true) => {
+                    let Ok(uuid) = Uuid::parse_str(&op.memory_id) else {
+                        tracing::warn!(op_id = %op.op_id, "invalid memory_id uuid in journal");
+                        self.metadata_store.clear_pending_op(&op.op_id).await?;
+                        continue;
+                    };
+                    self.vector_store
+                        .delete_by_ids(&op.namespace, &[uuid])
+                        .await?;
+                    // SQLite insert may or may not have landed. Either way, the
+                    // memory is unreachable without its Qdrant point; drop it.
+                    self.metadata_store
+                        .delete_memories(std::slice::from_ref(&op.memory_id))
+                        .await?;
+                    self.metadata_store.clear_pending_op(&op.op_id).await?;
+                    report.compensated_stores += 1;
+                }
+                (PendingOpKind::Forget, true) => {
+                    self.metadata_store
+                        .delete_memories(std::slice::from_ref(&op.memory_id))
+                        .await?;
+                    self.metadata_store.clear_pending_op(&op.op_id).await?;
+                    report.rolled_forward_forgets += 1;
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    pub async fn audit_reconcile(
+        &self,
+        fix: bool,
+        fix_limit: u64,
+    ) -> Result<AuditReport, CoreError> {
+        use std::collections::HashSet;
+
+        let qdrant_ids = self
+            .vector_store
+            .scroll_all_ids(&self.config.namespace)
+            .await?;
+        let qdrant_set: HashSet<String> = qdrant_ids.iter().map(ToString::to_string).collect();
+
+        let sqlite_ids = self
+            .metadata_store
+            .list_all_memory_ids(&self.config.namespace)
+            .await?;
+        let sqlite_set: HashSet<String> = sqlite_ids.into_iter().collect();
+
+        let qdrant_only: Vec<String> = qdrant_set.difference(&sqlite_set).cloned().collect();
+        let sqlite_only_count = sqlite_set.difference(&qdrant_set).count() as u64;
+
+        let mut report = AuditReport {
+            sqlite_only: sqlite_only_count,
+            qdrant_only: qdrant_only.len() as u64,
+            fixed: 0,
+        };
+        if fix {
+            if qdrant_only.len() as u64 > fix_limit {
+                return Err(CoreError::Validation(format!(
+                    "audit refuses to auto-fix {} qdrant-only ids (limit {fix_limit})",
+                    qdrant_only.len(),
+                )));
+            }
+            let uuids: Vec<uuid::Uuid> = qdrant_only
+                .iter()
+                .filter_map(|s| uuid::Uuid::parse_str(s).ok())
+                .collect();
+            self.vector_store
+                .delete_by_ids(&self.config.namespace, &uuids)
+                .await?;
+            report.fixed = uuids.len() as u64;
+        }
+        Ok(report)
+    }
+
+    pub async fn backfill_normalized_predicates(
+        &self,
+        namespace: Option<&str>,
+        dry_run: bool,
+    ) -> Result<BackfillReport, CoreError> {
+        let rows = self
+            .metadata_store
+            .semantic_rows_missing_normalized_predicate(namespace)
+            .await?;
+        let mut report = BackfillReport {
+            scanned: rows.len() as u64,
+            updated: 0,
+        };
+        for row in rows {
+            let normalizer = self
+                .normalizers
+                .get(&row.namespace)
+                .cloned()
+                .unwrap_or_else(|| Arc::clone(&self.default_normalizer));
+            let Some(pred) = row.predicate.as_deref() else {
+                continue;
+            };
+            let normalized = normalizer.normalize(pred);
+            if dry_run {
+                report.updated += 1;
+                continue;
+            }
+            self.metadata_store
+                .set_normalized_predicate(&row.id, &normalized)
+                .await?;
+            report.updated += 1;
+        }
+        Ok(report)
+    }
+
+    pub async fn store(&self, req: StoreRequest) -> Result<StoreResponse, CoreError> {
+        let memory_type = detect_memory_type(&req);
+        let namespace = req
+            .namespace
+            .clone()
+            .unwrap_or_else(|| self.config.namespace.clone());
+        let normalizer = self
+            .normalizers
+            .get(&namespace)
+            .cloned()
+            .unwrap_or_else(|| Arc::clone(&self.default_normalizer));
+
+        let mut ctx = StoreContext::new(
+            req,
+            namespace,
+            memory_type,
+            &normalizer,
+            &self.config.deduplication,
+            &self.config.conflict,
+        );
+
+        pipeline::validate::run(&ctx)?;
+
+        let supersedes_target = ctx.req.supersedes.clone();
+        let is_supersede = supersedes_target.is_some();
+
+        if memory_type == MemoryType::Semantic {
+            pipeline::normalize_predicate::run(&mut ctx)?;
+        }
+        pipeline::embed::run(&mut ctx, &self.embedder).await?;
+        if !is_supersede {
+            pipeline::dedup::run(&ctx, &self.vector_store).await?;
+            pipeline::conflict::run(&mut ctx, &self.metadata_store).await?;
+        }
+        pipeline::resolve_entities::run(
+            &mut ctx,
+            &self.metadata_store,
+            &self.vector_store,
+            &self.embedder,
+        )
+        .await?;
+
+        let memory = if let Some(ref target_id) = supersedes_target {
+            self.supersede_write(&ctx, target_id).await?
+        } else {
+            pipeline::write::run(&ctx, &self.metadata_store, &self.vector_store).await?
+        };
+
+        let superseded = if let Some(id) = supersedes_target {
+            vec![id]
+        } else {
+            ctx.superseded_ids.clone()
+        };
+
+        Ok(StoreResponse {
+            id: memory.id,
+            memory_type: memory_type.as_str().to_string(),
+            superseded,
         })
     }
 
-    pub async fn store(&self, req: StoreRequest) -> Result<Memory, CoreError> {
-        let memory_type = detect_memory_type(&req);
-        validate_store_request(&req, memory_type)?;
-
-        let namespace = req.namespace.as_deref().unwrap_or(&self.config.namespace);
-        let now = Utc::now();
-        let id = Uuid::now_v7();
-        let confidence = clamp_confidence(req.confidence);
-
-        let resolved_entities = if req.entities.is_empty() {
-            vec![]
-        } else {
-            self.vector_store.ensure_collection(namespace).await?;
-            let resolver = EntityResolver {
-                metadata_store: &self.metadata_store,
-                vector_store: &self.vector_store,
-                embedder: &self.embedder,
-            };
-            resolver.resolve(&req.entities, namespace).await?
+    async fn supersede_write(
+        &self,
+        ctx: &StoreContext<'_>,
+        target_id: &str,
+    ) -> Result<Memory, CoreError> {
+        use ferrex_store::{
+            POINT_TYPE_FIELD, POINT_TYPE_MEMORY, PendingOp, PendingOpKind,
         };
-        let entity_names = resolved_entities.iter().map(|e| e.name.clone()).collect();
+        use qdrant_client::Payload;
 
-        let memory = Memory {
-            id: id.to_string(),
-            namespace: namespace.to_string(),
-            memory_type,
-            content: req.content,
-            subject: req.subject,
-            predicate: req.predicate,
-            object: req.object,
-            confidence,
-            source: req.source,
-            context: req.context,
-            entities: entity_names,
-            created_at: now,
-            updated_at: now,
-            t_valid: None,
-            t_invalid: None,
-            last_accessed: now,
-            last_validated: None,
-            access_count: 0,
-        };
-
-        let embed_text = memory.searchable_text();
-        let embedding = self.embedder.embed(&embed_text).await?;
-
-        // Metadata first: easier to roll back than a vector upsert
-        self.metadata_store.insert_memory(&memory).await?;
-
-        for entity in &resolved_entities {
-            self.metadata_store
-                .link_memory_entity(&memory.id, &entity.id)
-                .await?;
+        let target = self
+            .metadata_store
+            .get_memory(target_id)
+            .await?
+            .ok_or_else(|| {
+                CoreError::Validation(format!("supersedes target not found: {target_id}"))
+            })?;
+        if target.namespace != ctx.namespace {
+            return Err(CoreError::Validation(format!(
+                "supersedes target {target_id} is in namespace {}, not {}",
+                target.namespace, ctx.namespace
+            )));
+        }
+        if target.t_invalid.is_some() {
+            return Err(CoreError::Validation(format!(
+                "supersedes target {target_id} is already invalidated"
+            )));
         }
 
+        let embedding = ctx
+            .embedding
+            .clone()
+            .ok_or_else(|| CoreError::Validation("supersede write requires embedding".into()))?;
+        let search_text = ctx.search_text.clone().unwrap_or_default();
+
+        let confidence = ctx.req.confidence.map_or(1.0, |c| c.clamp(0.0, 1.0));
+        let entity_names = ctx
+            .resolved_entities
+            .iter()
+            .map(|e| e.name.clone())
+            .collect();
+        let memory = Memory {
+            id: ctx.id.to_string(),
+            namespace: ctx.namespace.clone(),
+            memory_type: ctx.memory_type,
+            content: ctx.req.content.clone(),
+            subject: ctx.req.subject.clone(),
+            predicate: ctx.req.predicate.clone(),
+            object: ctx.req.object.clone(),
+            confidence,
+            source: ctx.req.source.clone(),
+            context: ctx.req.context.clone(),
+            entities: entity_names,
+            created_at: ctx.now,
+            updated_at: ctx.now,
+            t_valid: None,
+            t_invalid: None,
+            last_accessed: ctx.now,
+            last_validated: None,
+            access_count: 0,
+            normalized_predicate: ctx.normalized_predicate.clone(),
+        };
+
+        let op = PendingOp {
+            op_id: Uuid::now_v7().to_string(),
+            kind: PendingOpKind::Supersede,
+            memory_id: memory.id.clone(),
+            namespace: memory.namespace.clone(),
+            target_id: Some(target_id.to_string()),
+            qdrant_written: false,
+            started_at: Utc::now(),
+        };
+        self.metadata_store.insert_pending_op(&op).await?;
+
         let payload = Payload::try_from(serde_json::json!({
-            "memory_id": id.to_string(),
-            "memory_type": memory_type.as_str(),
-            "namespace": namespace,
-            "searchable_text": embed_text,
+            "memory_id": memory.id,
+            "memory_type": memory.memory_type.as_str(),
+            "namespace": memory.namespace,
+            "searchable_text": search_text,
             "entities": &memory.entities,
-            "created_at": now.to_rfc3339(),
-            ferrex_store::POINT_TYPE_FIELD: ferrex_store::POINT_TYPE_MEMORY,
+            "created_at": memory.created_at.to_rfc3339(),
+            POINT_TYPE_FIELD: POINT_TYPE_MEMORY,
         }))
         .map_err(|e| CoreError::Validation(e.to_string()))?;
 
         self.vector_store
-            .upsert(namespace, id, embedding, &embed_text, payload)
+            .upsert(&memory.namespace, ctx.id, embedding, &search_text, payload)
             .await?;
+        self.metadata_store
+            .mark_pending_op_qdrant_written(&op.op_id)
+            .await?;
+
+        self.metadata_store.insert_memory(&memory).await?;
+        for entity in &ctx.resolved_entities {
+            self.metadata_store
+                .link_memory_entity(&memory.id, &entity.id)
+                .await?;
+        }
+        self.metadata_store
+            .invalidate_memory(target_id, Utc::now())
+            .await?;
+        self.metadata_store.clear_pending_op(&op.op_id).await?;
 
         Ok(memory)
     }
@@ -281,14 +548,58 @@ impl MemoryService {
         })
     }
 
-    pub fn forget(&self, req: &ForgetRequest) -> Result<ForgetResponse, CoreError> {
+    pub async fn forget(&self, req: ForgetRequest) -> Result<ForgetResponse, CoreError> {
+        use ferrex_store::{PendingOp, PendingOpKind};
+
         for id in &req.ids {
-            id.parse::<Uuid>()
+            Uuid::parse_str(id)
                 .map_err(|_| CoreError::Validation(format!("invalid UUID: {id}")))?;
         }
+        if req.cascade.is_some() {
+            tracing::warn!("forget: `cascade` field is deprecated and ignored");
+        }
+
+        let mut deleted = Vec::new();
+        let mut not_found = Vec::new();
+
+        for id in &req.ids {
+            let Some(memory) = self.metadata_store.get_memory(id).await? else {
+                not_found.push(id.clone());
+                continue;
+            };
+
+            let op = PendingOp {
+                op_id: Uuid::now_v7().to_string(),
+                kind: PendingOpKind::Forget,
+                memory_id: id.clone(),
+                namespace: memory.namespace.clone(),
+                target_id: None,
+                qdrant_written: false,
+                started_at: Utc::now(),
+            };
+            self.metadata_store.insert_pending_op(&op).await?;
+
+            let uuid =
+                Uuid::parse_str(id).map_err(|e| CoreError::Validation(e.to_string()))?;
+            self.vector_store
+                .delete_by_ids(&memory.namespace, &[uuid])
+                .await?;
+            self.metadata_store
+                .mark_pending_op_qdrant_written(&op.op_id)
+                .await?;
+
+            self.metadata_store
+                .delete_memories(std::slice::from_ref(id))
+                .await?;
+            self.metadata_store.clear_pending_op(&op.op_id).await?;
+
+            deleted.push(id.clone());
+        }
+
         Ok(ForgetResponse {
-            message: "forget is not yet implemented".to_string(),
-            deleted: vec![],
+            message: format!("deleted {} memories", deleted.len()),
+            deleted,
+            not_found,
         })
     }
 
@@ -317,35 +628,6 @@ const fn detect_memory_type(req: &StoreRequest) -> MemoryType {
     }
 }
 
-fn validate_store_request(req: &StoreRequest, memory_type: MemoryType) -> Result<(), CoreError> {
-    match memory_type {
-        MemoryType::Episodic | MemoryType::Procedural => {
-            let Some(content) = req.content.as_deref().filter(|c| !c.is_empty()) else {
-                return Err(CoreError::Validation(format!(
-                    "{memory_type} memory requires content"
-                )));
-            };
-            if content.len() > MAX_CONTENT_LENGTH {
-                return Err(CoreError::Validation(format!(
-                    "content exceeds {MAX_CONTENT_LENGTH} byte limit"
-                )));
-            }
-        }
-        MemoryType::Semantic => {
-            let non_empty = |opt: &Option<String>| opt.as_deref().is_some_and(|s| !s.is_empty());
-            if !non_empty(&req.subject) || !non_empty(&req.predicate) || !non_empty(&req.object) {
-                return Err(CoreError::Validation(
-                    "semantic memory requires non-empty subject, predicate, and object".into(),
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn clamp_confidence(confidence: Option<f64>) -> f64 {
-    confidence.map_or(1.0, |c| c.clamp(0.0, 1.0))
-}
 
 #[cfg(test)]
 mod tests {
@@ -406,46 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_episodic_missing_content() {
-        let req = StoreRequest {
-            content: None,
-            memory_type: Some(MemoryType::Episodic),
-            subject: None,
-            predicate: None,
-            object: None,
-            confidence: None,
-            source: None,
-            context: None,
-            entities: vec![],
-            namespace: None,
-            supersedes: None,
-        };
-        let result = validate_store_request(&req, MemoryType::Episodic);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_validate_content_too_long() {
-        let long_content = "x".repeat(4097);
-        let req = StoreRequest {
-            content: Some(long_content),
-            memory_type: None,
-            subject: None,
-            predicate: None,
-            object: None,
-            confidence: None,
-            source: None,
-            context: None,
-            entities: vec![],
-            namespace: None,
-            supersedes: None,
-        };
-        let result = validate_store_request(&req, MemoryType::Episodic);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_validate_semantic_missing_triple() {
+    fn test_semantic_triple_missing_predicate_detects_as_episodic() {
         let req = StoreRequest {
             content: None,
             memory_type: None,
@@ -459,16 +702,6 @@ mod tests {
             namespace: None,
             supersedes: None,
         };
-        let mem_type = detect_memory_type(&req);
-        assert_eq!(mem_type, MemoryType::Episodic);
-    }
-
-    #[test]
-    #[allow(clippy::float_cmp)]
-    fn test_clamp_confidence() {
-        assert_eq!(clamp_confidence(None), 1.0);
-        assert_eq!(clamp_confidence(Some(0.5)), 0.5);
-        assert_eq!(clamp_confidence(Some(-0.1)), 0.0);
-        assert_eq!(clamp_confidence(Some(1.5)), 1.0);
+        assert_eq!(detect_memory_type(&req), MemoryType::Episodic);
     }
 }

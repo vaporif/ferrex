@@ -4,6 +4,8 @@ pub enum StoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("qdrant error: {0}")]
     Qdrant(String),
+    #[error("connection pool: {0}")]
+    Pool(String),
     #[error("sidecar error: {0}")]
     Sidecar(String),
     #[error("not found: {0}")]

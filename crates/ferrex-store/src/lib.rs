@@ -1,10 +1,12 @@
 mod error;
+mod journal;
 mod metadata;
 mod schema;
 mod sidecar;
 mod vector;
 
 pub use error::StoreError;
+pub use journal::{PendingOp, PendingOpKind};
 pub use metadata::{MetadataStore, SqliteStore};
 pub use sidecar::QdrantSidecar;
 pub use vector::VectorStore;
@@ -73,6 +75,7 @@ pub struct Memory {
     pub last_accessed: DateTime<Utc>,
     pub last_validated: Option<DateTime<Utc>>,
     pub access_count: u64,
+    pub normalized_predicate: Option<String>,
 }
 
 impl Memory {
