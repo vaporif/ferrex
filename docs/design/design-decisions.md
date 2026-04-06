@@ -26,14 +26,13 @@ Decisions made during design review, April 2026.
 
 **Decision:** Each entity has a canonical name + list of aliases. Full layered pipeline in v1:
 1. Normalize (lowercase, trim, collapse separators) → check for exact match → merge
-2. Fuzzy match against existing entities (SequenceMatcher ratio > 0.85) → merge
-3. Embedding similarity > 0.92 → merge
-4. Embedding similarity 0.80-0.92 → store both, add as alias candidates, surface in `reflect`
-5. No match → create as new entity
+2. Fuzzy match against existing entities (Jaro-Winkler similarity (strsim) > 0.85) → merge
+3. Embedding similarity > 0.92 → merge, store as alias
+4. No match → create as new entity
 
 All lookups check aliases first. This is the full pipeline — not deferred.
 
-**Why:** Layered approach uses the right tool for each case. Deterministic for obvious matches, embedding-based for semantic equivalence, human review for ambiguous cases. Entity fragmentation compounds over time and is harder to fix retroactively than to prevent upfront.
+**Why:** Layered approach uses the right tool for each case. Deterministic for obvious matches, embedding-based for semantic equivalence. Entity fragmentation compounds over time and is harder to fix retroactively than to prevent upfront.
 
 ## 4. Reflect: Agent-Side LLM (ferrex stays LLM-free)
 
@@ -178,12 +177,12 @@ All lookups check aliases first. This is the full pipeline — not deferred.
 
 **Decision:** `type` is optional on `store`. When omitted, auto-detect from provided fields:
 - `subject` + `predicate` + `object` present → semantic
-- `steps` or `conditions` present → procedural
 - Everything else → episodic
+- Procedural requires explicit `memory_type` field — no auto-detection
 
 Agent can still set type explicitly if it wants to override.
 
-**Why:** Shifts classification burden from agent to system. The field structure already implies the type unambiguously. Keeps the type system as an internal optimization detail while preserving backward compatibility for explicit callers.
+**Why:** Shifts classification burden from agent to system for the common cases. Semantic is unambiguously identified by its triple structure. Procedural memories lack a reliable structural signal for auto-detection, so they require the agent to set the type explicitly. Keeps the type system as an internal optimization detail while preserving backward compatibility for explicit callers.
 
 ## 14. Deduplication on Store
 
@@ -257,9 +256,9 @@ Agent can still set type explicitly if it wants to override.
 
 **Problem:** Agents call `stats` at conversation start. Full diagnostics waste tokens on information irrelevant to 90% of conversations (storage_mb, entity count, full staleness breakdown).
 
-**Decision:** `stats` has a `detail` parameter (default `false`):
+**Decision:** `stats` has a `detailed` parameter (default `false`):
 - **Brief mode** (default): returns `total` count, top-5 `recent` memories, and `needs_attention` section only.
-- **Detailed mode** (`detail=true`): returns full diagnostics including counts by type, staleness distribution, storage size, entity count.
+- **Detailed mode** (`detailed=true`): returns full diagnostics including counts by type, staleness distribution, storage size, entity count.
 
 **Why:** Brief mode gives the agent enough context to orient (recent memories + what needs attention) without burning tokens on system health metrics. Detailed mode available on demand for health checks and debugging.
 
@@ -270,7 +269,7 @@ Agent can still set type explicitly if it wants to override.
 **Decision:** Normalize predicates before conflict matching:
 1. Lowercase, trim, collapse separators
 2. Static synonym map for common predicate families (extensible via config)
-3. Fuzzy match (SequenceMatcher ratio > 0.85) against existing predicates for the same subject
+3. Fuzzy match (Jaro-Winkler similarity (strsim) > 0.85) against existing predicates for the same subject
 
 **Why:** Without predicate normalization, ("api-server", "uses", "tokio 1.36") and ("api-server", "depends-on", "tokio 1.38") are treated as unrelated facts instead of a version update. The synonym map handles the common cases cheaply; fuzzy matching catches the rest.
 

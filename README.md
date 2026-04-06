@@ -45,9 +45,9 @@ Type auto-detects from the fields you provide. Pass subject + predicate + object
 Agents name things inconsistently ("tokio" vs "Tokio" vs "tokio runtime"). ferrex resolves entities through a layered pipeline:
 
 1. Normalize (lowercase, trim, collapse separators), check for exact match
-2. Fuzzy string match (strsim, ratio > 0.85)
-3. Embedding similarity (cosine > 0.92) for semantic equivalence
-4. Ambiguous range (0.80--0.92) gets stored as alias candidates for later review
+2. Fuzzy string match (strsim Jaro-Winkler, score > 0.85)
+3. Embedding similarity (cosine > 0.92) for semantic equivalence — matched entities get stored as aliases
+4. Below threshold — new entity created
 
 ## Design docs
 

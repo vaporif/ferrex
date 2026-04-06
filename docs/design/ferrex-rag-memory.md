@@ -190,7 +190,7 @@ MCP tool descriptions are loaded into the agent's context at session start. They
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `type` | string | no | `"episodic"`, `"semantic"`, or `"procedural"`. Auto-detected when omitted: semantic if `subject`+`predicate`+`object` provided, procedural if `steps`/`conditions` provided, episodic otherwise. |
+| `type` | string | no | `"episodic"`, `"semantic"`, or `"procedural"`. Auto-detected when omitted: semantic if `subject`+`predicate`+`object` provided, episodic otherwise. Procedural requires explicit type. |
 | `content` | string | yes* | What happened (episodic) or the procedure steps (procedural). Self-contained format recommended: "what \| when \| where \| who \| why" |
 | `subject` | string | yes* | The entity this fact is about (semantic only) |
 | `predicate` | string | yes* | The relationship or property (semantic only) |
@@ -282,8 +282,10 @@ Phase 4 adds freshness metadata:
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `scope` | string | no | Limit reflection to a namespace/topic |
-| `window` | string | no | Time window to reflect over, default "7d" |
+| `namespace` | string | yes | Namespace to reflect over |
+| `limit` | int | no | Max items to return per category |
+| `include_contradictions` | bool | no | Include contradiction alerts, default true |
+| `include_stale` | bool | no | Include stale memory audit, default true |
 
 Returns:
 - List of stale/unvalidated memories that need review
@@ -293,11 +295,12 @@ Returns:
 ### `stats`
 
 **MCP description** (what the agent sees):
-> Memory system overview. Call this at the START of every conversation for a quick status, or with `detail=true` for full diagnostics. Default (brief) mode returns just what needs attention and recent context — enough to orient without wasting tokens. Detailed mode adds counts, staleness distribution, and storage info.
+> Memory system overview. Call this at the START of every conversation for a quick status, or with `detailed=true` for full diagnostics. Default (brief) mode returns just what needs attention and recent context — enough to orient without wasting tokens. Detailed mode adds counts, staleness distribution, and storage info.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `detail` | bool | no | Default `false` (brief mode). Set `true` for full diagnostics. |
+| `namespace` | string | yes | Namespace to query stats for |
+| `detailed` | bool | no | Default `false` (brief mode). Set `true` for full diagnostics. |
 
 **Brief mode (default)** — optimized for conversation-start. Minimal token cost:
 
@@ -316,7 +319,7 @@ Returns:
 }
 ```
 
-**Detailed mode** (`detail=true`) — full diagnostics for health checks:
+**Detailed mode** (`detailed=true`) — full diagnostics for health checks:
 
 ```json
 {
@@ -364,10 +367,9 @@ Agents provide inconsistent entity names ("tokio" vs "Tokio" vs "tokio runtime")
 
 Layered resolution pipeline:
 1. **Normalize** — lowercase, trim whitespace, collapse separators. `"Tokio"` → `"tokio"`. Check for exact match against existing entities → merge silently.
-2. **Fuzzy match** — SequenceMatcher ratio > 0.85 against existing entity names and aliases → merge. Catches "postgres" ↔ "postgresql".
-3. **Embedding similarity** — cosine > 0.92 → merge. Catches semantically equivalent but lexically different names.
-4. **Ambiguous** — embedding similarity 0.80-0.92 → store both, add as alias candidates, surface in `reflect` for agent review.
-5. **No match** → create as new entity.
+2. **Fuzzy match** — Jaro-Winkler similarity (strsim) > 0.85 against existing entity names and aliases → merge. Catches "postgres" ↔ "postgresql".
+3. **Embedding similarity** — cosine > 0.92 → merge, store as alias. Catches semantically equivalent but lexically different names.
+4. **No match** → create as new entity.
 
 Each entity has a canonical name + list of aliases. All lookups check aliases first.
 
@@ -498,7 +500,7 @@ Resolution pipeline (applied before conflict matching):
    - `written_in`, `implemented_in`, `built_with` → canonical `built_with`
    - `version`, `runs_version`, `at_version` → canonical `version`
    - `owned_by`, `maintained_by`, `managed_by` → canonical `owned_by`
-3. **Fuzzy match** — SequenceMatcher ratio > 0.85 against existing predicates for the same subject → treat as same predicate.
+3. **Fuzzy match** — Jaro-Winkler similarity (strsim) > 0.85 against existing predicates for the same subject → treat as same predicate.
 
 The synonym map is extensible via config. Unrecognized predicates pass through as-is — fuzzy matching catches most remaining equivalences.
 
@@ -823,8 +825,8 @@ Tests are written alongside each implementation phase, not deferred to the end. 
 - Normalization: "Tokio" → "tokio", "  api  server  " → "api server"
 - Fuzzy match: "postgres" ↔ "postgresql" merges above 0.85
 - Alias lookup: querying by alias returns canonical entity
-- Ambiguous range (0.80-0.92 embedding similarity): both stored, alias candidate created
-- No match: new entity created
+- Embedding similarity > 0.92: merged, stored as alias
+- Below threshold: new entity created
 
 **Deduplication** (`ferrex-core/memory.rs`):
 - Cosine > threshold rejects with existing ID

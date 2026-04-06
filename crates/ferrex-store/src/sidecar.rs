@@ -1,4 +1,4 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::Duration;
@@ -24,12 +24,19 @@ impl QdrantSidecar {
             .map_err(|e| StoreError::Sidecar(format!("failed to create ~/.ferrex: {e}")))?;
 
         let pid_file = ferrex_dir.join("qdrant.pid");
+        let lock_file_path = ferrex_dir.join("qdrant.lock");
         let data_dir = ferrex_dir.join("qdrant-data");
         let config_path = ferrex_dir.join("qdrant-config.yaml");
+
+        // Acquire an exclusive lock file to prevent TOCTOU races between
+        // concurrent processes checking the PID file and spawning Qdrant.
+        let lock_file = acquire_lock_file(&lock_file_path)?;
 
         if let Some(existing_pid) = read_pid(&pid_file) {
             if is_process_alive(existing_pid) {
                 tracing::info!(pid = existing_pid, "reusing existing Qdrant process");
+                drop(lock_file);
+                let _ = fs::remove_file(&lock_file_path);
                 let sidecar = Self {
                     pid_file,
                     process: None,
@@ -70,6 +77,10 @@ impl QdrantSidecar {
         let pid = child.id();
         fs::write(&pid_file, pid.to_string())
             .map_err(|e| StoreError::Sidecar(format!("failed to write PID file: {e}")))?;
+
+        // Release lock now that PID file is written.
+        drop(lock_file);
+        let _ = fs::remove_file(&lock_file_path);
 
         let sidecar = Self {
             pid_file,
@@ -132,6 +143,39 @@ impl Drop for QdrantSidecar {
 
 fn dirs_home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn acquire_lock_file(path: &Path) -> Result<std::fs::File, StoreError> {
+    const MAX_ATTEMPTS: u32 = 10;
+    const RETRY_DELAY: Duration = Duration::from_millis(200);
+    const STALE_LOCK_AGE: Duration = Duration::from_secs(30);
+
+    for attempt in 0..MAX_ATTEMPTS {
+        match OpenOptions::new().write(true).create_new(true).open(path) {
+            Ok(f) => return Ok(f),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if let Ok(meta) = fs::metadata(path)
+                    && let Some(age) = meta.modified().ok().and_then(|m| m.elapsed().ok())
+                    && age > STALE_LOCK_AGE
+                {
+                    tracing::warn!("removing stale lock file");
+                    let _ = fs::remove_file(path);
+                    continue;
+                }
+                if attempt + 1 < MAX_ATTEMPTS {
+                    std::thread::sleep(RETRY_DELAY);
+                }
+            }
+            Err(e) => {
+                return Err(StoreError::Sidecar(format!(
+                    "failed to create lock file: {e}"
+                )));
+            }
+        }
+    }
+    Err(StoreError::Sidecar(
+        "timed out waiting for sidecar lock file".to_string(),
+    ))
 }
 
 fn read_pid(path: &Path) -> Option<u32> {

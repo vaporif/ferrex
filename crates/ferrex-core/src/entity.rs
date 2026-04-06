@@ -22,10 +22,13 @@ impl<M: MetadataStore> EntityResolver<'_, M> {
         entity_names: &[String],
         namespace: &str,
     ) -> Result<Vec<Entity>, CoreError> {
-        let all_entities = self.metadata_store.get_all_entities().await?;
+        let mut all_entities = self.metadata_store.get_all_entities().await?;
         let mut resolved = Vec::with_capacity(entity_names.len());
         for name in entity_names {
             let entity = self.resolve_single(name, namespace, &all_entities).await?;
+            if !all_entities.iter().any(|e| e.id == entity.id) {
+                all_entities.push(entity.clone());
+            }
             resolved.push(entity);
         }
         Ok(resolved)

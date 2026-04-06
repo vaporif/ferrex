@@ -15,6 +15,7 @@ const DENSE_VECTOR: &str = "dense";
 const SPARSE_VECTOR: &str = "sparse";
 const BM25_TOKENIZER: &str = "Qdrant/bm25";
 const MIN_PREFETCH_LIMIT: u64 = 20;
+const SCROLL_PAGE_SIZE: u32 = 1024;
 
 pub struct VectorStore {
     client: Qdrant,
@@ -240,7 +241,7 @@ impl VectorStore {
         let mut offset: Option<qdrant_client::qdrant::PointId> = None;
         loop {
             let mut req = ScrollPointsBuilder::new(&name)
-                .limit(1024)
+                .limit(SCROLL_PAGE_SIZE)
                 .with_payload(false);
             if let Some(o) = offset.clone() {
                 req = req.offset(o);

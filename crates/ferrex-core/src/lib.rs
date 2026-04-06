@@ -33,8 +33,10 @@ use uuid::Uuid;
 use crate::pipeline::StoreContext;
 
 const DEFAULT_RECALL_LIMIT: usize = 10;
+const MAX_RECALL_LIMIT: usize = 200;
 const MIN_RERANK_POOL_SIZE: usize = 20;
 const STATS_RECENT_COUNT: usize = 5;
+const MAX_SCAN_MEMORIES: usize = 10_000;
 
 #[derive(Debug, Default)]
 pub struct AuditReport {
@@ -250,6 +252,9 @@ impl MemoryService {
                 continue;
             };
             let normalized = normalizer.normalize(pred);
+            if normalized == pred {
+                continue;
+            }
             if dry_run {
                 report.updated += 1;
                 continue;
@@ -373,7 +378,10 @@ impl MemoryService {
         }
 
         let namespace = req.namespace.as_deref().unwrap_or(&self.config.namespace);
-        let limit = req.limit.unwrap_or(DEFAULT_RECALL_LIMIT);
+        let limit = req
+            .limit
+            .unwrap_or(DEFAULT_RECALL_LIMIT)
+            .min(MAX_RECALL_LIMIT);
         let candidate_pool_size = limit.max(MIN_RERANK_POOL_SIZE);
 
         let embedding = self.embedder.embed(&req.query).await?;
@@ -472,14 +480,18 @@ impl MemoryService {
         if let Some(ref validate_ids) = req.validate_ids
             && !validate_ids.is_empty()
         {
-            for id in validate_ids {
-                Uuid::parse_str(id).map_err(|_| {
-                    CoreError::Validation(format!("invalid UUID in validate_ids: {id}"))
-                })?;
+            let result_ids: std::collections::HashSet<&str> =
+                results.iter().map(|r| r.memory.id.as_str()).collect();
+            let valid_ids: Vec<String> = validate_ids
+                .iter()
+                .filter(|id| Uuid::parse_str(id).is_ok() && result_ids.contains(id.as_str()))
+                .cloned()
+                .collect();
+            if !valid_ids.is_empty() {
+                self.metadata_store
+                    .update_last_validated(&valid_ids, now)
+                    .await?;
             }
-            self.metadata_store
-                .update_last_validated(validate_ids, now)
-                .await?;
         }
 
         Ok(results)
@@ -488,11 +500,19 @@ impl MemoryService {
     #[allow(clippy::cast_precision_loss)] // counts-to-f64 is fine for averaging
     pub async fn stats(&self, req: StatsRequest) -> Result<StatsResponse, CoreError> {
         let namespace = &req.namespace;
-        let all_ids = self.metadata_store.list_all_memory_ids(namespace).await?;
+        let mut all_ids = self.metadata_store.list_all_memory_ids(namespace).await?;
+        if all_ids.len() > MAX_SCAN_MEMORIES {
+            tracing::warn!(
+                total = all_ids.len(),
+                cap = MAX_SCAN_MEMORIES,
+                "stats: truncating memory ID list to cap"
+            );
+            all_ids.truncate(MAX_SCAN_MEMORIES);
+        }
         let total = all_ids.len() as u64;
         let recent = self
             .metadata_store
-            .recent_memories(STATS_RECENT_COUNT)
+            .recent_memories(namespace, STATS_RECENT_COUNT)
             .await?;
 
         let staleness_config = &self.config.staleness;
@@ -736,7 +756,15 @@ impl MemoryService {
         }
 
         let contradictions = if req.include_contradictions {
-            let all_ids = self.metadata_store.list_all_memory_ids(namespace).await?;
+            let mut all_ids = self.metadata_store.list_all_memory_ids(namespace).await?;
+            if all_ids.len() > MAX_SCAN_MEMORIES {
+                tracing::warn!(
+                    total = all_ids.len(),
+                    cap = MAX_SCAN_MEMORIES,
+                    "reflect: truncating memory ID list to cap"
+                );
+                all_ids.truncate(MAX_SCAN_MEMORIES);
+            }
             let all_memories = self.metadata_store.get_memories_by_ids(&all_ids).await?;
             let valid_semantics: Vec<Memory> = all_memories
                 .into_iter()
