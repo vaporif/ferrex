@@ -21,7 +21,6 @@ impl AccessTracker {
         buf.extend(ids.iter().cloned());
     }
 
-    /// Drain if buffer has reached the flush threshold. Single lock acquisition.
     pub fn drain_if_full(&self) -> Option<Vec<String>> {
         let mut buf = self.buffer.lock().expect("poisoned");
         if buf.len() < self.flush_threshold {
@@ -30,7 +29,6 @@ impl AccessTracker {
         Some(dedup_drain(&mut buf))
     }
 
-    /// Drain unconditionally (for shutdown / background timer).
     pub fn drain(&self) -> Vec<String> {
         let mut buf = self.buffer.lock().expect("poisoned");
         dedup_drain(&mut buf)
