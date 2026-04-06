@@ -44,3 +44,22 @@ audit_fix_limit = 1000
 # Size of the SQLite reader connection pool. Writes always go through
 # the single writer connection; reads are fanned out across the pool.
 reader_pool_size = 4
+
+[staleness]
+weight_age = 0.40
+weight_access = 0.25
+weight_validated = 0.25
+weight_count = 0.10
+count_scale = 10.0
+
+[staleness.episodic]
+half_life_days = 30
+stale_threshold = 0.70
+
+[staleness.semantic]
+half_life_days = 180
+stale_threshold = 0.80
+
+[staleness.procedural]
+half_life_days = 365
+stale_threshold = 0.90

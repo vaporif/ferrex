@@ -115,6 +115,7 @@ fn build_config(cli: Cli) -> eyre::Result<FerrexConfig> {
         conflict: loaded.conflict,
         predicates: loaded.predicates,
         reconciliation: loaded.reconciliation,
+        staleness: loaded.staleness,
         reader_pool_size: loaded.reader_pool_size,
     })
 }
@@ -164,6 +165,8 @@ struct RecallParams {
     include_invalidated: Option<bool>,
     /// Time range filter (not yet implemented).
     time_range: Option<McpTimeRange>,
+    /// Memory IDs to mark as validated (confirmed still accurate).
+    validate_ids: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -184,16 +187,22 @@ struct ForgetParams {
 
 #[derive(Deserialize, JsonSchema)]
 struct ReflectParams {
-    /// Scope of reflection (not yet implemented).
-    scope: Option<String>,
-    /// Time window (not yet implemented).
-    window: Option<String>,
+    /// Memory namespace to audit.
+    namespace: String,
+    /// Max candidates to return (default 20).
+    limit: Option<u32>,
+    /// Include contradiction pairs (default true).
+    include_contradictions: Option<bool>,
+    /// Include stale memory candidates (default true).
+    include_stale: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct StatsParams {
-    /// Return detailed stats (not yet implemented).
-    detail: Option<bool>,
+    /// Memory namespace.
+    namespace: String,
+    /// Return detailed stats including per-type breakdown and staleness distribution.
+    detailed: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -309,22 +318,25 @@ impl FerrexServer {
                 start: tr.start,
                 end: tr.end,
             }),
+            validate_ids: p.validate_ids,
         };
 
         let results = self.service.recall(req).await.map_err(map_error)?;
         let output: Vec<serde_json::Value> = results
             .into_iter()
-            .map(|(mem, score)| {
+            .map(|r| {
                 serde_json::json!({
-                    "id": mem.id,
-                    "type": mem.memory_type,
-                    "content": mem.content,
-                    "subject": mem.subject,
-                    "predicate": mem.predicate,
-                    "object": mem.object,
-                    "score": score,
-                    "entities": mem.entities,
-                    "created_at": mem.created_at.to_rfc3339(),
+                    "id": r.memory.id,
+                    "type": r.memory.memory_type,
+                    "content": r.memory.content,
+                    "subject": r.memory.subject,
+                    "predicate": r.memory.predicate,
+                    "object": r.memory.object,
+                    "score": r.relevance_score,
+                    "staleness_score": r.staleness_score,
+                    "freshness": r.freshness_label,
+                    "entities": r.memory.entities,
+                    "created_at": r.memory.created_at.to_rfc3339(),
                 })
             })
             .collect();
@@ -350,10 +362,12 @@ impl FerrexServer {
     )]
     async fn reflect(&self, Parameters(p): Parameters<ReflectParams>) -> Result<String, ErrorData> {
         let req = ReflectRequest {
-            scope: p.scope,
-            window: p.window,
+            namespace: p.namespace,
+            limit: p.limit,
+            include_contradictions: p.include_contradictions.unwrap_or(true),
+            include_stale: p.include_stale.unwrap_or(true),
         };
-        let resp = self.service.reflect(req).map_err(map_error)?;
+        let resp = self.service.reflect(req).await.map_err(map_error)?;
         Ok(serde_json::to_string_pretty(&resp).unwrap_or_default())
     }
 
@@ -362,7 +376,10 @@ impl FerrexServer {
         description = "Overview of the memory system. Shows total count, recent memories, and items needing attention. Call this at conversation start to orient yourself."
     )]
     async fn stats(&self, Parameters(p): Parameters<StatsParams>) -> Result<String, ErrorData> {
-        let req = StatsRequest { detail: p.detail };
+        let req = StatsRequest {
+            namespace: p.namespace,
+            detailed: p.detailed,
+        };
         let resp = self.service.stats(req).await.map_err(map_error)?;
         Ok(serde_json::to_string_pretty(&resp).unwrap_or_default())
     }

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use ferrex_core::{
     CoreError, DedupConfig, FerrexConfig, ForgetRequest, MemoryService, ModelTier,
-    PredicatesConfig, RecallRequest, RerankerTier, StatsRequest, StoreRequest,
+    PredicatesConfig, RecallRequest, RerankerTier, StalenessConfig, StatsRequest, StoreRequest,
 };
 use ferrex_store::MemoryType;
 
@@ -26,6 +26,7 @@ fn base_config() -> FerrexConfig {
         conflict: ferrex_core::ConflictConfig::default(),
         predicates: ferrex_core::PredicatesConfig::default(),
         reconciliation: ferrex_core::ReconciliationConfig::default(),
+        staleness: StalenessConfig::default(),
         reader_pool_size: 2,
     }
 }
@@ -116,10 +117,11 @@ async fn conflict_update_invalidates_old_fact() {
             include_stale: None,
             include_invalidated: None,
             time_range: None,
+            validate_ids: None,
         })
         .await
         .unwrap();
-    let ids: Vec<&str> = results.iter().map(|(m, _)| m.id.as_str()).collect();
+    let ids: Vec<&str> = results.iter().map(|r| r.memory.id.as_str()).collect();
     assert!(
         ids.contains(&second.id.as_str()),
         "recall should return new fact"
@@ -175,10 +177,11 @@ async fn supersedes_skips_dedup_and_conflict() {
             include_stale: None,
             include_invalidated: None,
             time_range: None,
+            validate_ids: None,
         })
         .await
         .unwrap();
-    let ids: Vec<&str> = results.iter().map(|(m, _)| m.id.as_str()).collect();
+    let ids: Vec<&str> = results.iter().map(|r| r.memory.id.as_str()).collect();
     assert!(
         !ids.contains(&first.id.as_str()),
         "old fact should not appear"
@@ -210,10 +213,11 @@ async fn forget_removes_from_both_stores() {
             include_stale: None,
             include_invalidated: None,
             time_range: None,
+            validate_ids: None,
         })
         .await
         .unwrap();
-    let ids: Vec<&str> = results.iter().map(|(m, _)| m.id.as_str()).collect();
+    let ids: Vec<&str> = results.iter().map(|r| r.memory.id.as_str()).collect();
     assert!(
         !ids.contains(&resp.id.as_str()),
         "forgotten memory should not be recalled"
@@ -230,6 +234,7 @@ fn recall_query(query: &str) -> RecallRequest {
         include_stale: None,
         include_invalidated: None,
         time_range: None,
+        validate_ids: None,
     }
 }
 
@@ -307,7 +312,7 @@ async fn store_and_recall_episodic_round_trip() {
         .recall(recall_query("deployment staging"))
         .await
         .unwrap();
-    let ids: Vec<&str> = results.iter().map(|(m, _)| m.id.as_str()).collect();
+    let ids: Vec<&str> = results.iter().map(|r| r.memory.id.as_str()).collect();
     assert!(
         ids.contains(&resp.id.as_str()),
         "stored memory should be recallable"
@@ -318,7 +323,13 @@ async fn store_and_recall_episodic_round_trip() {
 #[ignore = "requires Qdrant"]
 async fn stats_reflects_stored_count() {
     let svc = test_service().await;
-    let before = svc.stats(StatsRequest { detail: None }).await.unwrap();
+    let before = svc
+        .stats(StatsRequest {
+            namespace: "default".into(),
+            detailed: None,
+        })
+        .await
+        .unwrap();
     assert_eq!(before.total_memories, 0);
 
     svc.store(episodic("first memory")).await.unwrap();
@@ -326,7 +337,13 @@ async fn stats_reflects_stored_count() {
         .await
         .unwrap();
 
-    let after = svc.stats(StatsRequest { detail: None }).await.unwrap();
+    let after = svc
+        .stats(StatsRequest {
+            namespace: "default".into(),
+            detailed: None,
+        })
+        .await
+        .unwrap();
     assert_eq!(after.total_memories, 2);
 }
 
