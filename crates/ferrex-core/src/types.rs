@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -14,6 +15,64 @@ pub struct FerrexConfig {
     pub reranker_tier: RerankerTier,
     pub namespace: String,
     pub db_path: PathBuf,
+    pub config_path: Option<PathBuf>,
+    pub deduplication: DedupConfig,
+    pub conflict: ConflictConfig,
+    pub predicates: PredicatesConfig,
+    pub reconciliation: ReconciliationConfig,
+    pub reader_pool_size: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct DedupConfig {
+    pub threshold: f32,
+}
+
+impl Default for DedupConfig {
+    fn default() -> Self {
+        Self { threshold: 0.95 }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ConflictConfig {
+    pub object_fuzzy_duplicate: f32,
+    pub object_fuzzy_update: f32,
+}
+
+impl Default for ConflictConfig {
+    fn default() -> Self {
+        Self {
+            object_fuzzy_duplicate: 0.95,
+            object_fuzzy_update: 0.50,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PredicatesConfig {
+    pub groups: HashMap<String, Vec<String>>,
+    pub namespaces: HashMap<String, NamespacePredicatesConfig>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NamespacePredicatesConfig {
+    pub groups: HashMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReconciliationConfig {
+    pub audit_interval_hours: Option<u64>,
+    pub audit_fix_limit: u64,
+}
+
+impl Default for ReconciliationConfig {
+    fn default() -> Self {
+        Self {
+            audit_interval_hours: None,
+            audit_fix_limit: 1000,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -52,6 +111,7 @@ pub struct TimeRange {
 #[derive(Debug)]
 pub struct ForgetRequest {
     pub ids: Vec<String>,
+    /// Deprecated, ignored.
     pub cascade: Option<bool>,
 }
 
@@ -67,9 +127,17 @@ pub struct StatsRequest {
 }
 
 #[derive(Debug, Serialize)]
+pub struct StoreResponse {
+    pub id: String,
+    pub memory_type: String,
+    pub superseded: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ForgetResponse {
     pub message: String,
     pub deleted: Vec<String>,
+    pub not_found: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]

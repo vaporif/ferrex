@@ -4,3 +4,5 @@ extend-exclude = [".direnv"]
 [default.extend-words]
 # upstream fastembed enum variant typo
 Multiligual = "Multiligual"
+# intentional typo in fuzzy-match test
+requies = "requies"

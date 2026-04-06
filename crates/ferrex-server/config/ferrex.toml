@@ -1,0 +1,46 @@
+[deduplication]
+# Cosine similarity above which non-semantic memories are rejected as
+# near-duplicates. Semantic facts bypass this check — their authoritative
+# duplicate detection lives in conflict resolution (see "Conflict detection").
+threshold = 0.95
+
+[conflict]
+# Fuzzy string ratio (jaro_winkler) on the object field, after normalization.
+# >= object_fuzzy_duplicate → reject as duplicate.
+# <  object_fuzzy_update    → accept as update (invalidate old).
+# in between                → ambiguous; reject with ConflictAmbiguous and
+#                             require the agent to retry with `supersedes`.
+object_fuzzy_duplicate = 0.95
+object_fuzzy_update    = 0.50
+
+# Default predicate equivalence groups, applied to any namespace
+# that doesn't override them. These cover common software-domain
+# vocabulary. Edit, extend, or replace per your agents' needs.
+[predicates.groups]
+depends_on    = ["uses", "depends-on", "requires", "needs", "imports"]
+has_version   = ["version", "at-version", "pinned-to", "version-is"]
+is_a          = ["is-a", "type-of", "kind-of", "instance-of"]
+part_of       = ["belongs-to", "member-of", "contained-in"]
+written_in    = ["language-is", "built-with", "uses-language"]
+hosted_at     = ["lives-at", "repo-at", "url-is", "found-at"]
+runs_on       = ["deployed-to", "hosted-on", "serves-from"]
+maintained_by = ["owned-by", "managed-by", "authored-by", "led-by"]
+
+# Per-namespace overrides merge on top of [predicates.groups]:
+# a named group replaces the global of the same name, an empty
+# list suppresses the global, and unnamed globals pass through.
+#
+# [namespaces.legal-research.predicates.groups]
+# cites     = ["references", "quotes", "relies-on"]
+# runs_on   = []   # suppress inherited group
+
+[reconciliation]
+# Optional periodic audit. When set, the server runs the audit loop
+# every N hours in the background. Leave unset to run manually via
+# `ferrex audit reconcile`.
+# audit_interval_hours = 24
+audit_fix_limit = 1000
+
+# Size of the SQLite reader connection pool. Writes always go through
+# the single writer connection; reads are fanned out across the pool.
+reader_pool_size = 4

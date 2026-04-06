@@ -1,9 +1,9 @@
 use qdrant_client::qdrant::{
     CreateCollectionBuilder, CreateFieldIndexCollectionBuilder, DeletePointsBuilder, Distance,
     Document, FieldType, Filter, Fusion, Modifier, NamedVectors, PointStruct, PrefetchQueryBuilder,
-    Query, QueryPointsBuilder, SparseVectorParamsBuilder, SparseVectorsConfigBuilder,
-    UpsertPointsBuilder, VectorInput, VectorParamsBuilder, VectorsConfigBuilder,
-    point_id::PointIdOptions,
+    Query, QueryPointsBuilder, ScrollPointsBuilder, SparseVectorParamsBuilder,
+    SparseVectorsConfigBuilder, UpsertPointsBuilder, VectorInput, VectorParamsBuilder,
+    VectorsConfigBuilder, point_id::PointIdOptions,
 };
 use qdrant_client::{Payload, Qdrant};
 use uuid::Uuid;
@@ -217,6 +217,55 @@ impl VectorStore {
         Ok(())
     }
 
+    pub async fn delete_by_ids(&self, namespace: &str, ids: &[Uuid]) -> Result<(), StoreError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let name = Self::collection_name(namespace)?;
+        let id_strings: Vec<String> = ids.iter().map(ToString::to_string).collect();
+        self.client
+            .delete_points(
+                DeletePointsBuilder::new(&name)
+                    .points(id_strings)
+                    .wait(true),
+            )
+            .await
+            .map_err(|e| StoreError::Qdrant(e.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn scroll_all_ids(&self, namespace: &str) -> Result<Vec<Uuid>, StoreError> {
+        let name = Self::collection_name(namespace)?;
+        let mut ids = Vec::new();
+        let mut offset: Option<qdrant_client::qdrant::PointId> = None;
+        loop {
+            let mut req = ScrollPointsBuilder::new(&name)
+                .limit(1024)
+                .with_payload(false);
+            if let Some(o) = offset.clone() {
+                req = req.offset(o);
+            }
+            let resp = self
+                .client
+                .scroll(req)
+                .await
+                .map_err(|e| StoreError::Qdrant(e.to_string()))?;
+            for point in &resp.result {
+                if let Some(id) = point.id.clone()
+                    && let Some(PointIdOptions::Uuid(s)) = id.point_id_options
+                    && let Ok(uuid) = s.parse::<Uuid>()
+                {
+                    ids.push(uuid);
+                }
+            }
+            match resp.next_page_offset {
+                Some(next) => offset = Some(next),
+                None => break,
+            }
+        }
+        Ok(ids)
+    }
+
     pub async fn health_check(&self) -> Result<(), StoreError> {
         self.client
             .health_check()
@@ -290,6 +339,26 @@ mod tests {
             .await
             .unwrap();
         store.delete(ns, id).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running Qdrant"]
+    async fn test_delete_by_ids_removes_multiple_points() {
+        let store = VectorStore::new("http://localhost:6334", TEST_DIM).unwrap();
+        let ns = "test_delete_by_ids";
+        store.ensure_collection(ns).await.unwrap();
+        let ids: Vec<Uuid> = (0..3).map(|_| Uuid::now_v7()).collect();
+        for id in &ids {
+            let payload = Payload::try_from(serde_json::json!({
+                crate::POINT_TYPE_FIELD: crate::POINT_TYPE_MEMORY,
+            }))
+            .unwrap();
+            store
+                .upsert(ns, *id, test_vector(), "x", payload)
+                .await
+                .unwrap();
+        }
+        store.delete_by_ids(ns, &ids).await.unwrap();
     }
 
     #[tokio::test]
