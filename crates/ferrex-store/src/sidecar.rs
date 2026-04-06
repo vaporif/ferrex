@@ -145,9 +145,6 @@ fn dirs_home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Acquire an exclusive lock file using `create_new` semantics.
-/// Retries briefly to handle the case where another process is in the
-/// middle of its own check-spawn-write sequence.
 fn acquire_lock_file(path: &Path) -> Result<std::fs::File, StoreError> {
     const MAX_ATTEMPTS: u32 = 10;
     const RETRY_DELAY: Duration = Duration::from_millis(200);
@@ -156,7 +153,6 @@ fn acquire_lock_file(path: &Path) -> Result<std::fs::File, StoreError> {
         match OpenOptions::new().write(true).create_new(true).open(path) {
             Ok(f) => return Ok(f),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Check if the lock file is stale (older than 30 seconds).
                 if let Ok(meta) = fs::metadata(path)
                     && let Some(age) = meta.modified().ok().and_then(|m| m.elapsed().ok())
                     && age > Duration::from_secs(30)

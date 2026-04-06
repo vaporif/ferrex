@@ -181,8 +181,6 @@ pub trait MetadataStore: Send + Sync {
 
 const DEFAULT_READER_POOL_SIZE: usize = 4;
 
-/// Maximum number of IDs in a single SQL IN-clause to avoid hitting
-/// `SQLite`'s variable limit and keep query plans efficient.
 const IN_CLAUSE_BATCH_SIZE: usize = 500;
 
 #[derive(Debug, Clone)]
