@@ -266,7 +266,10 @@ async fn validation_rejects_episodic_without_content() {
         namespace: None,
         supersedes: None,
     };
-    assert!(matches!(svc.store(req).await, Err(CoreError::Validation(_))));
+    assert!(matches!(
+        svc.store(req).await,
+        Err(CoreError::Validation(_))
+    ));
 }
 
 #[tokio::test]
@@ -286,7 +289,10 @@ async fn validation_rejects_semantic_missing_object() {
         namespace: None,
         supersedes: None,
     };
-    assert!(matches!(svc.store(req).await, Err(CoreError::Validation(_))));
+    assert!(matches!(
+        svc.store(req).await,
+        Err(CoreError::Validation(_))
+    ));
 }
 
 #[tokio::test]
@@ -340,10 +346,7 @@ async fn dedup_allows_distinct_episodic_memories() {
 #[ignore = "requires Qdrant"]
 async fn predicate_normalization_triggers_conflict() {
     let mut groups = HashMap::new();
-    groups.insert(
-        "depends_on".into(),
-        vec!["uses".into(), "requires".into()],
-    );
+    groups.insert("depends_on".into(), vec!["uses".into(), "requires".into()]);
     let svc = test_service_with_predicates(groups).await;
 
     let first = svc
