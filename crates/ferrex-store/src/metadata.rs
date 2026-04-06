@@ -237,40 +237,45 @@ impl deadpool::managed::Manager for ReaderManager {
     }
 }
 
+const SQLITE_CACHE_SIZE_KB: i32 = 20_000;
+const SQLITE_MMAP_SIZE: u64 = 256 * 1024 * 1024;
+
 fn apply_reader_pragmas(conn: &Connection, is_memory: bool) -> Result<(), StoreError> {
-    let pragmas = if is_memory {
+    conn.execute_batch(&format!(
         "PRAGMA synchronous = NORMAL;
          PRAGMA foreign_keys = ON;
          PRAGMA temp_store = MEMORY;
-         PRAGMA cache_size = -20000;
-         PRAGMA query_only = 1;"
-    } else {
-        "PRAGMA synchronous = NORMAL;
-         PRAGMA foreign_keys = ON;
-         PRAGMA temp_store = MEMORY;
-         PRAGMA mmap_size = 268435456;
-         PRAGMA cache_size = -20000;
-         PRAGMA query_only = 1;"
-    };
-    conn.execute_batch(pragmas)?;
+         {mmap}
+         PRAGMA cache_size = -{SQLITE_CACHE_SIZE_KB};
+         PRAGMA query_only = 1;",
+        mmap = if is_memory {
+            String::new()
+        } else {
+            format!("PRAGMA mmap_size = {SQLITE_MMAP_SIZE};")
+        },
+    ))?;
     Ok(())
 }
 
 fn apply_writer_pragmas(conn: &Connection, is_memory: bool) -> Result<(), StoreError> {
-    let pragmas = if is_memory {
-        "PRAGMA synchronous = NORMAL;
-         PRAGMA foreign_keys = ON;
-         PRAGMA temp_store = MEMORY;
-         PRAGMA cache_size = -20000;"
-    } else {
-        "PRAGMA journal_mode = WAL;
+    conn.execute_batch(&format!(
+        "{wal}
          PRAGMA synchronous = NORMAL;
          PRAGMA foreign_keys = ON;
          PRAGMA temp_store = MEMORY;
-         PRAGMA mmap_size = 268435456;
-         PRAGMA cache_size = -20000;"
-    };
-    conn.execute_batch(pragmas)?;
+         {mmap}
+         PRAGMA cache_size = -{SQLITE_CACHE_SIZE_KB};",
+        wal = if is_memory {
+            ""
+        } else {
+            "PRAGMA journal_mode = WAL;"
+        },
+        mmap = if is_memory {
+            String::new()
+        } else {
+            format!("PRAGMA mmap_size = {SQLITE_MMAP_SIZE};")
+        },
+    ))?;
     Ok(())
 }
 

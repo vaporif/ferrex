@@ -12,6 +12,8 @@ pub const WEIGHT_COUNT: f64 = 0.10;
 pub const EPISODIC_HALF_LIFE: f64 = 30.0;
 pub const SEMANTIC_HALF_LIFE: f64 = 180.0;
 pub const PROCEDURAL_HALF_LIFE: f64 = 365.0;
+const SECONDS_PER_DAY: f64 = 86400.0;
+const FRESH_THRESHOLD_RATIO: f64 = 0.5;
 
 pub const EPISODIC_STALE_THRESHOLD: f64 = 0.70;
 pub const SEMANTIC_STALE_THRESHOLD: f64 = 0.80;
@@ -108,11 +110,12 @@ pub fn staleness_score(memory: &Memory, now: DateTime<Utc>, config: &StalenessCo
 
     let half_life = type_cfg.half_life_days;
 
-    let days_since_created = (now - memory.created_at).num_seconds().max(0) as f64 / 86400.0;
-    let days_since_accessed = (now - memory.last_accessed).num_seconds().max(0) as f64 / 86400.0;
-    let days_since_validated = memory.last_validated.map_or(days_since_created, |v| {
-        (now - v).num_seconds().max(0) as f64 / 86400.0
-    });
+    let to_days = |secs: i64| secs.max(0) as f64 / SECONDS_PER_DAY;
+    let days_since_created = to_days((now - memory.created_at).num_seconds());
+    let days_since_accessed = to_days((now - memory.last_accessed).num_seconds());
+    let days_since_validated = memory
+        .last_validated
+        .map_or(days_since_created, |v| to_days((now - v).num_seconds()));
 
     let age_decay = 1.0 - (-f64::ln(2.0) * days_since_created / half_life).exp();
     let access_decay = 1.0 - (-f64::ln(2.0) * days_since_accessed / half_life).exp();
@@ -129,7 +132,7 @@ pub fn staleness_score(memory: &Memory, now: DateTime<Utc>, config: &StalenessCo
 
 #[must_use]
 pub fn freshness_label(score: f64, threshold: f64) -> FreshnessLabel {
-    if score < threshold * 0.5 {
+    if score < threshold * FRESH_THRESHOLD_RATIO {
         FreshnessLabel::Fresh
     } else if score < threshold {
         FreshnessLabel::Aging

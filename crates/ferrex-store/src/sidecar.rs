@@ -148,6 +148,7 @@ fn dirs_home() -> PathBuf {
 fn acquire_lock_file(path: &Path) -> Result<std::fs::File, StoreError> {
     const MAX_ATTEMPTS: u32 = 10;
     const RETRY_DELAY: Duration = Duration::from_millis(200);
+    const STALE_LOCK_AGE: Duration = Duration::from_secs(30);
 
     for attempt in 0..MAX_ATTEMPTS {
         match OpenOptions::new().write(true).create_new(true).open(path) {
@@ -155,7 +156,7 @@ fn acquire_lock_file(path: &Path) -> Result<std::fs::File, StoreError> {
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 if let Ok(meta) = fs::metadata(path)
                     && let Some(age) = meta.modified().ok().and_then(|m| m.elapsed().ok())
-                    && age > Duration::from_secs(30)
+                    && age > STALE_LOCK_AGE
                 {
                     tracing::warn!("removing stale lock file");
                     let _ = fs::remove_file(path);

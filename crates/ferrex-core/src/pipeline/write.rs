@@ -93,7 +93,11 @@ async fn write_impl(
 }
 
 fn build_memory(ctx: &StoreContext<'_>) -> Memory {
-    let confidence = ctx.req.confidence.map_or(1.0, |c| c.clamp(0.0, 1.0));
+    const DEFAULT_CONFIDENCE: f64 = 1.0;
+    let confidence = ctx
+        .req
+        .confidence
+        .map_or(DEFAULT_CONFIDENCE, |c| c.clamp(0.0, 1.0));
     let entity_names = ctx
         .resolved_entities
         .iter()
