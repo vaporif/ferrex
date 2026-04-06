@@ -21,3 +21,5 @@ result
 
 .direnv
 
+# ONNX model cache
+.fastembed_cache/
