@@ -1,5 +1,3 @@
-// Phase 3 integration tests. All require a running Qdrant (`#[ignore]`).
-// Run manually: `cargo test -p ferrex-core --test phase3_integration -- --ignored`
 #![allow(clippy::needless_collect)]
 
 use std::path::PathBuf;

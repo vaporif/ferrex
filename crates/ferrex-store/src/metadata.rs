@@ -173,12 +173,9 @@ pub trait MetadataStore: Send + Sync {
 
 const DEFAULT_READER_POOL_SIZE: usize = 4;
 
-/// How to open additional connections to the same database.
 #[derive(Debug, Clone)]
 enum ConnectionSource {
-    /// On-disk database at the given path.
     File(PathBuf),
-    /// Shared in-memory database addressed by URI (e.g. `file:memdb_xyz?mode=memory&cache=shared`).
     SharedMemory { uri: String },
 }
 
@@ -231,8 +228,6 @@ impl deadpool::managed::Manager for ReaderManager {
 }
 
 fn apply_reader_pragmas(conn: &Connection, is_memory: bool) -> Result<(), StoreError> {
-    // `query_only = 1` forbids writes on the reader connections. For in-memory
-    // shared-cache DBs we skip the mmap pragma (no-op) but the rest are safe.
     let pragmas = if is_memory {
         "PRAGMA synchronous = NORMAL;
          PRAGMA foreign_keys = ON;
@@ -274,10 +269,7 @@ type ReaderPool = deadpool::managed::Pool<ReaderManager>;
 pub struct SqliteStore {
     writer: Arc<Mutex<Connection>>,
     readers: ReaderPool,
-    // Holds an extra connection to shared in-memory DBs so SQLite doesn't
-    // reclaim the database when pooled connections are recycled. `None` for
-    // on-disk databases. Wrapped in `Mutex` to satisfy `Sync` (rusqlite's
-    // `Connection` is `Send` but not `Sync`).
+    // Keeps a connection open so SQLite doesn't drop shared in-memory DBs.
     _memory_keepalive: Option<Arc<Mutex<Connection>>>,
 }
 
@@ -295,18 +287,12 @@ impl SqliteStore {
         let is_memory = path_str == ":memory:" || path_str.contains("mode=memory");
 
         let (writer_conn, source, keepalive) = if is_memory {
-            // Each SqliteStore gets its own isolated shared in-memory DB so that
-            // writers and readers can open distinct Connection handles that see
-            // the same data. Using a uuid keeps tests independent.
             let name = format!("memdb_{}", uuid::Uuid::now_v7().simple());
             let uri = format!("file:{name}?mode=memory&cache=shared");
             let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
                 | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
                 | rusqlite::OpenFlags::SQLITE_OPEN_URI;
             let conn = Connection::open_with_flags(&uri, flags)?;
-            // Keep one extra connection alive for the lifetime of the store;
-            // SQLite reclaims the shared in-memory DB when the last connection
-            // is closed, so this prevents data loss between pool checkouts.
             let keepalive = Connection::open_with_flags(&uri, flags)?;
             (
                 conn,
@@ -503,8 +489,7 @@ impl MetadataStore for SqliteStore {
                 .iter()
                 .map(|s| s as &dyn rusqlite::types::ToSql)
                 .collect();
-            // Not `prepare_cached`: dynamic IN-clause lengths would poison the
-            // statement cache with unboundedly many distinct SQL strings.
+            // Dynamic IN-clause — can't use prepare_cached.
             let mut stmt = conn.prepare(&sql)?;
             let mut rows = stmt.query(params.as_slice())?;
             let mut memories = Vec::new();
@@ -538,8 +523,7 @@ impl MetadataStore for SqliteStore {
             params.extend(ids.iter().map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>));
             let param_refs: Vec<&dyn rusqlite::types::ToSql> =
                 params.iter().map(std::convert::AsRef::as_ref).collect();
-            // Not `prepare_cached`: dynamic IN-clause lengths would poison the
-            // statement cache with unboundedly many distinct SQL strings.
+            // Dynamic IN-clause — can't use prepare_cached.
             let mut stmt = conn.prepare(&sql)?;
             stmt.execute(param_refs.as_slice())?;
             Ok(())
@@ -571,9 +555,7 @@ impl MetadataStore for SqliteStore {
     async fn get_entity_by_name(&self, name: &str) -> Result<Option<Entity>, StoreError> {
         let name = name.to_string();
         self.with_reader(move |conn| {
-            // Canonical name wins. Only fall back to alias lookup if the name misses,
-            // otherwise an alias collision with another entity's canonical name would
-            // return a non-deterministic row under `LIMIT 1`.
+            // Canonical name first, then alias fallback.
             let entity_opt = {
                 let mut stmt = conn.prepare_cached(
                     "SELECT e.id, e.name, e.entity_type, e.created_at, e.updated_at \
@@ -744,7 +726,7 @@ impl MetadataStore for SqliteStore {
                 .iter()
                 .map(|s| s as &dyn rusqlite::types::ToSql)
                 .collect();
-            // Dynamic IN-clause SQL — use prepare (not prepare_cached) to avoid cache poisoning.
+            // Dynamic IN-clause — can't use prepare_cached.
             let mut stmt = conn.prepare(&sql)?;
             let n = stmt.execute(params.as_slice())?;
             Ok(n as u64)
@@ -757,7 +739,6 @@ impl MetadataStore for SqliteStore {
         subject: &str,
         predicate: &str,
     ) -> Result<Vec<Memory>, StoreError> {
-        // Callers pass the *normalized* predicate. Partial index idx_memories_conflict covers this.
         let subject = subject.to_string();
         let predicate = predicate.to_string();
         self.with_reader(move |conn| {
@@ -1098,10 +1079,6 @@ mod tests {
         assert!(fetched.aliases.contains(&"tokio-rs".to_string()));
     }
 
-    // Smoke test: verifies the reader pool correctly serves many concurrent
-    // requests without deadlocking or returning errors. This is NOT a timing
-    // assertion — measuring parallelism via wall-clock is flaky under CI load,
-    // so we only assert functional correctness under concurrent access.
     #[tokio::test]
     async fn test_reader_pool_serves_concurrent_requests() {
         let store = std::sync::Arc::new(SqliteStore::open(":memory:").unwrap());

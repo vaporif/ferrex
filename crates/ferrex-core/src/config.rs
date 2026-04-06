@@ -62,9 +62,7 @@ pub struct LoadedConfig {
 
 pub const DEFAULT_READER_POOL_SIZE: usize = 4;
 
-/// Load config from `path`, falling back to the embedded baseline if the file
-/// doesn't exist. Writes the embedded baseline to `path` on first run so the
-/// user has something to edit.
+/// Load config from `path`, writing the embedded baseline on first run.
 pub fn load_or_init(path: &Path, baseline: &str) -> Result<LoadedConfig, ConfigError> {
     let raw = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -117,9 +115,7 @@ pub fn resolve(file: FileConfig) -> LoadedConfig {
     }
 }
 
-/// Resolve the effective predicate groups for a namespace by merging globals
-/// with namespace overrides: namespace keys replace globals; empty lists
-/// suppress; other globals pass through.
+/// Merge global predicate groups with namespace-specific overrides.
 pub fn resolve_namespace_groups(
     predicates: &PredicatesConfig,
     namespace: &str,

@@ -136,9 +136,6 @@ mod tests {
     #[test]
     fn test_classify_update_far() {
         let c = ConflictConfig::default();
-        // jaro_winkler on these pairs needs to be < object_fuzzy_update (0.50).
-        // "async-std 1.0" vs "tokio 1.38" is ~0.52 — too close because of
-        // shared digits/space. Use fully unrelated tokens.
         let outcome = classify("postgres", &[mem("e-1", "tokio 1.38")], &c);
         assert!(matches!(outcome, Classification::Update(_)));
     }
@@ -146,7 +143,6 @@ mod tests {
     #[test]
     fn test_classify_ambiguous() {
         let c = ConflictConfig::default();
-        // Fuzzy ratio on partial overlap lands in the ambiguous band.
         let outcome = classify("tokio 1.38 with patches", &[mem("e-1", "tokio 1.38")], &c);
         assert!(matches!(outcome, Classification::Ambiguous { .. }));
     }

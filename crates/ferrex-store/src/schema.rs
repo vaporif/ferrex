@@ -93,8 +93,7 @@ pub fn migrate(conn: &Connection) -> Result<(), StoreError> {
          WHERE t_invalid IS NULL",
     )?;
 
-    // Backfill entity_aliases from the legacy JSON column for any entity that
-    // doesn't yet have rows. Runs at most once per entity.
+    // Backfill entity_aliases from the legacy JSON column.
     let mut stmt = conn.prepare(
         "SELECT id, aliases FROM entities \
          WHERE NOT EXISTS (SELECT 1 FROM entity_aliases WHERE entity_id = entities.id) \
@@ -161,8 +160,7 @@ mod tests {
 
     #[test]
     fn test_migrate_sets_synchronous_normal() {
-        // Note: PRAGMA journal_mode=WAL is silently ignored on `:memory:`
-        // databases, so we can only verify the synchronous pragma here.
+        // WAL is a no-op on :memory:, so we only check synchronous here.
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
         let synchronous: i64 = conn

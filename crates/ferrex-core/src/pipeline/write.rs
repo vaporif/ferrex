@@ -1,11 +1,3 @@
-// FOLLOW-UP: the finalization step below is not a single SQLite transaction.
-// The spec calls for (insert_memory + link_memory_entity + invalidate_memory +
-// clear_pending_op) to run atomically. The current MetadataStore trait doesn't
-// expose a multi-statement transaction helper; adding one would ripple through
-// every call site. The journal still catches crashes — a crash mid-finalization
-// leaves a row with qdrant_written=1 that recovery (Task 19) reconciles via
-// orphan cleanup. Revisit after Phase 3 lands.
-
 use chrono::Utc;
 use ferrex_store::{
     Memory, MetadataStore, POINT_TYPE_FIELD, POINT_TYPE_MEMORY, PendingOp, PendingOpKind,
@@ -56,7 +48,6 @@ async fn write_impl(
 
     let memory = build_memory(ctx);
 
-    // 1. Pre-write journal.
     let op = PendingOp {
         op_id: Uuid::now_v7().to_string(),
         kind: op_kind,
@@ -68,7 +59,6 @@ async fn write_impl(
     };
     metadata.insert_pending_op(&op).await?;
 
-    // 2. Qdrant step.
     let payload = Payload::try_from(serde_json::json!({
         "memory_id": memory.id,
         "memory_type": memory.memory_type.as_str(),
@@ -85,12 +75,12 @@ async fn write_impl(
         .await?;
     metadata.mark_pending_op_qdrant_written(&op.op_id).await?;
 
-    // 3. Finalization (non-atomic; see file header).
+    // Finalization: these steps aren't wrapped in a single SQLite transaction yet.
+    // The journal handles crash recovery if we fail partway through.
     metadata.insert_memory(&memory).await?;
     for entity in &ctx.resolved_entities {
         metadata.link_memory_entity(&memory.id, &entity.id).await?;
     }
-    // Invalidate superseded memories (from conflict auto-update or explicit supersede).
     for sup in &ctx.superseded_ids {
         metadata.invalidate_memory(sup, ctx.now).await?;
     }

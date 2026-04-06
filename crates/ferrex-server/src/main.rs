@@ -49,12 +49,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run the out-of-band symmetric-diff audit against Qdrant + `SQLite`.
+    /// Audit consistency between Qdrant and `SQLite`.
     Audit {
         #[command(subcommand)]
         audit: AuditCommand,
     },
-    /// Backfill `normalized_predicate` for pre-Phase-3 semantic memories.
+    /// Backfill `normalized_predicate` for semantic memories missing it.
     Backfill {
         #[command(subcommand)]
         backfill: BackfillCommand,
@@ -142,7 +142,7 @@ struct StoreParams {
     entities: Vec<String>,
     /// Namespace override.
     namespace: Option<String>,
-    /// ID of a memory this supersedes. (Phase 3)
+    /// ID of a memory this supersedes.
     supersedes: Option<String>,
 }
 
@@ -178,21 +178,21 @@ struct McpTimeRange {
 struct ForgetParams {
     /// Memory IDs to forget.
     ids: Vec<String>,
-    /// Cascade delete linked entities (Phase 3).
+    /// Cascade delete linked entities (deprecated, ignored).
     cascade: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct ReflectParams {
-    /// Scope of reflection (Phase 4).
+    /// Scope of reflection (not yet implemented).
     scope: Option<String>,
-    /// Time window (Phase 4).
+    /// Time window (not yet implemented).
     window: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct StatsParams {
-    /// Return detailed stats (Phase 4).
+    /// Return detailed stats (not yet implemented).
     detail: Option<bool>,
 }
 
@@ -403,7 +403,6 @@ fn main() -> eyre::Result<()> {
         .enable_all()
         .build()?
         .block_on(async {
-            // Recovery runs inside from_config.
             let service = MemoryService::from_config(config).await?;
             let (service, mut sidecar) = service.into_parts();
             let server = FerrexServer::new(service);

@@ -2,18 +2,11 @@ use std::collections::HashMap;
 
 const FUZZY_THRESHOLD: f64 = 0.85;
 
-/// Maps a free-form predicate string (with typos, punctuation, casing noise)
-/// to a canonical group name drawn from config.
-///
-/// Used by the `normalize_predicate` pipeline stage before conflict detection
-/// so that `uses`, `depends-on`, and `requires` all collapse to the same
-/// `depends_on` key.
+/// Collapses free-form predicates (typos, casing, separators) into canonical
+/// group names so that e.g. `uses`, `depends-on`, and `requires` all resolve
+/// to `depends_on`.
 pub struct PredicateNormalizer {
-    /// Canonical name -> pre-normalized member strings (including the
-    /// text-normalized canonical name itself, so group-key matches work).
     canonical_to_members: HashMap<String, Vec<String>>,
-    /// Normalized form -> canonical name. One entry per member and one per
-    /// canonical name's normalized form. Exact lookups hit this first.
     lookup: HashMap<String, String>,
 }
 
@@ -21,7 +14,6 @@ impl PredicateNormalizer {
     pub fn new(groups: HashMap<String, Vec<String>>) -> Self {
         let mut canonical_to_members: HashMap<String, Vec<String>> = HashMap::new();
         let mut lookup: HashMap<String, String> = HashMap::new();
-        // Sort group keys for deterministic iteration order across runs.
         let mut sorted_groups: Vec<_> = groups.into_iter().collect();
         sorted_groups.sort_by(|(a, _), (b, _)| a.cmp(b));
         for (canonical, members) in sorted_groups {
@@ -49,9 +41,6 @@ impl PredicateNormalizer {
         }
     }
 
-    /// Lowercase, strip separators (`-`, `_`, `/`) into spaces, collapse
-    /// whitespace. Shared by group keys, members, and `normalize()` inputs so
-    /// comparisons are apples-to-apples.
     pub fn text_normalize(s: &str) -> String {
         s.trim()
             .to_lowercase()
@@ -133,7 +122,6 @@ mod tests {
     #[test]
     fn test_fuzzy_fallback() {
         let n = PredicateNormalizer::new(sample_groups());
-        // Typo: jaro_winkler("requies", "requires") ~0.96 > 0.85.
         assert_eq!(n.normalize("requies"), "depends_on");
     }
 

@@ -158,8 +158,7 @@ impl MemoryService {
                     self.vector_store
                         .delete_by_ids(&op.namespace, &[uuid])
                         .await?;
-                    // SQLite insert may or may not have landed. Either way, the
-                    // memory is unreachable without its Qdrant point; drop it.
+                    // Qdrant point was written but SQLite state is uncertain — roll back.
                     self.metadata_store
                         .delete_memories(std::slice::from_ref(&op.memory_id))
                         .await?;

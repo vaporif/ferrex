@@ -111,7 +111,7 @@ pub struct TimeRange {
 #[derive(Debug)]
 pub struct ForgetRequest {
     pub ids: Vec<String>,
-    /// Deprecated: no-op in Phase 3. Forget now targets explicit ids only.
+    /// Deprecated, ignored.
     pub cascade: Option<bool>,
 }
 
