@@ -6,6 +6,8 @@ use ferrex_embed::{ModelTier, RerankerTier};
 use ferrex_store::{Memory, MemoryType};
 use serde::Serialize;
 
+use crate::staleness::StalenessConfig;
+
 #[derive(Debug, Clone)]
 pub struct FerrexConfig {
     pub qdrant_url: Option<String>,
@@ -20,6 +22,7 @@ pub struct FerrexConfig {
     pub conflict: ConflictConfig,
     pub predicates: PredicatesConfig,
     pub reconciliation: ReconciliationConfig,
+    pub staleness: StalenessConfig,
     pub reader_pool_size: usize,
 }
 
@@ -100,6 +103,7 @@ pub struct RecallRequest {
     pub include_stale: Option<bool>,
     pub include_invalidated: Option<bool>,
     pub time_range: Option<TimeRange>,
+    pub validate_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -117,13 +121,16 @@ pub struct ForgetRequest {
 
 #[derive(Debug)]
 pub struct ReflectRequest {
-    pub scope: Option<String>,
-    pub window: Option<String>,
+    pub namespace: String,
+    pub limit: Option<u32>,
+    pub include_contradictions: bool,
+    pub include_stale: bool,
 }
 
 #[derive(Debug)]
 pub struct StatsRequest {
-    pub detail: Option<bool>,
+    pub namespace: String,
+    pub detailed: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -142,18 +149,41 @@ pub struct ForgetResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ReflectResponse {
-    pub message: String,
-    pub stale: Vec<Memory>,
-    pub contradictions: Vec<Contradiction>,
-    pub low_access: Vec<Memory>,
+    pub stale: Vec<StaleCandidate>,
+    pub contradictions: Vec<ContradictionPair>,
+    pub summary: ReflectSummary,
 }
 
 #[derive(Debug, Serialize)]
-pub struct Contradiction {
-    pub memory_a: String,
-    pub memory_b: String,
-    pub subject: String,
-    pub predicate: String,
+pub struct StaleCandidate {
+    pub memory: Memory,
+    pub staleness_score: f64,
+    pub freshness_label: crate::staleness::FreshnessLabel,
+    pub eviction_rank: u32,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ContradictionPair {
+    pub a: Memory,
+    pub b: Memory,
+    pub match_type: ContradictionMatchType,
+    pub similarity: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContradictionMatchType {
+    ExactPredicate,
+    FuzzyPredicate,
+    SimilarSubject,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReflectSummary {
+    pub total_scanned: u64,
+    pub stale_count: u64,
+    pub contradiction_count: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -161,6 +191,32 @@ pub struct StatsResponse {
     pub total_memories: u64,
     pub recent_memories: Vec<Memory>,
     pub needs_attention: NeedsAttention,
+    pub details: Option<StatsDetails>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StatsDetails {
+    pub by_type: HashMap<String, TypeStats>,
+    pub storage_size_bytes: u64,
+    pub entity_count: u64,
+    pub staleness_distribution: StalenessDistribution,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TypeStats {
+    pub count: u64,
+    pub stale_count: u64,
+    pub avg_staleness: f64,
+    pub avg_access_count: f64,
+    pub oldest: Option<DateTime<Utc>>,
+    pub newest: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StalenessDistribution {
+    pub fresh: u64,
+    pub aging: u64,
+    pub stale: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -168,4 +224,12 @@ pub struct NeedsAttention {
     pub stale_count: u64,
     pub conflict_count: u64,
     pub unvalidated_count: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecallResult {
+    pub memory: Memory,
+    pub relevance_score: f32,
+    pub staleness_score: f64,
+    pub freshness_label: crate::staleness::FreshnessLabel,
 }

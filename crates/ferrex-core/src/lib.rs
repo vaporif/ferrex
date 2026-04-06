@@ -3,7 +3,9 @@ mod entity;
 mod error;
 mod pipeline;
 mod predicate;
+mod reflect;
 mod retrieval;
+pub mod staleness;
 mod types;
 
 pub use config::{ConfigError, LoadedConfig, load_or_init, resolve_namespace_groups};
@@ -12,6 +14,7 @@ pub use error::CoreError;
 pub use predicate::PredicateNormalizer;
 use retrieval::SECONDS_PER_DAY;
 pub use retrieval::compute_recency_boost;
+pub use staleness::{FreshnessLabel, StalenessConfig, StalenessWeights, TypeStalenessConfig};
 pub use types::*;
 
 pub use ferrex_embed::{ModelTier, RerankerTier};
@@ -351,7 +354,7 @@ impl MemoryService {
             .await
     }
 
-    pub async fn recall(&self, req: RecallRequest) -> Result<Vec<(Memory, f32)>, CoreError> {
+    pub async fn recall(&self, req: RecallRequest) -> Result<Vec<RecallResult>, CoreError> {
         if req.time_range.is_some() {
             return Err(CoreError::Validation(
                 "time_range filtering is not yet implemented".into(),
@@ -435,7 +438,8 @@ impl MemoryService {
         let reranked = self.reranker.rerank(&req.query, &doc_refs, limit).await?;
 
         let now = Utc::now();
-        let mut scored: Vec<(Memory, f32)> = reranked
+        let staleness_config = &self.config.staleness;
+        let mut results: Vec<RecallResult> = reranked
             .iter()
             .filter_map(|r| {
                 let memory = ordered.get(r.index)?;
@@ -443,36 +447,188 @@ impl MemoryService {
                 let age_days = (now - memory.created_at).num_seconds() as f64 / SECONDS_PER_DAY;
                 let recency = compute_recency_boost(memory.memory_type, age_days);
                 #[allow(clippy::cast_possible_truncation)]
-                let final_score = (f64::from(r.score) * recency) as f32;
-                Some(((*memory).clone(), final_score))
+                let relevance_score = (f64::from(r.score) * recency) as f32;
+                let s_score = crate::staleness::staleness_score(memory, now, staleness_config);
+                let threshold =
+                    crate::staleness::threshold_for_type(staleness_config, memory.memory_type);
+                let label = crate::staleness::freshness_label(s_score, threshold);
+                Some(RecallResult {
+                    memory: (*memory).clone(),
+                    relevance_score,
+                    staleness_score: s_score,
+                    freshness_label: label,
+                })
             })
             .collect();
 
-        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
-        scored.truncate(limit);
+        results.sort_by(|a, b| b.relevance_score.total_cmp(&a.relevance_score));
+        results.truncate(limit);
 
-        let accessed_ids: Vec<String> = scored.iter().map(|(m, _)| m.id.clone()).collect();
+        let accessed_ids: Vec<String> = results.iter().map(|r| r.memory.id.clone()).collect();
         self.metadata_store
             .update_last_accessed(&accessed_ids)
             .await?;
 
-        Ok(scored)
+        if let Some(ref validate_ids) = req.validate_ids {
+            if !validate_ids.is_empty() {
+                self.metadata_store
+                    .update_last_validated(validate_ids, now)
+                    .await?;
+            }
+        }
+
+        Ok(results)
     }
 
-    pub async fn stats(&self, _req: StatsRequest) -> Result<StatsResponse, CoreError> {
+    #[allow(clippy::cast_precision_loss)] // counts-to-f64 is fine for averaging
+    pub async fn stats(&self, req: StatsRequest) -> Result<StatsResponse, CoreError> {
+        let namespace = &req.namespace;
         let total = self.metadata_store.memory_count().await?;
         let recent = self
             .metadata_store
             .recent_memories(STATS_RECENT_COUNT)
             .await?;
+
+        let staleness_config = &self.config.staleness;
+        let now = Utc::now();
+
+        let unvalidated = self
+            .metadata_store
+            .get_unvalidated_memories(namespace)
+            .await?;
+        let unvalidated_count = unvalidated.len() as u64;
+
+        let min_half_life = staleness_config
+            .type_config
+            .values()
+            .map(|tc| tc.half_life_days)
+            .fold(f64::INFINITY, f64::min);
+        let cutoff = now - chrono::Duration::days((min_half_life / 2.0) as i64);
+        let stale_candidates = self
+            .metadata_store
+            .get_stale_candidates(namespace, cutoff)
+            .await?;
+        let stale_count = stale_candidates
+            .iter()
+            .filter(|m| {
+                let score = crate::staleness::staleness_score(m, now, staleness_config);
+                let threshold =
+                    crate::staleness::threshold_for_type(staleness_config, m.memory_type);
+                score >= threshold
+            })
+            .count() as u64;
+
+        let needs_attention = NeedsAttention {
+            stale_count,
+            conflict_count: 0,
+            unvalidated_count,
+        };
+
+        let details = if req.detailed.unwrap_or(false) {
+            let storage_size_bytes = self.metadata_store.storage_size_bytes().await?;
+            let entity_count = self.metadata_store.entity_count(namespace).await?;
+
+            let all_ids = self.metadata_store.list_all_memory_ids(namespace).await?;
+            let all_memories = self.metadata_store.get_memories_by_ids(&all_ids).await?;
+            let valid_memories: Vec<&Memory> = all_memories
+                .iter()
+                .filter(|m| m.t_invalid.is_none())
+                .collect();
+
+            let mut dist = StalenessDistribution {
+                fresh: 0,
+                aging: 0,
+                stale: 0,
+            };
+            let mut type_stats_map: HashMap<
+                String,
+                (
+                    u64,
+                    u64,
+                    f64,
+                    f64,
+                    Option<chrono::DateTime<Utc>>,
+                    Option<chrono::DateTime<Utc>>,
+                ),
+            > = HashMap::new();
+
+            for mem in &valid_memories {
+                let score = crate::staleness::staleness_score(mem, now, staleness_config);
+                let threshold =
+                    crate::staleness::threshold_for_type(staleness_config, mem.memory_type);
+                let label = crate::staleness::freshness_label(score, threshold);
+
+                match label {
+                    crate::staleness::FreshnessLabel::Fresh => dist.fresh += 1,
+                    crate::staleness::FreshnessLabel::Aging => dist.aging += 1,
+                    crate::staleness::FreshnessLabel::Stale => dist.stale += 1,
+                }
+
+                let key = mem.memory_type.as_str().to_string();
+                let entry = type_stats_map
+                    .entry(key)
+                    .or_insert((0, 0, 0.0, 0.0, None, None));
+                entry.0 += 1;
+                if matches!(label, crate::staleness::FreshnessLabel::Stale) {
+                    entry.1 += 1;
+                }
+                entry.2 += score;
+                entry.3 += mem.access_count as f64;
+                entry.4 = Some(match entry.4 {
+                    Some(oldest) if mem.created_at < oldest => mem.created_at,
+                    Some(oldest) => oldest,
+                    None => mem.created_at,
+                });
+                entry.5 = Some(match entry.5 {
+                    Some(newest) if mem.created_at > newest => mem.created_at,
+                    Some(newest) => newest,
+                    None => mem.created_at,
+                });
+            }
+
+            let by_type: HashMap<String, TypeStats> = type_stats_map
+                .into_iter()
+                .map(
+                    |(key, (count, stale_c, sum_staleness, sum_access, oldest, newest))| {
+                        let count_f = count as f64;
+                        (
+                            key,
+                            TypeStats {
+                                count,
+                                stale_count: stale_c,
+                                avg_staleness: if count > 0 {
+                                    sum_staleness / count_f
+                                } else {
+                                    0.0
+                                },
+                                avg_access_count: if count > 0 {
+                                    sum_access / count_f
+                                } else {
+                                    0.0
+                                },
+                                oldest,
+                                newest,
+                            },
+                        )
+                    },
+                )
+                .collect();
+
+            Some(StatsDetails {
+                by_type,
+                storage_size_bytes,
+                entity_count,
+                staleness_distribution: dist,
+            })
+        } else {
+            None
+        };
+
         Ok(StatsResponse {
             total_memories: total,
             recent_memories: recent,
-            needs_attention: NeedsAttention {
-                stale_count: 0,
-                conflict_count: 0,
-                unvalidated_count: 0,
-            },
+            needs_attention,
+            details,
         })
     }
 
@@ -530,12 +686,95 @@ impl MemoryService {
         })
     }
 
-    pub fn reflect(&self, _req: ReflectRequest) -> Result<ReflectResponse, CoreError> {
+    pub async fn reflect(&self, req: ReflectRequest) -> Result<ReflectResponse, CoreError> {
+        let namespace = &req.namespace;
+        let limit = req.limit.unwrap_or(reflect::DEFAULT_REFLECT_LIMIT);
+        let staleness_config = &self.config.staleness;
+        let now = Utc::now();
+
+        let mut stale_candidates = Vec::new();
+        let mut total_scanned: u64 = 0;
+
+        if req.include_stale {
+            let min_half_life = staleness_config
+                .type_config
+                .values()
+                .map(|tc| tc.half_life_days)
+                .fold(f64::INFINITY, f64::min);
+            #[allow(clippy::cast_possible_truncation)]
+            let cutoff_days = (min_half_life / 2.0) as i64;
+            let cutoff = now - chrono::Duration::days(cutoff_days);
+
+            let candidates = self
+                .metadata_store
+                .get_stale_candidates(namespace, cutoff)
+                .await?;
+            total_scanned = candidates.len() as u64;
+
+            let mut scored: Vec<(Memory, f64, String)> = candidates
+                .into_iter()
+                .filter_map(|mem| {
+                    let score = crate::staleness::staleness_score(&mem, now, staleness_config);
+                    let threshold =
+                        crate::staleness::threshold_for_type(staleness_config, mem.memory_type);
+                    if score >= threshold {
+                        let reason = build_stale_reason(&mem, now);
+                        Some((mem, score, reason))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            scored.sort_by(|a, b| {
+                let priority_a = eviction_priority(&a.0);
+                let priority_b = eviction_priority(&b.0);
+                priority_a.cmp(&priority_b).then(b.1.total_cmp(&a.1))
+            });
+
+            for (rank, (mem, score, reason)) in scored.into_iter().take(limit as usize).enumerate()
+            {
+                let threshold =
+                    crate::staleness::threshold_for_type(staleness_config, mem.memory_type);
+                let label = crate::staleness::freshness_label(score, threshold);
+                stale_candidates.push(StaleCandidate {
+                    memory: mem,
+                    staleness_score: score,
+                    freshness_label: label,
+                    #[allow(clippy::cast_possible_truncation)]
+                    eviction_rank: rank as u32 + 1,
+                    reason,
+                });
+            }
+        }
+
+        let contradictions = if req.include_contradictions {
+            let all_ids = self.metadata_store.list_all_memory_ids(namespace).await?;
+            let all_memories = self.metadata_store.get_memories_by_ids(&all_ids).await?;
+            let valid_semantics: Vec<Memory> = all_memories
+                .into_iter()
+                .filter(|m| m.memory_type == MemoryType::Semantic && m.t_invalid.is_none())
+                .collect();
+            total_scanned = total_scanned.max(valid_semantics.len() as u64);
+
+            let entities = self.metadata_store.get_all_entities().await?;
+            let alias_map = reflect::build_entity_alias_map(&entities);
+            reflect::detect_contradictions(&valid_semantics, &alias_map)
+        } else {
+            Vec::new()
+        };
+
+        let stale_count = stale_candidates.len() as u64;
+        let contradiction_count = contradictions.len() as u64;
+
         Ok(ReflectResponse {
-            message: "reflect is not yet implemented".to_string(),
-            stale: vec![],
-            contradictions: vec![],
-            low_access: vec![],
+            stale: stale_candidates,
+            contradictions,
+            summary: ReflectSummary {
+                total_scanned,
+                stale_count,
+                contradiction_count,
+            },
         })
     }
 
@@ -543,6 +782,30 @@ impl MemoryService {
         let sidecar = self.sidecar.take();
         (self, sidecar)
     }
+}
+
+const fn eviction_priority(mem: &Memory) -> u8 {
+    if mem.t_invalid.is_some() {
+        return 0;
+    }
+    match mem.memory_type {
+        MemoryType::Episodic if mem.access_count == 0 => 1,
+        MemoryType::Episodic => 2,
+        _ => 3,
+    }
+}
+
+fn build_stale_reason(mem: &Memory, now: chrono::DateTime<Utc>) -> String {
+    let age_days = (now - mem.created_at).num_days();
+    let access_days = (now - mem.last_accessed).num_days();
+    let validated_str = mem.last_validated.map_or_else(
+        || "never validated".to_string(),
+        |v| format!("last validated {} days ago", (now - v).num_days()),
+    );
+    format!(
+        "created {} days ago, last accessed {} days ago, {}, {} accesses",
+        age_days, access_days, validated_str, mem.access_count
+    )
 }
 
 const fn detect_memory_type(req: &StoreRequest) -> MemoryType {
