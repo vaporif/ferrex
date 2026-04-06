@@ -1,6 +1,9 @@
 use ferrex_core::{FerrexConfig, MemoryService};
 
-pub fn run_reconcile(config: FerrexConfig, fix: bool, _sample: Option<usize>) -> eyre::Result<()> {
+pub fn run_reconcile(config: FerrexConfig, fix: bool, sample: Option<usize>) -> eyre::Result<()> {
+    if sample.is_some() {
+        tracing::warn!("--sample is not yet implemented, running full audit");
+    }
     let audit_fix_limit = config.reconciliation.audit_fix_limit;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

@@ -104,7 +104,7 @@ fn build_memory(ctx: &StoreContext<'_>) -> Memory {
         namespace: ctx.namespace.clone(),
         memory_type: ctx.memory_type,
         content: ctx.req.content.clone(),
-        subject: ctx.req.subject.clone(),
+        subject: ctx.req.subject.as_deref().map(|s| s.trim().to_lowercase()),
         predicate: ctx.req.predicate.clone(),
         object: ctx.req.object.clone(),
         confidence,

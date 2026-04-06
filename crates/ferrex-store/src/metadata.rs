@@ -59,6 +59,7 @@ pub trait MetadataStore: Send + Sync {
     fn memory_count(&self) -> impl Future<Output = Result<u64, StoreError>> + Send;
     fn recent_memories(
         &self,
+        namespace: &str,
         limit: usize,
     ) -> impl Future<Output = Result<Vec<Memory>, StoreError>> + Send;
 
@@ -179,6 +180,10 @@ pub trait MetadataStore: Send + Sync {
 }
 
 const DEFAULT_READER_POOL_SIZE: usize = 4;
+
+/// Maximum number of IDs in a single SQL IN-clause to avoid hitting
+/// `SQLite`'s variable limit and keep query plans efficient.
+const IN_CLAUSE_BATCH_SIZE: usize = 500;
 
 #[derive(Debug, Clone)]
 enum ConnectionSource {
@@ -482,30 +487,32 @@ impl MetadataStore for SqliteStore {
         }
         let ids = ids.to_vec();
         self.with_reader(move |conn| {
-            let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{i}")).collect();
-            let sql = format!(
-                "SELECT m.*, GROUP_CONCAT(e.name, '\u{1f}') AS entity_names \
-                 FROM memories m \
-                 LEFT JOIN memory_entities me ON me.memory_id = m.id \
-                 LEFT JOIN entities e ON e.id = me.entity_id \
-                 WHERE m.id IN ({}) \
-                 GROUP BY m.id",
-                placeholders.join(", ")
-            );
-            let params: Vec<&dyn rusqlite::types::ToSql> = ids
-                .iter()
-                .map(|s| s as &dyn rusqlite::types::ToSql)
-                .collect();
-            // Dynamic IN-clause — can't use prepare_cached.
-            let mut stmt = conn.prepare(&sql)?;
-            let mut rows = stmt.query(params.as_slice())?;
             let mut memories = Vec::new();
-            while let Some(row) = rows.next()? {
-                let entity_names: Option<String> = row.get("entity_names")?;
-                let entities: Vec<String> = entity_names
-                    .map(|s| s.split('\u{1f}').map(String::from).collect())
-                    .unwrap_or_default();
-                memories.push(row_to_memory(row, entities)?);
+            for chunk in ids.chunks(IN_CLAUSE_BATCH_SIZE) {
+                let placeholders: Vec<String> =
+                    (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+                let sql = format!(
+                    "SELECT m.*, GROUP_CONCAT(e.name, '\u{1f}') AS entity_names \
+                     FROM memories m \
+                     LEFT JOIN memory_entities me ON me.memory_id = m.id \
+                     LEFT JOIN entities e ON e.id = me.entity_id \
+                     WHERE m.id IN ({}) \
+                     GROUP BY m.id",
+                    placeholders.join(", ")
+                );
+                let params: Vec<&dyn rusqlite::types::ToSql> = chunk
+                    .iter()
+                    .map(|s| s as &dyn rusqlite::types::ToSql)
+                    .collect();
+                let mut stmt = conn.prepare(&sql)?;
+                let mut rows = stmt.query(params.as_slice())?;
+                while let Some(row) = rows.next()? {
+                    let entity_names: Option<String> = row.get("entity_names")?;
+                    let entities: Vec<String> = entity_names
+                        .map(|s| s.split('\u{1f}').map(String::from).collect())
+                        .unwrap_or_default();
+                    memories.push(row_to_memory(row, entities)?);
+                }
             }
             Ok(memories)
         })
@@ -519,20 +526,26 @@ impl MetadataStore for SqliteStore {
         let ids = ids.to_vec();
         self.with_writer(move |conn| {
             let now = Utc::now().to_rfc3339();
-            let placeholders: Vec<String> =
-                (1..=ids.len()).map(|i| format!("?{}", i + 1)).collect();
-            let sql = format!(
-                "UPDATE memories SET last_accessed = ?1, access_count = access_count + 1 WHERE id IN ({})",
-                placeholders.join(", ")
-            );
-            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::with_capacity(ids.len() + 1);
-            params.push(Box::new(now));
-            params.extend(ids.iter().map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>));
-            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-                params.iter().map(std::convert::AsRef::as_ref).collect();
-            // Dynamic IN-clause — can't use prepare_cached.
-            let mut stmt = conn.prepare(&sql)?;
-            stmt.execute(param_refs.as_slice())?;
+            for chunk in ids.chunks(IN_CLAUSE_BATCH_SIZE) {
+                let placeholders: Vec<String> =
+                    (1..=chunk.len()).map(|i| format!("?{}", i + 1)).collect();
+                let sql = format!(
+                    "UPDATE memories SET last_accessed = ?1, access_count = access_count + 1 WHERE id IN ({})",
+                    placeholders.join(", ")
+                );
+                let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                    Vec::with_capacity(chunk.len() + 1);
+                params.push(Box::new(now.clone()));
+                params.extend(
+                    chunk
+                        .iter()
+                        .map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>),
+                );
+                let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                    params.iter().map(std::convert::AsRef::as_ref).collect();
+                let mut stmt = conn.prepare(&sql)?;
+                stmt.execute(param_refs.as_slice())?;
+            }
             Ok(())
         })
         .await
@@ -693,18 +706,24 @@ impl MetadataStore for SqliteStore {
         .await
     }
 
-    async fn recent_memories(&self, limit: usize) -> Result<Vec<Memory>, StoreError> {
+    async fn recent_memories(
+        &self,
+        namespace: &str,
+        limit: usize,
+    ) -> Result<Vec<Memory>, StoreError> {
+        let ns = namespace.to_string();
         self.with_reader(move |conn| {
             let mut stmt = conn.prepare_cached(
                 "SELECT m.*, GROUP_CONCAT(e.name, '\u{1f}') AS entity_names \
                  FROM memories m \
                  LEFT JOIN memory_entities me ON me.memory_id = m.id \
                  LEFT JOIN entities e ON e.id = me.entity_id \
+                 WHERE m.t_invalid IS NULL AND m.namespace = ?1 \
                  GROUP BY m.id \
                  ORDER BY m.created_at DESC \
-                 LIMIT ?1",
+                 LIMIT ?2",
             )?;
-            let mut rows = stmt.query(rusqlite::params![limit])?;
+            let mut rows = stmt.query(rusqlite::params![ns, limit])?;
             let mut memories = Vec::new();
             while let Some(row) = rows.next()? {
                 let entity_names: Option<String> = row.get("entity_names")?;
@@ -724,19 +743,23 @@ impl MetadataStore for SqliteStore {
         }
         let ids = ids.to_vec();
         self.with_writer(move |conn| {
-            let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{i}")).collect();
-            let sql = format!(
-                "DELETE FROM memories WHERE id IN ({})",
-                placeholders.join(", ")
-            );
-            let params: Vec<&dyn rusqlite::types::ToSql> = ids
-                .iter()
-                .map(|s| s as &dyn rusqlite::types::ToSql)
-                .collect();
-            // Dynamic IN-clause — can't use prepare_cached.
-            let mut stmt = conn.prepare(&sql)?;
-            let n = stmt.execute(params.as_slice())?;
-            Ok(n as u64)
+            let mut total: u64 = 0;
+            for chunk in ids.chunks(IN_CLAUSE_BATCH_SIZE) {
+                let placeholders: Vec<String> =
+                    (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+                let sql = format!(
+                    "DELETE FROM memories WHERE id IN ({})",
+                    placeholders.join(", ")
+                );
+                let params: Vec<&dyn rusqlite::types::ToSql> = chunk
+                    .iter()
+                    .map(|s| s as &dyn rusqlite::types::ToSql)
+                    .collect();
+                let mut stmt = conn.prepare(&sql)?;
+                let n = stmt.execute(params.as_slice())?;
+                total += n as u64;
+            }
+            Ok(total)
         })
         .await
     }
@@ -836,21 +859,25 @@ impl MetadataStore for SqliteStore {
                 "SELECT op_id, kind, memory_id, namespace, target_id, qdrant_written, started_at \
                  FROM pending_ops ORDER BY started_at",
             )?;
-            let rows: Vec<PendingOp> = stmt
-                .query_map([], |row| {
-                    let kind_str: String = row.get("kind")?;
-                    Ok(PendingOp {
-                        op_id: row.get("op_id")?,
-                        kind: PendingOpKind::parse(&kind_str).unwrap_or(PendingOpKind::Store),
-                        memory_id: row.get("memory_id")?,
-                        namespace: row.get("namespace")?,
-                        target_id: row.get("target_id")?,
-                        qdrant_written: row.get::<_, i64>("qdrant_written")? != 0,
-                        started_at: parse_dt(&row.get::<_, String>("started_at")?),
-                    })
-                })?
-                .collect::<Result<_, _>>()?;
-            Ok(rows)
+            let mut rows = stmt.query([])?;
+            let mut ops = Vec::new();
+            while let Some(row) = rows.next()? {
+                let kind_str: String = row.get("kind")?;
+                let Some(kind) = PendingOpKind::parse(&kind_str) else {
+                    tracing::warn!(kind = %kind_str, "unknown pending op kind, skipping");
+                    continue;
+                };
+                ops.push(PendingOp {
+                    op_id: row.get("op_id")?,
+                    kind,
+                    memory_id: row.get("memory_id")?,
+                    namespace: row.get("namespace")?,
+                    target_id: row.get("target_id")?,
+                    qdrant_written: row.get::<_, i64>("qdrant_written")? != 0,
+                    started_at: parse_dt(&row.get::<_, String>("started_at")?),
+                });
+            }
+            Ok(ops)
         })
         .await
     }
@@ -1007,12 +1034,27 @@ impl MetadataStore for SqliteStore {
         let ids = ids.to_vec();
         let ts = now.to_rfc3339();
         self.with_writer(move |conn| {
-            for id in &ids {
-                conn.execute(
-                    "UPDATE memories SET last_validated = ?1 WHERE id = ?2",
-                    rusqlite::params![ts, id],
-                )?;
+            let tx = conn.transaction()?;
+            for chunk in ids.chunks(IN_CLAUSE_BATCH_SIZE) {
+                let placeholders: Vec<String> =
+                    (1..=chunk.len()).map(|i| format!("?{}", i + 1)).collect();
+                let sql = format!(
+                    "UPDATE memories SET last_validated = ?1 WHERE id IN ({})",
+                    placeholders.join(", ")
+                );
+                let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                    Vec::with_capacity(chunk.len() + 1);
+                params.push(Box::new(ts.clone()));
+                params.extend(
+                    chunk
+                        .iter()
+                        .map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>),
+                );
+                let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                    params.iter().map(std::convert::AsRef::as_ref).collect();
+                tx.execute(&sql, param_refs.as_slice())?;
             }
+            tx.commit()?;
             Ok(())
         })
         .await
@@ -1160,7 +1202,7 @@ mod tests {
 
         assert_eq!(store.memory_count().await.unwrap(), 2);
 
-        let recent = store.recent_memories(5).await.unwrap();
+        let recent = store.recent_memories("default", 5).await.unwrap();
         assert_eq!(recent.len(), 2);
     }
 

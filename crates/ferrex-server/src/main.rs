@@ -7,7 +7,7 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use ferrex_core::{
     CoreError, FerrexConfig, ForgetRequest, MemoryService, ModelTier, RecallRequest,
-    ReflectRequest, RerankerTier, StatsRequest, StoreRequest, TimeRange,
+    ReflectRequest, RerankerTier, StatsRequest, StoreRequest,
 };
 use rmcp::{
     ErrorData, ServerHandler, ServiceExt, handler::server::wrapper::Parameters, tool, tool_handler,
@@ -159,22 +159,8 @@ struct RecallParams {
     namespace: Option<String>,
     /// Max results (default 10).
     limit: Option<usize>,
-    /// Include stale memories (not yet implemented).
-    include_stale: Option<bool>,
-    /// Include invalidated memories (not yet implemented).
-    include_invalidated: Option<bool>,
-    /// Time range filter (not yet implemented).
-    time_range: Option<McpTimeRange>,
     /// Memory IDs to mark as validated (confirmed still accurate).
     validate_ids: Option<Vec<String>>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct McpTimeRange {
-    /// Start of time range (RFC 3339).
-    start: Option<chrono::DateTime<chrono::Utc>>,
-    /// End of time range (RFC 3339).
-    end: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -312,12 +298,9 @@ impl FerrexServer {
             entities: p.entities,
             namespace: p.namespace,
             limit: p.limit,
-            include_stale: p.include_stale,
-            include_invalidated: p.include_invalidated,
-            time_range: p.time_range.map(|tr| TimeRange {
-                start: tr.start,
-                end: tr.end,
-            }),
+            include_stale: None,
+            include_invalidated: None,
+            time_range: None,
             validate_ids: p.validate_ids,
         };
 
@@ -429,12 +412,34 @@ fn main() -> eyre::Result<()> {
                 .await
                 .map_err(|e| eyre::eyre!("MCP server error: {e}"))?;
 
-            tokio::select! {
-                result = running.waiting() => {
-                    result.map_err(|e| eyre::eyre!("MCP server error: {e}"))?;
+            #[cfg(unix)]
+            {
+                let mut sigterm =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                        .expect("failed to install SIGTERM handler");
+
+                tokio::select! {
+                    result = running.waiting() => {
+                        result.map_err(|e| eyre::eyre!("MCP server error: {e}"))?;
+                    }
+                    _ = tokio::signal::ctrl_c() => {
+                        tracing::info!("received SIGINT, shutting down");
+                    }
+                    _ = sigterm.recv() => {
+                        tracing::info!("received SIGTERM, shutting down");
+                    }
                 }
-                _ = tokio::signal::ctrl_c() => {
-                    tracing::info!("received SIGINT, shutting down");
+            }
+
+            #[cfg(not(unix))]
+            {
+                tokio::select! {
+                    result = running.waiting() => {
+                        result.map_err(|e| eyre::eyre!("MCP server error: {e}"))?;
+                    }
+                    _ = tokio::signal::ctrl_c() => {
+                        tracing::info!("received SIGINT, shutting down");
+                    }
                 }
             }
 

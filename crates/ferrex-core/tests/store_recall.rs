@@ -323,9 +323,10 @@ async fn store_and_recall_episodic_round_trip() {
 #[ignore = "requires Qdrant"]
 async fn stats_reflects_stored_count() {
     let svc = test_service().await;
+    let config = base_config();
     let before = svc
         .stats(StatsRequest {
-            namespace: "default".into(),
+            namespace: config.namespace.clone(),
             detailed: None,
         })
         .await
@@ -339,7 +340,7 @@ async fn stats_reflects_stored_count() {
 
     let after = svc
         .stats(StatsRequest {
-            namespace: "default".into(),
+            namespace: config.namespace,
             detailed: None,
         })
         .await

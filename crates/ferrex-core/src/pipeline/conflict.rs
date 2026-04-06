@@ -52,7 +52,8 @@ pub async fn run(ctx: &mut StoreContext<'_>, metadata: &SqliteStore) -> Result<(
     if ctx.memory_type != MemoryType::Semantic {
         return Ok(());
     }
-    let subject = ctx.req.subject.as_deref().unwrap_or("");
+    let subject = ctx.req.subject.as_deref().unwrap_or("").to_lowercase();
+    let subject = subject.trim();
     let normalized_predicate = ctx.normalized_predicate.as_deref().ok_or_else(|| {
         CoreError::Validation("conflict stage requires normalized predicate".into())
     })?;

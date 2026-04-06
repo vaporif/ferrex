@@ -4,8 +4,19 @@ use crate::error::CoreError;
 use crate::pipeline::StoreContext;
 
 const MAX_CONTENT_LENGTH: usize = 4096;
+const MAX_SUBJECT_LENGTH: usize = 512;
+const MAX_PREDICATE_LENGTH: usize = 256;
+const MAX_OBJECT_LENGTH: usize = 4096;
+const MAX_ENTITIES_PER_REQUEST: usize = 50;
 
 pub fn run(ctx: &StoreContext<'_>) -> Result<(), CoreError> {
+    if ctx.req.entities.len() > MAX_ENTITIES_PER_REQUEST {
+        return Err(CoreError::Validation(format!(
+            "too many entities: {} exceeds limit of {MAX_ENTITIES_PER_REQUEST}",
+            ctx.req.entities.len()
+        )));
+    }
+
     match ctx.memory_type {
         MemoryType::Episodic | MemoryType::Procedural => {
             let Some(content) = ctx.req.content.as_deref().filter(|c| !c.is_empty()) else {
@@ -29,6 +40,27 @@ pub fn run(ctx: &StoreContext<'_>) -> Result<(), CoreError> {
                 return Err(CoreError::Validation(
                     "semantic memory requires non-empty subject, predicate, and object".into(),
                 ));
+            }
+            if let Some(ref s) = ctx.req.subject
+                && s.len() > MAX_SUBJECT_LENGTH
+            {
+                return Err(CoreError::Validation(format!(
+                    "subject exceeds {MAX_SUBJECT_LENGTH} byte limit"
+                )));
+            }
+            if let Some(ref p) = ctx.req.predicate
+                && p.len() > MAX_PREDICATE_LENGTH
+            {
+                return Err(CoreError::Validation(format!(
+                    "predicate exceeds {MAX_PREDICATE_LENGTH} byte limit"
+                )));
+            }
+            if let Some(ref o) = ctx.req.object
+                && o.len() > MAX_OBJECT_LENGTH
+            {
+                return Err(CoreError::Validation(format!(
+                    "object exceeds {MAX_OBJECT_LENGTH} byte limit"
+                )));
             }
         }
     }
