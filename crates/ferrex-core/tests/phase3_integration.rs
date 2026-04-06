@@ -1,15 +1,16 @@
 #![allow(clippy::needless_collect)]
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use ferrex_core::{
-    CoreError, DedupConfig, FerrexConfig, ForgetRequest, MemoryService, ModelTier, RecallRequest,
-    RerankerTier, StoreRequest,
+    CoreError, DedupConfig, FerrexConfig, ForgetRequest, MemoryService, ModelTier,
+    PredicatesConfig, RecallRequest, RerankerTier, StatsRequest, StoreRequest,
 };
 use ferrex_store::MemoryType;
 
-async fn test_service() -> MemoryService {
-    let config = FerrexConfig {
+fn base_config() -> FerrexConfig {
+    FerrexConfig {
         qdrant_url: Some("http://localhost:6334".into()),
         qdrant_bin: "qdrant".into(),
         qdrant_port: 6334,
@@ -26,6 +27,18 @@ async fn test_service() -> MemoryService {
         predicates: ferrex_core::PredicatesConfig::default(),
         reconciliation: ferrex_core::ReconciliationConfig::default(),
         reader_pool_size: 2,
+    }
+}
+
+async fn test_service() -> MemoryService {
+    MemoryService::from_config(base_config()).await.unwrap()
+}
+
+async fn test_service_with_predicates(groups: HashMap<String, Vec<String>>) -> MemoryService {
+    let mut config = base_config();
+    config.predicates = PredicatesConfig {
+        groups,
+        namespaces: HashMap::new(),
     };
     MemoryService::from_config(config).await.unwrap()
 }
@@ -205,4 +218,159 @@ async fn forget_removes_from_both_stores() {
         !ids.contains(&resp.id.as_str()),
         "forgotten memory should not be recalled"
     );
+}
+
+fn recall_query(query: &str) -> RecallRequest {
+    RecallRequest {
+        query: query.into(),
+        types: None,
+        entities: None,
+        namespace: None,
+        limit: Some(10),
+        include_stale: None,
+        include_invalidated: None,
+        time_range: None,
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Qdrant"]
+async fn forget_nonexistent_returns_not_found() {
+    let svc = test_service().await;
+    let fake_id = uuid::Uuid::now_v7().to_string();
+    let resp = svc
+        .forget(ForgetRequest {
+            ids: vec![fake_id.clone()],
+            cascade: None,
+        })
+        .await
+        .unwrap();
+    assert!(resp.deleted.is_empty());
+    assert!(resp.not_found.contains(&fake_id));
+}
+
+#[tokio::test]
+#[ignore = "requires Qdrant"]
+async fn validation_rejects_episodic_without_content() {
+    let svc = test_service().await;
+    let req = StoreRequest {
+        content: None,
+        memory_type: Some(MemoryType::Episodic),
+        subject: None,
+        predicate: None,
+        object: None,
+        confidence: None,
+        source: None,
+        context: None,
+        entities: vec![],
+        namespace: None,
+        supersedes: None,
+    };
+    assert!(matches!(svc.store(req).await, Err(CoreError::Validation(_))));
+}
+
+#[tokio::test]
+#[ignore = "requires Qdrant"]
+async fn validation_rejects_semantic_missing_object() {
+    let svc = test_service().await;
+    let req = StoreRequest {
+        content: None,
+        memory_type: Some(MemoryType::Semantic),
+        subject: Some("api".into()),
+        predicate: Some("uses".into()),
+        object: None,
+        confidence: None,
+        source: None,
+        context: None,
+        entities: vec![],
+        namespace: None,
+        supersedes: None,
+    };
+    assert!(matches!(svc.store(req).await, Err(CoreError::Validation(_))));
+}
+
+#[tokio::test]
+#[ignore = "requires Qdrant"]
+async fn store_and_recall_episodic_round_trip() {
+    let svc = test_service().await;
+    let resp = svc
+        .store(episodic("deployed v2.3.1 to staging at 3pm"))
+        .await
+        .unwrap();
+    let results = svc
+        .recall(recall_query("deployment staging"))
+        .await
+        .unwrap();
+    let ids: Vec<&str> = results.iter().map(|(m, _)| m.id.as_str()).collect();
+    assert!(
+        ids.contains(&resp.id.as_str()),
+        "stored memory should be recallable"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Qdrant"]
+async fn stats_reflects_stored_count() {
+    let svc = test_service().await;
+    let before = svc.stats(StatsRequest { detail: None }).await.unwrap();
+    assert_eq!(before.total_memories, 0);
+
+    svc.store(episodic("first memory")).await.unwrap();
+    svc.store(episodic("a completely different second memory"))
+        .await
+        .unwrap();
+
+    let after = svc.stats(StatsRequest { detail: None }).await.unwrap();
+    assert_eq!(after.total_memories, 2);
+}
+
+#[tokio::test]
+#[ignore = "requires Qdrant"]
+async fn dedup_allows_distinct_episodic_memories() {
+    let svc = test_service().await;
+    svc.store(episodic("the build failed because of a flaky test"))
+        .await
+        .unwrap();
+    svc.store(episodic("deployed the new auth service to production"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Qdrant"]
+async fn predicate_normalization_triggers_conflict() {
+    let mut groups = HashMap::new();
+    groups.insert(
+        "depends_on".into(),
+        vec!["uses".into(), "requires".into()],
+    );
+    let svc = test_service_with_predicates(groups).await;
+
+    let first = svc
+        .store(semantic("api", "uses", "tokio 1.38"))
+        .await
+        .unwrap();
+    // "requires" normalizes to "depends_on" (same as "uses"), so this is a conflict update
+    let second = svc
+        .store(semantic("api", "requires", "tokio 1.40"))
+        .await
+        .unwrap();
+    assert!(
+        second.superseded.contains(&first.id),
+        "synonym predicates should trigger conflict: {:?}",
+        second.superseded
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Qdrant"]
+async fn supersedes_nonexistent_target_fails() {
+    let svc = test_service().await;
+    let fake_id = uuid::Uuid::now_v7().to_string();
+    let mut req = semantic("api", "uses", "tokio 1.40");
+    req.supersedes = Some(fake_id);
+    assert!(matches!(
+        svc.store(req).await,
+        Err(CoreError::Validation(_))
+    ));
 }
