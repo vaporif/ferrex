@@ -1,5 +1,3 @@
-//! Phase 4: Memory Lifecycle integration tests
-
 use std::path::PathBuf;
 
 use ferrex_core::{
@@ -101,7 +99,6 @@ async fn test_recall_returns_freshness_metadata() {
         "staleness_score should be in [0,1], got {}",
         r.staleness_score
     );
-    // Brand new memory should be fresh
     assert_eq!(r.freshness_label, FreshnessLabel::Fresh);
 }
 
@@ -119,13 +116,11 @@ async fn test_validate_ids_updates_last_validated() {
     let results = svc.recall(req).await.unwrap();
     assert!(!results.is_empty(), "should recall the memory");
 
-    // Recall again without validate_ids and check the memory was validated
     let results2 = svc
         .recall(recall_query("CI pipeline nightly"))
         .await
         .unwrap();
     let r = results2.iter().find(|r| r.memory.id == resp.id).unwrap();
-    // A validated memory should have a lower staleness score (but it's brand new so already low)
     assert!(
         r.staleness_score < 0.5,
         "validated memory should have low staleness"
@@ -162,9 +157,8 @@ async fn test_reflect_contradiction_exact_predicate() {
     let svc = test_service().await;
     let config = base_config();
 
-    // Store two semantic memories with the same subject+predicate but different objects.
-    // Conflict resolution may auto-supersede, so we test that reflect produces
-    // a valid structured response regardless.
+    // Conflict resolution may auto-supersede one of these, so we just verify
+    // the response structure rather than asserting contradiction count.
     svc.store(semantic("database", "version", "postgres 15"))
         .await
         .unwrap();
@@ -182,9 +176,7 @@ async fn test_reflect_contradiction_exact_predicate() {
         .await
         .unwrap();
 
-    // The response should have a valid summary structure
     assert_eq!(resp.summary.stale_count, 0);
-    // Contradictions may or may not be found depending on conflict resolution
 }
 
 #[tokio::test]
@@ -207,7 +199,6 @@ async fn test_stats_brief_has_real_needs_attention() {
         .unwrap();
 
     assert_eq!(resp.total_memories, 2);
-    // New memories should have 0 stale, but some unvalidated
     assert_eq!(resp.needs_attention.stale_count, 0);
     assert!(
         resp.needs_attention.unvalidated_count >= 2,
@@ -248,7 +239,6 @@ async fn test_stats_detailed_mode() {
         "new memories should be fresh"
     );
     assert_eq!(details.staleness_distribution.stale, 0);
-    // Check by_type has entries
     assert!(
         details.by_type.contains_key("episodic") || details.by_type.contains_key("semantic"),
         "by_type should have entries"
