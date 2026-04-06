@@ -27,10 +27,10 @@ use std::sync::Arc;
 
 use access_tracker::AccessTracker;
 use chrono::Utc;
-use tokio_util::sync::CancellationToken;
 use ferrex_embed::{Embedder, Reranker};
 use ferrex_store::{MetadataStore, QdrantSidecar, SqliteStore, VectorStore};
 use qdrant_client::qdrant::{Condition, DatetimeRange, Filter, Timestamp};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::pipeline::StoreContext;
@@ -95,9 +95,10 @@ impl MemoryService {
             (vs, Some(sc))
         };
 
-        let metadata_store = Arc::new(
-            SqliteStore::open_with_pool_size(&config.db_path, config.reader_pool_size)?
-        );
+        let metadata_store = Arc::new(SqliteStore::open_with_pool_size(
+            &config.db_path,
+            config.reader_pool_size,
+        )?);
 
         let model_key = "embedding_model";
         let current_model = config.model_tier.model_name();

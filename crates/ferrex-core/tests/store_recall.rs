@@ -428,9 +428,15 @@ async fn recall_time_range_filters_by_date() {
     assert!(
         results.iter().all(|r| r.memory.created_at >= boundary),
         "expected only memories after boundary, got: {:?}",
-        results.iter().map(|r| &r.memory.created_at).collect::<Vec<_>>()
+        results
+            .iter()
+            .map(|r| &r.memory.created_at)
+            .collect::<Vec<_>>()
     );
-    assert!(!results.is_empty(), "should return at least the recent event");
+    assert!(
+        !results.is_empty(),
+        "should return at least the recent event"
+    );
 }
 
 #[tokio::test]
@@ -459,7 +465,10 @@ async fn recall_include_invalidated_returns_superseded() {
     };
     let results = svc.recall(req).await.unwrap();
     let has_original = results.iter().any(|r| r.memory.id == original.id);
-    assert!(has_original, "invalidated memory should be included when include_invalidated=true");
+    assert!(
+        has_original,
+        "invalidated memory should be included when include_invalidated=true"
+    );
 }
 
 #[tokio::test]

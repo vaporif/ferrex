@@ -310,8 +310,9 @@ impl FerrexServer {
             .time_range
             .map(|tr| {
                 let parse = |s: &str| -> Result<chrono::DateTime<chrono::Utc>, ErrorData> {
-                    s.parse::<chrono::DateTime<chrono::Utc>>()
-                        .map_err(|e| ErrorData::invalid_params(format!("invalid datetime: {e}"), None))
+                    s.parse::<chrono::DateTime<chrono::Utc>>().map_err(|e| {
+                        ErrorData::invalid_params(format!("invalid datetime: {e}"), None)
+                    })
                 };
                 let range = ferrex_core::TimeRange {
                     start: tr.start.as_deref().map(parse).transpose()?,
@@ -320,7 +321,10 @@ impl FerrexServer {
                 if let (Some(s), Some(e)) = (range.start, range.end)
                     && s > e
                 {
-                    return Err(ErrorData::invalid_params("time_range start must be <= end", None));
+                    return Err(ErrorData::invalid_params(
+                        "time_range start must be <= end",
+                        None,
+                    ));
                 }
                 Ok(range)
             })
