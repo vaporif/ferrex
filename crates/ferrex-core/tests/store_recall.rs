@@ -395,3 +395,100 @@ async fn supersedes_nonexistent_target_fails() {
         Err(CoreError::Validation(_))
     ));
 }
+
+#[tokio::test]
+#[ignore = "requires Qdrant"]
+async fn recall_time_range_filters_by_date() {
+    use chrono::Utc;
+    use ferrex_core::TimeRange;
+
+    let svc = test_service().await;
+
+    svc.store(episodic("old event from the distant past"))
+        .await
+        .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let boundary = Utc::now();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    svc.store(episodic("recent event just happened"))
+        .await
+        .unwrap();
+
+    let req = RecallRequest {
+        query: "event".into(),
+        time_range: Some(TimeRange {
+            start: Some(boundary),
+            end: None,
+        }),
+        ..recall_query("event")
+    };
+    let results = svc.recall(req).await.unwrap();
+    assert!(
+        results.iter().all(|r| r.memory.created_at >= boundary),
+        "expected only memories after boundary, got: {:?}",
+        results.iter().map(|r| &r.memory.created_at).collect::<Vec<_>>()
+    );
+    assert!(!results.is_empty(), "should return at least the recent event");
+}
+
+#[tokio::test]
+#[ignore = "requires Qdrant"]
+async fn recall_include_invalidated_returns_superseded() {
+    let svc = test_service().await;
+
+    let original = svc
+        .store(semantic("Rust", "version", "1.70"))
+        .await
+        .unwrap();
+
+    let mut update = semantic("Rust", "version", "1.80");
+    update.supersedes = Some(original.id.clone());
+    svc.store(update).await.unwrap();
+
+    let results = svc.recall(recall_query("Rust version")).await.unwrap();
+    assert!(
+        results.iter().all(|r| r.memory.id != original.id),
+        "invalidated memory should be excluded by default"
+    );
+
+    let req = RecallRequest {
+        include_invalidated: Some(true),
+        ..recall_query("Rust version")
+    };
+    let results = svc.recall(req).await.unwrap();
+    let has_original = results.iter().any(|r| r.memory.id == original.id);
+    assert!(has_original, "invalidated memory should be included when include_invalidated=true");
+}
+
+#[tokio::test]
+#[ignore = "requires Qdrant"]
+async fn recall_include_stale_false_excludes_stale() {
+    use ferrex_core::FreshnessLabel;
+
+    let svc = test_service().await;
+
+    svc.store(episodic("something that happened today"))
+        .await
+        .unwrap();
+
+    let results = svc
+        .recall(recall_query("something that happened"))
+        .await
+        .unwrap();
+    assert!(!results.is_empty());
+
+    let req = RecallRequest {
+        include_stale: Some(false),
+        ..recall_query("something that happened")
+    };
+    let results = svc.recall(req).await.unwrap();
+    for r in &results {
+        assert_ne!(
+            r.freshness_label,
+            FreshnessLabel::Stale,
+            "stale memories should be excluded when include_stale=false"
+        );
+    }
+}

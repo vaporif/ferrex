@@ -74,3 +74,6 @@ clap = { version = "4", features = ["derive", "env"] }
 
 # Filesystem
 dirs = "6"
+
+# Async utilities
+tokio-util = { version = "0.7", features = ["rt"] }

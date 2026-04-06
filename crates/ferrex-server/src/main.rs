@@ -148,6 +148,14 @@ struct StoreParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct TimeRangeParam {
+    /// Start of time range (ISO-8601, e.g. "2025-01-01T00:00:00Z"). Inclusive.
+    start: Option<String>,
+    /// End of time range (ISO-8601, e.g. "2025-12-31T23:59:59Z"). Inclusive.
+    end: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct RecallParams {
     /// Search query — what are you looking for?
     query: String,
@@ -161,6 +169,12 @@ struct RecallParams {
     limit: Option<usize>,
     /// Memory IDs to mark as validated (confirmed still accurate).
     validate_ids: Option<Vec<String>>,
+    /// Only return memories created within this time range.
+    time_range: Option<TimeRangeParam>,
+    /// Include invalidated (superseded) memories. Default: false.
+    include_invalidated: Option<bool>,
+    /// Exclude stale memories when set to false. Default: include all.
+    include_stale: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -198,9 +212,9 @@ struct FerrexServer {
 }
 
 impl FerrexServer {
-    fn new(service: MemoryService) -> Self {
+    fn new(service: Arc<MemoryService>) -> Self {
         Self {
-            service: Arc::new(service),
+            service,
             tool_router: Self::tool_router(),
         }
     }
@@ -292,15 +306,35 @@ impl FerrexServer {
             .transpose()
             .map_err(|e| ErrorData::invalid_params(e, None))?;
 
+        let time_range = p
+            .time_range
+            .map(|tr| {
+                let parse = |s: &str| -> Result<chrono::DateTime<chrono::Utc>, ErrorData> {
+                    s.parse::<chrono::DateTime<chrono::Utc>>()
+                        .map_err(|e| ErrorData::invalid_params(format!("invalid datetime: {e}"), None))
+                };
+                let range = ferrex_core::TimeRange {
+                    start: tr.start.as_deref().map(parse).transpose()?,
+                    end: tr.end.as_deref().map(parse).transpose()?,
+                };
+                if let (Some(s), Some(e)) = (range.start, range.end)
+                    && s > e
+                {
+                    return Err(ErrorData::invalid_params("time_range start must be <= end", None));
+                }
+                Ok(range)
+            })
+            .transpose()?;
+
         let req = RecallRequest {
             query: p.query,
             types,
             entities: p.entities,
             namespace: p.namespace,
             limit: p.limit,
-            include_stale: None,
-            include_invalidated: None,
-            time_range: None,
+            include_stale: p.include_stale,
+            include_invalidated: p.include_invalidated,
+            time_range,
             validate_ids: p.validate_ids,
         };
 
@@ -405,7 +439,8 @@ fn main() -> eyre::Result<()> {
         .block_on(async {
             let service = MemoryService::from_config(config).await?;
             let (service, mut sidecar) = service.into_parts();
-            let server = FerrexServer::new(service);
+            let service = Arc::new(service);
+            let server = FerrexServer::new(Arc::clone(&service));
             let (stdin, stdout) = stdio();
             let running = server
                 .serve((stdin, stdout))
@@ -443,6 +478,7 @@ fn main() -> eyre::Result<()> {
                 }
             }
 
+            service.shutdown().await;
             if let Some(ref mut sc) = sidecar {
                 sc.shutdown();
             }

@@ -94,6 +94,15 @@ impl VectorStore {
                 .map_err(|e| StoreError::Qdrant(e.to_string()))?;
         }
 
+        self.client
+            .create_field_index(CreateFieldIndexCollectionBuilder::new(
+                &name,
+                "created_at",
+                FieldType::Datetime,
+            ))
+            .await
+            .map_err(|e| StoreError::Qdrant(e.to_string()))?;
+
         Ok(())
     }
 
