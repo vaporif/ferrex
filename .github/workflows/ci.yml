@@ -56,7 +56,7 @@ jobs:
           key: fastembed-models-${{ runner.os }}
 
       - name: Generate coverage
-        run: nix develop --command cargo llvm-cov nextest --workspace --lcov --output-path lcov.info
+        run: nix develop --command cargo llvm-cov nextest --workspace --profile ci --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
@@ -83,7 +83,7 @@ jobs:
         run: nix build
 
       - name: Smoke test
-        run: ./result/bin/ferrex-server --help
+        run: ./result/bin/ferrex --help
 
   gitleaks:
     name: Gitleaks

@@ -297,6 +297,7 @@ async fn test_golden_set_recall_at_3() {
             include_invalidated: None,
             time_range: None,
             validate_ids: None,
+            explain: false,
         };
         let results = ctx.service.recall(req).await.expect("recall failed");
         let result_ids: Vec<&str> = results.iter().map(|r| r.memory.id.as_str()).collect();
@@ -370,6 +371,7 @@ async fn test_golden_set_cache_returns_identical_results() {
             include_invalidated: None,
             time_range: None,
             validate_ids: None,
+            explain: false,
         };
         let results = ctx.service.recall(req).await.expect("recall failed");
         cold_results.push(results.iter().map(|r| r.memory.id.clone()).collect());
@@ -388,6 +390,7 @@ async fn test_golden_set_cache_returns_identical_results() {
             include_invalidated: None,
             time_range: None,
             validate_ids: None,
+            explain: false,
         };
         let results = ctx.service.recall(req).await.expect("recall failed");
         warm_results.push(results.iter().map(|r| r.memory.id.clone()).collect());

@@ -163,13 +163,15 @@ pub fn build_entity_alias_map(entities: &[ferrex_store::Entity]) -> HashMap<Stri
         let mut all_names: Vec<String> = entity.aliases.iter().map(|a| a.to_lowercase()).collect();
         all_names.push(name_lower);
         for name in &all_names {
-            let others: Vec<String> = all_names.iter().filter(|n| *n != name).cloned().collect();
-            map.entry(name.clone()).or_default().extend(others);
+            map.entry(name.clone())
+                .or_default()
+                .extend(all_names.iter().cloned());
         }
     }
-    for aliases in map.values_mut() {
+    for (key, aliases) in &mut map {
         aliases.sort();
         aliases.dedup();
+        aliases.retain(|a| a != key);
     }
     map
 }

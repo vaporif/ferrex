@@ -1,11 +1,15 @@
 [profile.default]
 
-# Dont let multiple tests stuck on downloading model
 [[profile.default.overrides]]
 filter = 'package(ferrex-core) & kind(test)'
-test-group = 'model-init'
+test-group = 'serial-integration'
 
-[test-groups.model-init]
+[[profile.default.overrides]]
+filter = 'package(ferrex-server) & kind(test)'
+test-group = 'serial-integration'
+
+[test-groups.serial-integration]
 max-threads = 1
 
 [profile.ci]
+default-filter = 'not ((package(ferrex-core) | package(ferrex-server)) & kind(test))'

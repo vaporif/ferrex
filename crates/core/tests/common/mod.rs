@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::path::PathBuf;
 
 use ferrex_core::{
@@ -109,5 +111,6 @@ pub fn recall_query(query: &str) -> RecallRequest {
         include_invalidated: None,
         time_range: None,
         validate_ids: None,
+        explain: false,
     }
 }

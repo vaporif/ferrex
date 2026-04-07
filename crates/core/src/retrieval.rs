@@ -6,9 +6,10 @@ const SEMANTIC_BOOST_WEIGHT: f64 = 0.15;
 const SEMANTIC_HALF_LIFE_DAYS: f64 = 180.0;
 pub const SECONDS_PER_DAY: f64 = 24.0 * 60.0 * 60.0;
 
+#[tracing::instrument(level = "trace", name = "recency_boost", skip_all, fields(boost))]
 pub fn compute_recency_boost(memory_type: MemoryType, age_days: f64) -> f64 {
     let age_days = age_days.max(0.0);
-    match memory_type {
+    let result = match memory_type {
         MemoryType::Episodic => {
             EPISODIC_BOOST_WEIGHT.mul_add((-age_days / EPISODIC_HALF_LIFE_DAYS).exp2(), 1.0)
         }
@@ -16,7 +17,9 @@ pub fn compute_recency_boost(memory_type: MemoryType, age_days: f64) -> f64 {
             SEMANTIC_BOOST_WEIGHT.mul_add((-age_days / SEMANTIC_HALF_LIFE_DAYS).exp2(), 1.0)
         }
         MemoryType::Procedural => 1.0,
-    }
+    };
+    tracing::Span::current().record("boost", result);
+    result
 }
 
 #[cfg(test)]

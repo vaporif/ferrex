@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::error::CoreError;
 use crate::pipeline::StoreContext;
 
+#[tracing::instrument(name = "store_write", skip_all)]
 pub async fn run(
     ctx: &StoreContext<'_>,
     metadata: &SqliteStore,
@@ -17,6 +18,7 @@ pub async fn run(
     write_impl(ctx, metadata, vectors, PendingOpKind::Store, None).await
 }
 
+#[tracing::instrument(name = "supersede_write", skip_all)]
 pub async fn run_supersede(
     ctx: &StoreContext<'_>,
     metadata: &SqliteStore,
@@ -33,6 +35,7 @@ pub async fn run_supersede(
     .await
 }
 
+#[tracing::instrument(name = "dual_write", skip_all, fields(qdrant_ok, sqlite_ok))]
 async fn write_impl(
     ctx: &StoreContext<'_>,
     metadata: &SqliteStore,
@@ -74,8 +77,10 @@ async fn write_impl(
         .upsert(&memory.namespace, ctx.id, embedding, &search_text, payload)
         .await?;
     metadata.mark_pending_op_qdrant_written(&op.op_id).await?;
+    tracing::Span::current().record("qdrant_ok", true);
 
     metadata.insert_memory(&memory).await?;
+    tracing::Span::current().record("sqlite_ok", true);
     for entity in &ctx.resolved_entities {
         metadata.link_memory_entity(&memory.id, &entity.id).await?;
     }
@@ -85,7 +90,8 @@ async fn write_impl(
     if let Some(tid) = target_id {
         metadata.invalidate_memory(tid, ctx.now).await?;
     }
-    metadata.clear_pending_op(&op.op_id).await?;
+    let completed = op.into_completed(memory.id.clone(), memory.namespace.clone());
+    metadata.complete_op(&completed).await?;
 
     Ok(memory)
 }

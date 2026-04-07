@@ -5,6 +5,7 @@ use crate::entity::EntityResolver;
 use crate::error::CoreError;
 use crate::pipeline::StoreContext;
 
+#[tracing::instrument(name = "resolve_entities", skip_all, fields(entities_in = ctx.req.entities.len(), resolved))]
 pub async fn run(
     ctx: &mut StoreContext<'_>,
     metadata: &SqliteStore,
@@ -21,5 +22,6 @@ pub async fn run(
         embedder,
     };
     ctx.resolved_entities = resolver.resolve(&ctx.req.entities, &ctx.namespace).await?;
+    tracing::Span::current().record("resolved", ctx.resolved_entities.len());
     Ok(())
 }

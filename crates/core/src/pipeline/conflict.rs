@@ -48,6 +48,7 @@ pub fn classify(
     }
 }
 
+#[tracing::instrument(name = "conflict_check", skip_all, fields(conflicts_found))]
 pub async fn run(ctx: &mut StoreContext<'_>, metadata: &SqliteStore) -> Result<(), CoreError> {
     if ctx.memory_type != MemoryType::Semantic {
         return Ok(());
@@ -61,7 +62,12 @@ pub async fn run(ctx: &mut StoreContext<'_>, metadata: &SqliteStore) -> Result<(
         .get_memories_by_subject_predicate(subject, normalized_predicate)
         .await?;
     let incoming_object = ctx.req.object.as_deref().unwrap_or("");
-    match classify(incoming_object, &existing, ctx.conflict_config) {
+    let classification = classify(incoming_object, &existing, ctx.conflict_config);
+    tracing::Span::current().record(
+        "conflicts_found",
+        !matches!(classification, Classification::NoConflict),
+    );
+    match classification {
         Classification::NoConflict => Ok(()),
         Classification::Duplicate(existing_id, similarity) => Err(CoreError::Duplicate {
             existing_id,

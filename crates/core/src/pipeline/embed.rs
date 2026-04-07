@@ -4,11 +4,13 @@ use ferrex_store::MemoryType;
 use crate::error::CoreError;
 use crate::pipeline::StoreContext;
 
+#[tracing::instrument(name = "embed", skip_all, fields(dims))]
 pub async fn run(ctx: &mut StoreContext<'_>, embedder: &Embedder) -> Result<(), CoreError> {
     let search_text = build_searchable_text(ctx);
     let embedding = embedder.embed(&search_text).await?;
     ctx.search_text = Some(search_text);
     ctx.embedding = Some(embedding);
+    tracing::Span::current().record("dims", ctx.embedding.as_ref().map_or(0, Vec::len));
     Ok(())
 }
 

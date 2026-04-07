@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use lru::LruCache;
 use rustc_hash::FxHasher;
@@ -12,6 +13,10 @@ pub struct RecallCache {
     embeddings: RwLock<LruCache<u64, Vec<f32>>>,
     results: RwLock<LruCache<u64, CachedResults>>,
     generations: RwLock<HashMap<String, u64>>,
+    embedding_hits: AtomicU64,
+    embedding_misses: AtomicU64,
+    result_hits: AtomicU64,
+    result_misses: AtomicU64,
 }
 
 struct CachedResults {
@@ -32,6 +37,7 @@ pub struct ResultCacheKeyInput<'a> {
     pub include_stale: Option<bool>,
     pub include_invalidated: Option<bool>,
     pub time_range_hash: Option<u64>,
+    pub explain: bool,
 }
 
 impl ResultCacheKey {
@@ -47,6 +53,7 @@ impl ResultCacheKey {
         input.include_stale.hash(&mut hasher);
         input.include_invalidated.hash(&mut hasher);
         input.time_range_hash.hash(&mut hasher);
+        input.explain.hash(&mut hasher);
         Self {
             hash: hasher.finish(),
         }
@@ -69,15 +76,28 @@ impl RecallCache {
                 NonZeroUsize::new(config.result_capacity).expect("capacity > 0"),
             )),
             generations: RwLock::new(HashMap::new()),
+            embedding_hits: AtomicU64::new(0),
+            embedding_misses: AtomicU64::new(0),
+            result_hits: AtomicU64::new(0),
+            result_misses: AtomicU64::new(0),
         }
     }
 
+    #[tracing::instrument(name = "cache_lookup", skip_all, fields(hit))]
     pub async fn get_embedding(&self, query: &str) -> Option<Vec<f32>> {
-        self.embeddings
+        let result = self
+            .embeddings
             .read()
             .await
             .peek(&hash_query(query))
-            .cloned()
+            .cloned();
+        if result.is_some() {
+            self.embedding_hits.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.embedding_misses.fetch_add(1, Ordering::Relaxed);
+        }
+        tracing::Span::current().record("hit", result.is_some());
+        result
     }
 
     pub async fn put_embedding(&self, query: &str, embedding: Vec<f32>) {
@@ -94,11 +114,16 @@ impl RecallCache {
     ) -> Option<Vec<RecallResult>> {
         let current_gen = self.generation(namespace).await;
         let cache = self.results.read().await;
-        let entry = cache.peek(&key.hash)?;
-        if entry.generation == current_gen {
-            Some(entry.results.clone())
-        } else {
-            None
+        let entry = cache.peek(&key.hash);
+        match entry {
+            Some(e) if e.generation == current_gen => {
+                self.result_hits.fetch_add(1, Ordering::Relaxed);
+                Some(e.results.clone())
+            }
+            _ => {
+                self.result_misses.fetch_add(1, Ordering::Relaxed);
+                None
+            }
         }
     }
 
@@ -131,6 +156,21 @@ impl RecallCache {
         let mut gens = self.generations.write().await;
         let entry = gens.entry(namespace.to_string()).or_insert(0);
         *entry += 1;
+    }
+
+    pub async fn cache_stats(&self) -> crate::types::CacheStats {
+        let emb = self.embeddings.read().await;
+        let res = self.results.read().await;
+        crate::types::CacheStats {
+            embedding_hits: self.embedding_hits.load(Ordering::Relaxed),
+            embedding_misses: self.embedding_misses.load(Ordering::Relaxed),
+            result_hits: self.result_hits.load(Ordering::Relaxed),
+            result_misses: self.result_misses.load(Ordering::Relaxed),
+            embedding_capacity: emb.cap().get(),
+            embedding_len: emb.len(),
+            result_capacity: res.cap().get(),
+            result_len: res.len(),
+        }
     }
 }
 
@@ -177,6 +217,7 @@ mod tests {
             include_stale: None,
             include_invalidated: None,
             time_range_hash: None,
+            explain: false,
         });
         cache.put_results(&filter, results, ns).await;
 
@@ -201,6 +242,7 @@ mod tests {
             include_stale: None,
             include_invalidated: None,
             time_range_hash: None,
+            explain: false,
         });
         cache.put_results(&filter, vec![], ns).await;
 
