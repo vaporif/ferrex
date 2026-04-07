@@ -112,8 +112,8 @@ fn find_pairs_with_different_objects<'a>(
     }
 }
 
-fn find_alias_contradictions<'a>(
-    by_subject: &HashMap<String, Vec<&'a Memory>>,
+fn find_alias_contradictions(
+    by_subject: &HashMap<String, Vec<&Memory>>,
     entity_aliases: &HashMap<String, Vec<String>>,
     matched_ids: &HashSet<&str>,
     contradictions: &mut Vec<ContradictionPair>,

@@ -75,8 +75,6 @@ async fn write_impl(
         .await?;
     metadata.mark_pending_op_qdrant_written(&op.op_id).await?;
 
-    // Finalization: these steps aren't wrapped in a single SQLite transaction yet.
-    // The journal handles crash recovery if we fail partway through.
     metadata.insert_memory(&memory).await?;
     for entity in &ctx.resolved_entities {
         metadata.link_memory_entity(&memory.id, &entity.id).await?;

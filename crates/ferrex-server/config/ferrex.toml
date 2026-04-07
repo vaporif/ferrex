@@ -1,7 +1,6 @@
 [deduplication]
 # Cosine similarity above which non-semantic memories are rejected as
-# near-duplicates. Semantic facts bypass this check — their authoritative
-# duplicate detection lives in conflict resolution (see "Conflict detection").
+# near-duplicates. Semantic facts skip this; they use conflict resolution instead.
 threshold = 0.95
 
 [conflict]
@@ -13,9 +12,8 @@ threshold = 0.95
 object_fuzzy_duplicate = 0.95
 object_fuzzy_update    = 0.50
 
-# Default predicate equivalence groups, applied to any namespace
-# that doesn't override them. These cover common software-domain
-# vocabulary. Edit, extend, or replace per your agents' needs.
+# Default predicate equivalence groups for common software vocabulary.
+# Namespaces can override these (see below).
 [predicates.groups]
 depends_on    = ["uses", "depends-on", "requires", "needs", "imports"]
 has_version   = ["version", "at-version", "pinned-to", "version-is"]
@@ -41,8 +39,7 @@ maintained_by = ["owned-by", "managed-by", "authored-by", "led-by"]
 # audit_interval_hours = 24
 audit_fix_limit = 1000
 
-# Size of the SQLite reader connection pool. Writes always go through
-# the single writer connection; reads are fanned out across the pool.
+# SQLite reader pool size. Writes use a single connection; reads spread across the pool.
 reader_pool_size = 4
 
 [staleness]
@@ -63,3 +60,7 @@ stale_threshold = 0.80
 [staleness.procedural]
 half_life_days = 365
 stale_threshold = 0.90
+
+[cache]
+embedding_capacity = 256
+result_capacity = 128

@@ -63,8 +63,18 @@
       pkg = craneLib.buildPackage (commonArgs
         // {
           inherit cargoArtifacts;
-          # embed tests need ONNX runtime + model downloads; covered by CI coverage job
-          cargoTestExtraArgs = "--workspace --exclude ferrex-embed";
+          nativeBuildInputs =
+            (commonArgs.nativeBuildInputs or [])
+            ++ [pkgs.makeWrapper];
+          # Skip ferrex-embed (needs ONNX) and ferrex-server (needs Qdrant).
+          # Only run lib tests for ferrex-core (integration tests need Qdrant).
+          # Full integration tests run in CI integration job.
+          cargoTestExtraArgs = "--workspace --exclude ferrex-embed --exclude ferrex-server --lib";
+          postInstall = ''
+            wrapProgram $out/bin/ferrex-server \
+              --set ORT_DYLIB_PATH "${pkgs.onnxruntime}/lib/libonnxruntime${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}" \
+              --prefix PATH : "${pkgs.qdrant}/bin"
+          '';
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [pkgs.openssl];

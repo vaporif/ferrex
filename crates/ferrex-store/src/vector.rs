@@ -214,6 +214,44 @@ impl VectorStore {
             .collect())
     }
 
+    /// Dense-only search; dedup needs actual cosine similarity, not RRF fusion scores.
+    pub async fn search_dense(
+        &self,
+        namespace: &str,
+        vector: Vec<f32>,
+        limit: usize,
+        filter: Option<Filter>,
+    ) -> Result<Vec<(String, f32)>, StoreError> {
+        let name = Self::collection_name(namespace)?;
+
+        let mut builder = QueryPointsBuilder::new(&name)
+            .query(VectorInput::new_dense(vector))
+            .using(DENSE_VECTOR)
+            .limit(limit as u64)
+            .with_payload(true);
+        if let Some(f) = filter {
+            builder = builder.filter(f);
+        }
+
+        let results = self
+            .client
+            .query(builder)
+            .await
+            .map_err(|e| StoreError::Qdrant(e.to_string()))?;
+
+        Ok(results
+            .result
+            .into_iter()
+            .filter_map(|point| {
+                let id = match point.id?.point_id_options? {
+                    PointIdOptions::Uuid(s) => s,
+                    PointIdOptions::Num(n) => n.to_string(),
+                };
+                Some((id, point.score))
+            })
+            .collect())
+    }
+
     pub async fn delete(&self, namespace: &str, id: Uuid) -> Result<(), StoreError> {
         let name = Self::collection_name(namespace)?;
         self.client

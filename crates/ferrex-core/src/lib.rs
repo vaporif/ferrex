@@ -1,4 +1,5 @@
 mod access_tracker;
+mod cache;
 mod config;
 mod entity;
 mod error;
@@ -73,6 +74,7 @@ pub struct MemoryService {
     access_tracker: Arc<AccessTracker>,
     shutdown_token: CancellationToken,
     flush_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    cache: cache::RecallCache,
 }
 
 impl MemoryService {
@@ -90,7 +92,7 @@ impl MemoryService {
             let vs = VectorStore::new(url, embedder.dimension())?;
             (vs, None)
         } else {
-            let sc = QdrantSidecar::start(&config.qdrant_bin, config.qdrant_port).await?;
+            let sc = QdrantSidecar::start(&config.qdrant_bin, config.qdrant_port, None).await?;
             let vs = VectorStore::new(&sc.url(), embedder.dimension())?;
             (vs, Some(sc))
         };
@@ -127,6 +129,7 @@ impl MemoryService {
             normalizers.insert(ns_name.clone(), Arc::new(PredicateNormalizer::new(groups)));
         }
 
+        let cache = cache::RecallCache::new(&config.cache);
         let access_tracker = Arc::new(AccessTracker::new());
         let shutdown_token = CancellationToken::new();
 
@@ -163,6 +166,7 @@ impl MemoryService {
             access_tracker,
             shutdown_token,
             flush_handle: std::sync::Mutex::new(Some(flush_handle)),
+            cache,
         };
 
         let report = service.recover_on_startup().await?;
@@ -199,7 +203,6 @@ impl MemoryService {
                     self.vector_store
                         .delete_by_ids(&op.namespace, &[uuid])
                         .await?;
-                    // Qdrant point was written but SQLite state is uncertain — roll back.
                     self.metadata_store
                         .delete_memories(std::slice::from_ref(&op.memory_id))
                         .await?;
@@ -360,6 +363,8 @@ impl MemoryService {
             ctx.superseded_ids.clone()
         };
 
+        self.cache.bump_generation(&ctx.namespace).await;
+
         Ok(StoreResponse {
             id: memory.id,
             memory_type: memory_type.as_str().to_string(),
@@ -407,7 +412,45 @@ impl MemoryService {
             limit.max(MIN_RERANK_POOL_SIZE)
         };
 
-        let embedding = self.embedder.embed(&req.query).await?;
+        let embedding = if let Some(cached) = self.cache.get_embedding(&req.query).await {
+            cached
+        } else {
+            let emb = self.embedder.embed(&req.query).await?;
+            self.cache.put_embedding(&req.query, emb.clone()).await;
+            emb
+        };
+
+        let type_strs: Option<Vec<&str>> = req
+            .types
+            .as_ref()
+            .map(|ts| ts.iter().map(MemoryType::as_str).collect());
+        let entity_strs: Option<Vec<&str>> = req
+            .entities
+            .as_ref()
+            .map(|es| es.iter().map(String::as_str).collect());
+        let time_hash = req.time_range.as_ref().map(|tr| {
+            use std::hash::{Hash, Hasher};
+            let mut h = rustc_hash::FxHasher::default();
+            tr.start.map(|s| s.timestamp()).hash(&mut h);
+            tr.end.map(|e| e.timestamp()).hash(&mut h);
+            h.finish()
+        });
+        let cache_key = cache::ResultCacheKey::new(&cache::ResultCacheKeyInput {
+            embedding: &embedding,
+            types: type_strs.as_deref(),
+            entities: entity_strs.as_deref(),
+            namespace,
+            limit,
+            include_stale: req.include_stale,
+            include_invalidated: req.include_invalidated,
+            time_range_hash: time_hash,
+        });
+
+        if let Some(cached) = self.cache.get_results(&cache_key, namespace).await {
+            self.process_validate_ids(req.validate_ids.as_ref(), &cached)
+                .await?;
+            return Ok(cached);
+        }
 
         let mut must_conditions = vec![Condition::matches(
             ferrex_store::POINT_TYPE_FIELD,
@@ -473,6 +516,8 @@ impl MemoryService {
             )
             .await?;
 
+        tracing::debug!(recall.candidates = results.len(), "candidate pool size");
+
         if results.is_empty() {
             return Ok(vec![]);
         }
@@ -523,6 +568,17 @@ impl MemoryService {
             })
             .collect();
 
+        if !results.is_empty() {
+            let scores: Vec<f32> = results.iter().map(|r| r.relevance_score).collect();
+            let max_score = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let min_score = scores.iter().copied().fold(f32::INFINITY, f32::min);
+            tracing::debug!(
+                recall.rerank_delta = max_score - min_score,
+                recall.top_scores = ?&scores[..scores.len().min(3)],
+                "reranked scores"
+            );
+        }
+
         results.sort_by(|a, b| b.relevance_score.total_cmp(&a.relevance_score));
         results.truncate(limit);
 
@@ -536,7 +592,22 @@ impl MemoryService {
             self.metadata_store.update_last_accessed(&ids).await?;
         }
 
-        if let Some(ref validate_ids) = req.validate_ids
+        self.cache
+            .put_results(&cache_key, results.clone(), namespace)
+            .await;
+
+        self.process_validate_ids(req.validate_ids.as_ref(), &results)
+            .await?;
+
+        Ok(results)
+    }
+
+    async fn process_validate_ids(
+        &self,
+        validate_ids: Option<&Vec<String>>,
+        results: &[RecallResult],
+    ) -> Result<(), CoreError> {
+        if let Some(validate_ids) = validate_ids
             && !validate_ids.is_empty()
         {
             let result_ids: std::collections::HashSet<&str> =
@@ -548,12 +619,11 @@ impl MemoryService {
                 .collect();
             if !valid_ids.is_empty() {
                 self.metadata_store
-                    .update_last_validated(&valid_ids, now)
+                    .update_last_validated(&valid_ids, Utc::now())
                     .await?;
             }
         }
-
-        Ok(results)
+        Ok(())
     }
 
     #[allow(clippy::cast_precision_loss)] // counts-to-f64 is fine for averaging
@@ -750,6 +820,7 @@ impl MemoryService {
             self.metadata_store.clear_pending_op(&op.op_id).await?;
 
             deleted.push(id.clone());
+            self.cache.bump_generation(&memory.namespace).await;
         }
 
         Ok(ForgetResponse {

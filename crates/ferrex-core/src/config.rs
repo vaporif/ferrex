@@ -5,7 +5,8 @@ use serde::Deserialize;
 
 use crate::staleness::{StalenessConfig, StalenessWeights, TypeStalenessConfig};
 use crate::types::{
-    ConflictConfig, DedupConfig, NamespacePredicatesConfig, PredicatesConfig, ReconciliationConfig,
+    CacheConfig, ConflictConfig, DedupConfig, NamespacePredicatesConfig, PredicatesConfig,
+    ReconciliationConfig,
 };
 
 #[derive(Debug, Deserialize, Default)]
@@ -24,6 +25,8 @@ pub struct FileConfig {
     pub staleness: StalenessFile,
     #[serde(default)]
     pub reader_pool_size: Option<usize>,
+    #[serde(default)]
+    pub cache: CacheFile,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -47,6 +50,12 @@ pub struct PredicatesFile {
 pub struct NamespaceFile {
     #[serde(default)]
     pub predicates: PredicatesFile,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct CacheFile {
+    pub embedding_capacity: Option<usize>,
+    pub result_capacity: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -80,6 +89,7 @@ pub struct LoadedConfig {
     pub reconciliation: ReconciliationConfig,
     pub staleness: StalenessConfig,
     pub reader_pool_size: usize,
+    pub cache: CacheConfig,
 }
 
 pub const DEFAULT_READER_POOL_SIZE: usize = 4;
@@ -138,6 +148,10 @@ pub fn resolve(file: FileConfig) -> LoadedConfig {
         },
         staleness,
         reader_pool_size: file.reader_pool_size.unwrap_or(DEFAULT_READER_POOL_SIZE),
+        cache: CacheConfig {
+            embedding_capacity: file.cache.embedding_capacity.unwrap_or(256),
+            result_capacity: file.cache.result_capacity.unwrap_or(128),
+        },
     }
 }
 
