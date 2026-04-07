@@ -21,6 +21,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  FASTEMBED_CACHE_DIR: ${{ github.workspace }}/.fastembed_cache
 
 jobs:
   checks:
