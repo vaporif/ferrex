@@ -83,23 +83,16 @@ enum BackfillCommand {
 
 const SHIPPED_BASELINE: &str = include_str!("../config/ferrex.toml");
 
-fn resolve_config_path(cli: &Cli) -> PathBuf {
-    cli.config_path.clone().unwrap_or_else(|| {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".ferrex")
-            .join("ferrex.toml")
-    })
-}
-
 fn build_config(cli: Cli) -> eyre::Result<FerrexConfig> {
-    let db_path = cli.db_path.clone().unwrap_or_else(|| {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".ferrex")
-            .join("ferrex.db")
-    });
-    let config_path = resolve_config_path(&cli);
+    let default_dir = || dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".ferrex");
+    let db_path = cli
+        .db_path
+        .clone()
+        .unwrap_or_else(|| default_dir().join("ferrex.db"));
+    let config_path = cli
+        .config_path
+        .clone()
+        .unwrap_or_else(|| default_dir().join("ferrex.toml"));
     let loaded = ferrex_core::load_or_init(&config_path, SHIPPED_BASELINE)
         .map_err(|e| eyre::eyre!("config load: {e}"))?;
     Ok(FerrexConfig {
@@ -117,14 +110,15 @@ fn build_config(cli: Cli) -> eyre::Result<FerrexConfig> {
         reconciliation: loaded.reconciliation,
         staleness: loaded.staleness,
         reader_pool_size: loaded.reader_pool_size,
+        cache: loaded.cache,
     })
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct StoreParams {
-    /// The memory content. Required for episodic and procedural memories.
+    /// Required for episodic and procedural memories.
     content: Option<String>,
-    /// Memory type: "episodic", "semantic", or "procedural". Auto-detected if omitted.
+    /// "episodic", "semantic", or "procedural". Detected if omitted.
     memory_type: Option<String>,
     /// Subject of a semantic triple (e.g. "api-server").
     subject: Option<String>,
@@ -157,23 +151,23 @@ struct TimeRangeParam {
 
 #[derive(Deserialize, JsonSchema)]
 struct RecallParams {
-    /// Search query — what are you looking for?
+    /// Search query.
     query: String,
-    /// Filter by memory types: `["episodic"]`, `["semantic"]`, etc.
+    /// Filter by memory types, e.g. `["episodic"]`, `["semantic"]`.
     types: Option<Vec<String>>,
-    /// Filter by entity names. Returns memories mentioning any of these entities.
+    /// Filter by entity names.
     entities: Option<Vec<String>>,
     /// Namespace override.
     namespace: Option<String>,
     /// Max results (default 10).
     limit: Option<usize>,
-    /// Memory IDs to mark as validated (confirmed still accurate).
+    /// Memory IDs to mark as still accurate.
     validate_ids: Option<Vec<String>>,
     /// Only return memories created within this time range.
     time_range: Option<TimeRangeParam>,
-    /// Include invalidated (superseded) memories. Default: false.
+    /// Include superseded memories. Default: false.
     include_invalidated: Option<bool>,
-    /// Exclude stale memories when set to false. Default: include all.
+    /// Set false to exclude stale memories.
     include_stale: Option<bool>,
 }
 
@@ -181,7 +175,7 @@ struct RecallParams {
 struct ForgetParams {
     /// Memory IDs to forget.
     ids: Vec<String>,
-    /// Cascade delete linked entities (deprecated, ignored).
+    /// Deprecated, ignored.
     cascade: Option<bool>,
 }
 
@@ -201,7 +195,7 @@ struct ReflectParams {
 struct StatsParams {
     /// Memory namespace.
     namespace: String,
-    /// Return detailed stats including per-type breakdown and staleness distribution.
+    /// Include per-type breakdown and staleness distribution.
     detailed: Option<bool>,
 }
 

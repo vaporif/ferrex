@@ -14,7 +14,6 @@ pub async fn run(ctx: &StoreContext<'_>, vectors: &VectorStore) -> Result<(), Co
         .embedding
         .as_ref()
         .ok_or_else(|| CoreError::Validation("dedup stage requires embedding".into()))?;
-    let search_text = ctx.search_text.as_deref().unwrap_or("");
 
     let filter = Filter::must(vec![
         Condition::matches(
@@ -25,13 +24,7 @@ pub async fn run(ctx: &StoreContext<'_>, vectors: &VectorStore) -> Result<(), Co
     ]);
 
     let results = vectors
-        .search(
-            &ctx.namespace,
-            embedding.clone(),
-            search_text,
-            TOP_K,
-            Some(filter),
-        )
+        .search_dense(&ctx.namespace, embedding.clone(), TOP_K, Some(filter))
         .await?;
 
     if let Some((id, score)) = results.first()

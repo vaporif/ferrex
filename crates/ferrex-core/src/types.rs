@@ -24,6 +24,7 @@ pub struct FerrexConfig {
     pub reconciliation: ReconciliationConfig,
     pub staleness: StalenessConfig,
     pub reader_pool_size: usize,
+    pub cache: CacheConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +75,21 @@ impl Default for ReconciliationConfig {
         Self {
             audit_interval_hours: None,
             audit_fix_limit: 1000,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CacheConfig {
+    pub embedding_capacity: usize,
+    pub result_capacity: usize,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            embedding_capacity: 256,
+            result_capacity: 128,
         }
     }
 }
@@ -226,7 +242,7 @@ pub struct NeedsAttention {
     pub unvalidated_count: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RecallResult {
     pub memory: Memory,
     pub relevance_score: f32,

@@ -15,6 +15,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 strsim = { workspace = true }
 thiserror = { workspace = true }
+lru = { workspace = true }
+rustc-hash = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 toml = "0.8"
@@ -22,6 +24,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+portpicker = "0.1"
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 

@@ -18,8 +18,12 @@ pub struct QdrantSidecar {
 }
 
 impl QdrantSidecar {
-    pub async fn start(bin: &str, port: u16) -> Result<Self, StoreError> {
-        let ferrex_dir = dirs_home().join(".ferrex");
+    pub async fn start(
+        bin: &str,
+        port: u16,
+        base_dir: Option<PathBuf>,
+    ) -> Result<Self, StoreError> {
+        let ferrex_dir = base_dir.unwrap_or_else(|| dirs_home().join(".ferrex"));
         fs::create_dir_all(&ferrex_dir)
             .map_err(|e| StoreError::Sidecar(format!("failed to create ~/.ferrex: {e}")))?;
 
@@ -28,8 +32,7 @@ impl QdrantSidecar {
         let data_dir = ferrex_dir.join("qdrant-data");
         let config_path = ferrex_dir.join("qdrant-config.yaml");
 
-        // Acquire an exclusive lock file to prevent TOCTOU races between
-        // concurrent processes checking the PID file and spawning Qdrant.
+        // lock file prevents two processes from racing to spawn qdrant
         let lock_file = acquire_lock_file(&lock_file_path)?;
 
         if let Some(existing_pid) = read_pid(&pid_file) {
@@ -198,7 +201,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires qdrant binary on PATH"]
     async fn test_sidecar_lifecycle() {
-        let mut sidecar = QdrantSidecar::start("qdrant", 6340).await.unwrap();
+        let mut sidecar = QdrantSidecar::start("qdrant", 6340, None).await.unwrap();
         assert!(sidecar.url().contains("6340"));
         sidecar.shutdown();
         assert!(!sidecar.pid_file.exists());

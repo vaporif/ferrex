@@ -1,87 +1,13 @@
-use std::path::PathBuf;
-
-use ferrex_core::{
-    DedupConfig, FerrexConfig, FreshnessLabel, MemoryService, ModelTier, RecallRequest,
-    ReflectRequest, RerankerTier, StalenessConfig, StatsRequest, StoreRequest,
-};
+use ferrex_core::{FreshnessLabel, RecallRequest, ReflectRequest, StatsRequest, StoreRequest};
 use ferrex_store::MemoryType;
 
-fn base_config() -> FerrexConfig {
-    FerrexConfig {
-        qdrant_url: Some("http://localhost:6334".into()),
-        qdrant_bin: "qdrant".into(),
-        qdrant_port: 6334,
-        model_tier: ModelTier::Small,
-        reranker_tier: RerankerTier::Default,
-        namespace: format!("test_phase4_{}", uuid::Uuid::now_v7()),
-        db_path: PathBuf::from(format!(
-            "file:memdb_p4_{}?mode=memory&cache=shared",
-            uuid::Uuid::now_v7()
-        )),
-        config_path: None,
-        deduplication: DedupConfig { threshold: 0.90 },
-        conflict: ferrex_core::ConflictConfig::default(),
-        predicates: ferrex_core::PredicatesConfig::default(),
-        reconciliation: ferrex_core::ReconciliationConfig::default(),
-        staleness: StalenessConfig::default(),
-        reader_pool_size: 2,
-    }
-}
-
-async fn test_service() -> MemoryService {
-    MemoryService::from_config(base_config()).await.unwrap()
-}
-
-fn episodic(content: &str) -> StoreRequest {
-    StoreRequest {
-        content: Some(content.into()),
-        memory_type: Some(MemoryType::Episodic),
-        subject: None,
-        predicate: None,
-        object: None,
-        confidence: None,
-        source: None,
-        context: None,
-        entities: vec![],
-        namespace: None,
-        supersedes: None,
-    }
-}
-
-fn semantic(subject: &str, predicate: &str, object: &str) -> StoreRequest {
-    StoreRequest {
-        content: None,
-        memory_type: Some(MemoryType::Semantic),
-        subject: Some(subject.into()),
-        predicate: Some(predicate.into()),
-        object: Some(object.into()),
-        confidence: None,
-        source: None,
-        context: None,
-        entities: vec![],
-        namespace: None,
-        supersedes: None,
-    }
-}
-
-fn recall_query(query: &str) -> RecallRequest {
-    RecallRequest {
-        query: query.into(),
-        types: None,
-        entities: None,
-        namespace: None,
-        limit: Some(10),
-        include_stale: None,
-        include_invalidated: None,
-        time_range: None,
-        validate_ids: None,
-    }
-}
+mod common;
+use common::{episodic, recall_query, semantic};
 
 #[tokio::test]
-#[ignore = "requires Qdrant"]
 async fn test_recall_returns_freshness_metadata() {
-    let svc = test_service().await;
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
     let resp = svc
         .store(episodic("the build server was upgraded to Ubuntu 24.04"))
         .await
@@ -103,9 +29,9 @@ async fn test_recall_returns_freshness_metadata() {
 }
 
 #[tokio::test]
-#[ignore = "requires Qdrant"]
 async fn test_validate_ids_updates_last_validated() {
-    let svc = test_service().await;
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
     let resp = svc
         .store(episodic("the CI pipeline runs nightly at 2am UTC"))
         .await
@@ -128,10 +54,9 @@ async fn test_validate_ids_updates_last_validated() {
 }
 
 #[tokio::test]
-#[ignore = "requires Qdrant"]
 async fn test_reflect_returns_empty_for_fresh_memories() {
-    let svc = test_service().await;
-    let config = base_config();
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
 
     svc.store(episodic("just stored this fresh memory"))
         .await
@@ -139,7 +64,7 @@ async fn test_reflect_returns_empty_for_fresh_memories() {
 
     let resp = svc
         .reflect(ReflectRequest {
-            namespace: config.namespace,
+            namespace: ctx.namespace.clone(),
             limit: None,
             include_contradictions: true,
             include_stale: true,
@@ -152,23 +77,22 @@ async fn test_reflect_returns_empty_for_fresh_memories() {
 }
 
 #[tokio::test]
-#[ignore = "requires Qdrant"]
 async fn test_reflect_contradiction_exact_predicate() {
-    let svc = test_service().await;
-    let config = base_config();
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
 
-    // Conflict resolution may auto-supersede one of these, so we just verify
-    // the response structure rather than asserting contradiction count.
-    svc.store(semantic("database", "version", "postgres 15"))
+    let first = svc
+        .store(semantic("database", "version", "postgres 15"))
         .await
         .unwrap();
-    svc.store(semantic("database", "version", "postgres 16"))
-        .await
-        .unwrap();
+    // Explicitly supersede the first to avoid ConflictAmbiguous.
+    let mut req = semantic("database", "version", "postgres 16");
+    req.supersedes = Some(first.id);
+    svc.store(req).await.unwrap();
 
     let resp = svc
         .reflect(ReflectRequest {
-            namespace: config.namespace,
+            namespace: ctx.namespace.clone(),
             limit: None,
             include_contradictions: true,
             include_stale: false,
@@ -180,10 +104,9 @@ async fn test_reflect_contradiction_exact_predicate() {
 }
 
 #[tokio::test]
-#[ignore = "requires Qdrant"]
 async fn test_stats_brief_has_real_needs_attention() {
-    let svc = test_service().await;
-    let config = base_config();
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
 
     svc.store(episodic("first event happened")).await.unwrap();
     svc.store(episodic("a completely different second event"))
@@ -192,7 +115,7 @@ async fn test_stats_brief_has_real_needs_attention() {
 
     let resp = svc
         .stats(StatsRequest {
-            namespace: config.namespace,
+            namespace: ctx.namespace.clone(),
             detailed: Some(false),
         })
         .await
@@ -211,10 +134,9 @@ async fn test_stats_brief_has_real_needs_attention() {
 }
 
 #[tokio::test]
-#[ignore = "requires Qdrant"]
 async fn test_stats_detailed_mode() {
-    let svc = test_service().await;
-    let config = base_config();
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
 
     svc.store(episodic("deployed the API to production"))
         .await
@@ -225,7 +147,7 @@ async fn test_stats_detailed_mode() {
 
     let resp = svc
         .stats(StatsRequest {
-            namespace: config.namespace,
+            namespace: ctx.namespace.clone(),
             detailed: Some(true),
         })
         .await

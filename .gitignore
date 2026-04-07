@@ -23,3 +23,8 @@ result
 
 # ONNX model cache
 .fastembed_cache/
+
+.qdrant-initialized
+
+
+

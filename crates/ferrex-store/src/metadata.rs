@@ -436,7 +436,6 @@ fn get_entity_names_for_memory(
     Ok(names)
 }
 
-#[allow(clippy::needless_pass_by_value)]
 impl MetadataStore for SqliteStore {
     async fn insert_memory(&self, memory: &Memory) -> Result<(), StoreError> {
         let memory = memory.clone();

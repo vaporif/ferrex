@@ -1,85 +1,17 @@
-#![allow(clippy::needless_collect)]
-
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use ferrex_core::{
-    CoreError, DedupConfig, FerrexConfig, ForgetRequest, MemoryService, ModelTier,
-    PredicatesConfig, RecallRequest, RerankerTier, StalenessConfig, StatsRequest, StoreRequest,
+    CoreError, ForgetRequest, PredicatesConfig, RecallRequest, StatsRequest, StoreRequest,
 };
 use ferrex_store::MemoryType;
 
-fn base_config() -> FerrexConfig {
-    FerrexConfig {
-        qdrant_url: Some("http://localhost:6334".into()),
-        qdrant_bin: "qdrant".into(),
-        qdrant_port: 6334,
-        model_tier: ModelTier::Small,
-        reranker_tier: RerankerTier::Default,
-        namespace: format!("test_phase3_{}", uuid::Uuid::now_v7()),
-        db_path: PathBuf::from(format!(
-            "file:memdb_p3_{}?mode=memory&cache=shared",
-            uuid::Uuid::now_v7()
-        )),
-        config_path: None,
-        deduplication: DedupConfig { threshold: 0.90 },
-        conflict: ferrex_core::ConflictConfig::default(),
-        predicates: ferrex_core::PredicatesConfig::default(),
-        reconciliation: ferrex_core::ReconciliationConfig::default(),
-        staleness: StalenessConfig::default(),
-        reader_pool_size: 2,
-    }
-}
-
-async fn test_service() -> MemoryService {
-    MemoryService::from_config(base_config()).await.unwrap()
-}
-
-async fn test_service_with_predicates(groups: HashMap<String, Vec<String>>) -> MemoryService {
-    let mut config = base_config();
-    config.predicates = PredicatesConfig {
-        groups,
-        namespaces: HashMap::new(),
-    };
-    MemoryService::from_config(config).await.unwrap()
-}
-
-fn episodic(content: &str) -> StoreRequest {
-    StoreRequest {
-        content: Some(content.into()),
-        memory_type: Some(MemoryType::Episodic),
-        subject: None,
-        predicate: None,
-        object: None,
-        confidence: None,
-        source: None,
-        context: None,
-        entities: vec![],
-        namespace: None,
-        supersedes: None,
-    }
-}
-
-fn semantic(subject: &str, predicate: &str, object: &str) -> StoreRequest {
-    StoreRequest {
-        content: None,
-        memory_type: Some(MemoryType::Semantic),
-        subject: Some(subject.into()),
-        predicate: Some(predicate.into()),
-        object: Some(object.into()),
-        confidence: None,
-        source: None,
-        context: None,
-        entities: vec![],
-        namespace: None,
-        supersedes: None,
-    }
-}
+mod common;
+use common::{episodic, recall_query, semantic};
 
 #[tokio::test]
-#[ignore = "requires Qdrant"]
 async fn dedup_rejects_near_duplicate_episodic() {
-    let svc = test_service().await;
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
     svc.store(episodic("The deployment happened at 3pm"))
         .await
         .unwrap();
@@ -91,15 +23,17 @@ async fn dedup_rejects_near_duplicate_episodic() {
 }
 
 #[tokio::test]
-#[ignore = "requires Qdrant"]
 async fn conflict_update_invalidates_old_fact() {
-    let svc = test_service().await;
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
+    // Objects must be very different (jaro_winkler < object_fuzzy_update=0.50)
+    // for auto-supersede rather than ConflictAmbiguous.
     let first = svc
-        .store(semantic("api", "uses", "tokio 1.38"))
+        .store(semantic("api", "uses", "Python 3.9"))
         .await
         .unwrap();
     let second = svc
-        .store(semantic("api", "uses", "tokio 1.40"))
+        .store(semantic("api", "uses", "Rust nightly"))
         .await
         .unwrap();
     assert!(
@@ -133,9 +67,9 @@ async fn conflict_update_invalidates_old_fact() {
 }
 
 #[tokio::test]
-#[ignore = "requires Qdrant"]
 async fn conflict_ambiguous_surfaces_error() {
-    let svc = test_service().await;
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
     svc.store(semantic("api", "uses", "tokio 1.38"))
         .await
         .unwrap();
@@ -149,9 +83,9 @@ async fn conflict_ambiguous_surfaces_error() {
 }
 
 #[tokio::test]
-#[ignore = "requires Qdrant"]
 async fn supersedes_skips_dedup_and_conflict() {
-    let svc = test_service().await;
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
     let first = svc
         .store(semantic("api", "uses", "tokio 1.38"))
         .await
@@ -189,9 +123,9 @@ async fn supersedes_skips_dedup_and_conflict() {
 }
 
 #[tokio::test]
-#[ignore = "requires Qdrant"]
 async fn forget_removes_from_both_stores() {
-    let svc = test_service().await;
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
     let resp = svc.store(episodic("to be forgotten")).await.unwrap();
     let forget_resp = svc
         .forget(ForgetRequest {
@@ -224,24 +158,10 @@ async fn forget_removes_from_both_stores() {
     );
 }
 
-fn recall_query(query: &str) -> RecallRequest {
-    RecallRequest {
-        query: query.into(),
-        types: None,
-        entities: None,
-        namespace: None,
-        limit: Some(10),
-        include_stale: None,
-        include_invalidated: None,
-        time_range: None,
-        validate_ids: None,
-    }
-}
-
 #[tokio::test]
-#[ignore = "requires Qdrant"]
 async fn forget_nonexistent_returns_not_found() {
-    let svc = test_service().await;
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
     let fake_id = uuid::Uuid::now_v7().to_string();
     let resp = svc
         .forget(ForgetRequest {
@@ -255,9 +175,9 @@ async fn forget_nonexistent_returns_not_found() {
 }
 
 #[tokio::test]
-#[ignore = "requires Qdrant"]
 async fn validation_rejects_episodic_without_content() {
-    let svc = test_service().await;
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
     let req = StoreRequest {
         content: None,
         memory_type: Some(MemoryType::Episodic),
@@ -278,9 +198,9 @@ async fn validation_rejects_episodic_without_content() {
 }
 
 #[tokio::test]
-#[ignore = "requires Qdrant"]
 async fn validation_rejects_semantic_missing_object() {
-    let svc = test_service().await;
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
     let req = StoreRequest {
         content: None,
         memory_type: Some(MemoryType::Semantic),
@@ -301,9 +221,9 @@ async fn validation_rejects_semantic_missing_object() {
 }
 
 #[tokio::test]
-#[ignore = "requires Qdrant"]
 async fn store_and_recall_episodic_round_trip() {
-    let svc = test_service().await;
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
     let resp = svc
         .store(episodic("deployed v2.3.1 to staging at 3pm"))
         .await
@@ -320,13 +240,12 @@ async fn store_and_recall_episodic_round_trip() {
 }
 
 #[tokio::test]
-#[ignore = "requires Qdrant"]
 async fn stats_reflects_stored_count() {
-    let svc = test_service().await;
-    let config = base_config();
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
     let before = svc
         .stats(StatsRequest {
-            namespace: config.namespace.clone(),
+            namespace: ctx.namespace.clone(),
             detailed: None,
         })
         .await
@@ -340,7 +259,7 @@ async fn stats_reflects_stored_count() {
 
     let after = svc
         .stats(StatsRequest {
-            namespace: config.namespace,
+            namespace: ctx.namespace.clone(),
             detailed: None,
         })
         .await
@@ -349,9 +268,9 @@ async fn stats_reflects_stored_count() {
 }
 
 #[tokio::test]
-#[ignore = "requires Qdrant"]
 async fn dedup_allows_distinct_episodic_memories() {
-    let svc = test_service().await;
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
     svc.store(episodic("the build failed because of a flaky test"))
         .await
         .unwrap();
@@ -361,19 +280,27 @@ async fn dedup_allows_distinct_episodic_memories() {
 }
 
 #[tokio::test]
-#[ignore = "requires Qdrant"]
 async fn predicate_normalization_triggers_conflict() {
     let mut groups = HashMap::new();
     groups.insert("depends_on".into(), vec!["uses".into(), "requires".into()]);
-    let svc = test_service_with_predicates(groups).await;
+    let ctx = common::TestContext::with_config(|mut c| {
+        c.predicates = PredicatesConfig {
+            groups,
+            namespaces: HashMap::new(),
+        };
+        c
+    })
+    .await;
+    let svc = &ctx.service;
 
     let first = svc
-        .store(semantic("api", "uses", "tokio 1.38"))
+        .store(semantic("api", "uses", "Python 3.9"))
         .await
         .unwrap();
-    // "requires" normalizes to "depends_on" (same as "uses"), so this is a conflict update
+    // "requires" normalizes to "depends_on" (same as "uses"), and the object
+    // is very different (jaro_winkler < 0.50) to auto-supersede.
     let second = svc
-        .store(semantic("api", "requires", "tokio 1.40"))
+        .store(semantic("api", "requires", "Rust nightly"))
         .await
         .unwrap();
     assert!(
@@ -384,9 +311,9 @@ async fn predicate_normalization_triggers_conflict() {
 }
 
 #[tokio::test]
-#[ignore = "requires Qdrant"]
 async fn supersedes_nonexistent_target_fails() {
-    let svc = test_service().await;
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
     let fake_id = uuid::Uuid::now_v7().to_string();
     let mut req = semantic("api", "uses", "tokio 1.40");
     req.supersedes = Some(fake_id);
@@ -397,12 +324,12 @@ async fn supersedes_nonexistent_target_fails() {
 }
 
 #[tokio::test]
-#[ignore = "requires Qdrant"]
 async fn recall_time_range_filters_by_date() {
     use chrono::Utc;
     use ferrex_core::TimeRange;
 
-    let svc = test_service().await;
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
 
     svc.store(episodic("old event from the distant past"))
         .await
@@ -440,9 +367,9 @@ async fn recall_time_range_filters_by_date() {
 }
 
 #[tokio::test]
-#[ignore = "requires Qdrant"]
 async fn recall_include_invalidated_returns_superseded() {
-    let svc = test_service().await;
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
 
     let original = svc
         .store(semantic("Rust", "version", "1.70"))
@@ -472,11 +399,11 @@ async fn recall_include_invalidated_returns_superseded() {
 }
 
 #[tokio::test]
-#[ignore = "requires Qdrant"]
 async fn recall_include_stale_false_excludes_stale() {
     use ferrex_core::FreshnessLabel;
 
-    let svc = test_service().await;
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
 
     svc.store(episodic("something that happened today"))
         .await
