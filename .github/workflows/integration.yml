@@ -37,6 +37,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Cache fastembed models
+        uses: actions/cache@v5
+        with:
+          path: .fastembed_cache
+          key: fastembed-models-${{ runner.os }}
+
+      - name: Pre-download embedding models
+        run: |
+          nix develop --command cargo run -p ferrex-embed --example download_models
+
       - name: Archive integration tests
         run: >
           nix develop --command cargo nextest archive
@@ -48,6 +58,11 @@ jobs:
         with:
           name: integration-archive
           path: ferrex-integration.tar.zst
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fastembed-cache
+          path: .fastembed_cache
 
       - name: Generate matrix
         id: matrix
@@ -71,11 +86,10 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
 
-      - name: Cache fastembed models
-        uses: actions/cache@v5
+      - uses: actions/download-artifact@v8
         with:
+          name: fastembed-cache
           path: .fastembed_cache
-          key: fastembed-models-${{ runner.os }}
 
       - uses: actions/download-artifact@v8
         with:
