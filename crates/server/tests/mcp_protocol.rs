@@ -27,7 +27,8 @@ impl McpTestHarness {
         let db_path = temp_dir.path().join("ferrex.db");
         let config_path = temp_dir.path().join("ferrex.toml");
 
-        let bin = env!("CARGO_BIN_EXE_ferrex");
+        let bin = std::env::var("NEXTEST_BIN_EXE_ferrex")
+            .unwrap_or_else(|_| env!("CARGO_BIN_EXE_ferrex").to_string());
         let mut child = Command::new(bin)
             .arg("--qdrant-url")
             .arg(format!("http://localhost:{port}"))
