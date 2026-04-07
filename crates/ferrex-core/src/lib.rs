@@ -1,3 +1,4 @@
+mod access_tracker;
 mod config;
 mod entity;
 mod error;
@@ -24,10 +25,12 @@ pub use ferrex_store::{Entity, Memory, MemoryType};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use access_tracker::AccessTracker;
 use chrono::Utc;
 use ferrex_embed::{Embedder, Reranker};
 use ferrex_store::{MetadataStore, QdrantSidecar, SqliteStore, VectorStore};
-use qdrant_client::qdrant::{Condition, Filter};
+use qdrant_client::qdrant::{Condition, DatetimeRange, Filter, Timestamp};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::pipeline::StoreContext;
@@ -61,12 +64,15 @@ pub struct RecoveryReport {
 pub struct MemoryService {
     embedder: Embedder,
     reranker: Reranker,
-    metadata_store: SqliteStore,
+    metadata_store: Arc<SqliteStore>,
     vector_store: VectorStore,
     sidecar: Option<QdrantSidecar>,
     config: FerrexConfig,
     normalizers: HashMap<String, Arc<PredicateNormalizer>>,
     default_normalizer: Arc<PredicateNormalizer>,
+    access_tracker: Arc<AccessTracker>,
+    shutdown_token: CancellationToken,
+    flush_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl MemoryService {
@@ -89,8 +95,10 @@ impl MemoryService {
             (vs, Some(sc))
         };
 
-        let metadata_store =
-            SqliteStore::open_with_pool_size(&config.db_path, config.reader_pool_size)?;
+        let metadata_store = Arc::new(SqliteStore::open_with_pool_size(
+            &config.db_path,
+            config.reader_pool_size,
+        )?);
 
         let model_key = "embedding_model";
         let current_model = config.model_tier.model_name();
@@ -119,6 +127,30 @@ impl MemoryService {
             normalizers.insert(ns_name.clone(), Arc::new(PredicateNormalizer::new(groups)));
         }
 
+        let access_tracker = Arc::new(AccessTracker::new());
+        let shutdown_token = CancellationToken::new();
+
+        let flush_handle = {
+            let tracker = Arc::clone(&access_tracker);
+            let store = Arc::clone(&metadata_store);
+            let token = shutdown_token.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        biased;
+                        () = token.cancelled() => break,
+                        () = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+                            let ids = tracker.drain();
+                            if !ids.is_empty()
+                                && let Err(e) = store.update_last_accessed(&ids).await {
+                                tracing::warn!("background access flush failed: {e}");
+                            }
+                        }
+                    }
+                }
+            })
+        };
+
         let service = Self {
             embedder,
             reranker,
@@ -128,6 +160,9 @@ impl MemoryService {
             config,
             normalizers,
             default_normalizer,
+            access_tracker,
+            shutdown_token,
+            flush_handle: std::sync::Mutex::new(Some(flush_handle)),
         };
 
         let report = service.recover_on_startup().await?;
@@ -361,28 +396,16 @@ impl MemoryService {
     }
 
     pub async fn recall(&self, req: RecallRequest) -> Result<Vec<RecallResult>, CoreError> {
-        if req.time_range.is_some() {
-            return Err(CoreError::Validation(
-                "time_range filtering is not yet implemented".into(),
-            ));
-        }
-        if req.include_stale.is_some() {
-            return Err(CoreError::Validation(
-                "include_stale filtering is not yet implemented".into(),
-            ));
-        }
-        if req.include_invalidated.is_some() {
-            return Err(CoreError::Validation(
-                "include_invalidated filtering is not yet implemented".into(),
-            ));
-        }
-
         let namespace = req.namespace.as_deref().unwrap_or(&self.config.namespace);
         let limit = req
             .limit
             .unwrap_or(DEFAULT_RECALL_LIMIT)
             .min(MAX_RECALL_LIMIT);
-        let candidate_pool_size = limit.max(MIN_RERANK_POOL_SIZE);
+        let candidate_pool_size = if req.include_stale == Some(false) {
+            limit.max(MIN_RERANK_POOL_SIZE) * 2
+        } else {
+            limit.max(MIN_RERANK_POOL_SIZE)
+        };
 
         let embedding = self.embedder.embed(&req.query).await?;
 
@@ -394,6 +417,37 @@ impl MemoryService {
         if let Some(ref types) = req.types {
             let type_strings: Vec<String> = types.iter().map(|t| t.as_str().to_string()).collect();
             must_conditions.push(Condition::matches("memory_type", type_strings));
+        }
+
+        if let Some(ref range) = req.time_range {
+            if let Some(start) = range.start {
+                #[allow(clippy::cast_possible_wrap)]
+                let ts = Timestamp {
+                    seconds: start.timestamp(),
+                    nanos: start.timestamp_subsec_nanos() as i32,
+                };
+                must_conditions.push(Condition::datetime_range(
+                    "created_at",
+                    DatetimeRange {
+                        gte: Some(ts),
+                        ..Default::default()
+                    },
+                ));
+            }
+            if let Some(end) = range.end {
+                #[allow(clippy::cast_possible_wrap)]
+                let ts = Timestamp {
+                    seconds: end.timestamp(),
+                    nanos: end.timestamp_subsec_nanos() as i32,
+                };
+                must_conditions.push(Condition::datetime_range(
+                    "created_at",
+                    DatetimeRange {
+                        lte: Some(ts),
+                        ..Default::default()
+                    },
+                ));
+            }
         }
 
         let mut filter = Filter::must(must_conditions);
@@ -428,7 +482,7 @@ impl MemoryService {
 
         let memory_map: HashMap<&str, &Memory> = memories
             .iter()
-            .filter(|m| m.t_invalid.is_none())
+            .filter(|m| req.include_invalidated.unwrap_or(false) || m.t_invalid.is_none())
             .map(|m| (m.id.as_str(), m))
             .collect();
 
@@ -472,10 +526,15 @@ impl MemoryService {
         results.sort_by(|a, b| b.relevance_score.total_cmp(&a.relevance_score));
         results.truncate(limit);
 
+        if req.include_stale == Some(false) {
+            results.retain(|r| r.freshness_label != FreshnessLabel::Stale);
+        }
+
         let accessed_ids: Vec<String> = results.iter().map(|r| r.memory.id.clone()).collect();
-        self.metadata_store
-            .update_last_accessed(&accessed_ids)
-            .await?;
+        self.access_tracker.record(&accessed_ids);
+        if let Some(ids) = self.access_tracker.drain_if_full() {
+            self.metadata_store.update_last_accessed(&ids).await?;
+        }
 
         if let Some(ref validate_ids) = req.validate_ids
             && !validate_ids.is_empty()
@@ -791,6 +850,20 @@ impl MemoryService {
                 contradiction_count,
             },
         })
+    }
+
+    pub async fn shutdown(&self) {
+        self.shutdown_token.cancel();
+        let handle = self.flush_handle.lock().expect("poisoned").take();
+        if let Some(h) = handle {
+            let _ = h.await;
+        }
+        let ids = self.access_tracker.drain();
+        if !ids.is_empty()
+            && let Err(e) = self.metadata_store.update_last_accessed(&ids).await
+        {
+            tracing::warn!("shutdown access flush failed: {e}");
+        }
     }
 
     pub const fn into_parts(mut self) -> (Self, Option<QdrantSidecar>) {
