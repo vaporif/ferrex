@@ -1,5 +1,7 @@
 # ferrex
 
+[![CI](https://github.com/vaporif/ferrex/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/vaporif/ferrex/actions/workflows/ci.yml)
+
 Local-first MCP memory server for AI agents. One Rust binary, a Qdrant sidecar, no cloud accounts.
 
 Agents get five MCP tools -- `store`, `recall`, `forget`, `reflect`, `stats` -- for persistent memory across conversations. Memories are typed (episodic events, semantic facts, procedural workflows), entities get resolved even when agents name them inconsistently, and every fact carries temporal validity so stale data doesn't quietly rot your context.
