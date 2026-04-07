@@ -84,7 +84,11 @@ enum BackfillCommand {
 const SHIPPED_BASELINE: &str = include_str!("../config/ferrex.toml");
 
 fn build_config(cli: Cli) -> eyre::Result<FerrexConfig> {
-    let default_dir = || dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".ferrex");
+    let default_dir = || {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".ferrex")
+    };
     let db_path = cli
         .db_path
         .clone()
