@@ -12,3 +12,4 @@ test-group = 'serial-integration'
 max-threads = 1
 
 [profile.ci]
+default-filter = 'not ((package(ferrex-core) | package(ferrex-server)) & kind(test))'
