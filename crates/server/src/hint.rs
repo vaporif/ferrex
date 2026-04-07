@@ -1,26 +1,19 @@
-/// Bullet lists deliberately excluded — too many false positives.
 pub fn looks_like_workflow(content: &str) -> bool {
     let lower = content.to_lowercase();
     if lower.contains("step 1") || lower.contains("step 2") {
         return true;
     }
 
-    let numbered_count = content
+    content
         .lines()
         .filter(|line| {
-            let trimmed = line.trim_start();
-            let mut chars = trimmed.chars();
-            match chars.next() {
-                Some(c) if c.is_ascii_digit() => {
-                    let sep = chars.find(|c| !c.is_ascii_digit());
-                    sep == Some('.') || sep == Some(')')
-                }
-                _ => false,
-            }
+            let s = line
+                .trim_start()
+                .trim_start_matches(|c: char| c.is_ascii_digit());
+            s.len() < line.trim_start().len() && (s.starts_with('.') || s.starts_with(')'))
         })
-        .count();
-
-    numbered_count >= 3
+        .count()
+        >= 3
 }
 
 #[cfg(test)]
