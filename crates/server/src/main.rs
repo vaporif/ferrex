@@ -487,7 +487,6 @@ fn main() -> eyre::Result<()> {
         }) => {
             return backfill::run_normalized_predicates(build_config(cli)?, namespace, dry_run);
         }
-<<<<<<< HEAD
         #[allow(clippy::cast_precision_loss)]
         Some(Command::Diagnose) => {
             let config = build_config(cli)?;

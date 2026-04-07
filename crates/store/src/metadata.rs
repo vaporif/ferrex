@@ -1136,7 +1136,6 @@ impl MetadataStore for SqliteStore {
         })
         .await
     }
-<<<<<<< HEAD
 
     async fn complete_op(&self, op: &crate::journal::CompletedOp) -> Result<(), StoreError> {
         let op = op.clone();
