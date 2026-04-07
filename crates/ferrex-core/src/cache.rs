@@ -23,28 +23,30 @@ pub struct ResultCacheKey {
     hash: u64,
 }
 
+pub struct ResultCacheKeyInput<'a> {
+    pub embedding: &'a [f32],
+    pub types: Option<&'a [&'a str]>,
+    pub entities: Option<&'a [&'a str]>,
+    pub namespace: &'a str,
+    pub limit: usize,
+    pub include_stale: Option<bool>,
+    pub include_invalidated: Option<bool>,
+    pub time_range_hash: Option<u64>,
+}
+
 impl ResultCacheKey {
-    pub fn new(
-        embedding: &[f32],
-        types: Option<&[&str]>,
-        entities: Option<&[&str]>,
-        namespace: &str,
-        limit: usize,
-        include_stale: Option<bool>,
-        include_invalidated: Option<bool>,
-        time_range_hash: Option<u64>,
-    ) -> Self {
+    pub fn new(input: &ResultCacheKeyInput<'_>) -> Self {
         let mut hasher = FxHasher::default();
-        for &v in embedding {
+        for &v in input.embedding {
             v.to_bits().hash(&mut hasher);
         }
-        types.hash(&mut hasher);
-        entities.hash(&mut hasher);
-        namespace.hash(&mut hasher);
-        limit.hash(&mut hasher);
-        include_stale.hash(&mut hasher);
-        include_invalidated.hash(&mut hasher);
-        time_range_hash.hash(&mut hasher);
+        input.types.hash(&mut hasher);
+        input.entities.hash(&mut hasher);
+        input.namespace.hash(&mut hasher);
+        input.limit.hash(&mut hasher);
+        input.include_stale.hash(&mut hasher);
+        input.include_invalidated.hash(&mut hasher);
+        input.time_range_hash.hash(&mut hasher);
         Self {
             hash: hasher.finish(),
         }
@@ -166,7 +168,16 @@ mod tests {
         let ns = "test-ns";
         let results = vec![];
         let embedding = vec![0.1, 0.2];
-        let filter = ResultCacheKey::new(&embedding, None, None, ns, 10, None, None, None);
+        let filter = ResultCacheKey::new(&ResultCacheKeyInput {
+            embedding: &embedding,
+            types: None,
+            entities: None,
+            namespace: ns,
+            limit: 10,
+            include_stale: None,
+            include_invalidated: None,
+            time_range_hash: None,
+        });
         cache.put_results(&filter, results, ns).await;
 
         let current_gen = cache.generation(ns).await;
@@ -181,7 +192,16 @@ mod tests {
         let cache = make_cache();
         let ns = "test-ns";
         let embedding = vec![0.1, 0.2];
-        let filter = ResultCacheKey::new(&embedding, None, None, ns, 10, None, None, None);
+        let filter = ResultCacheKey::new(&ResultCacheKeyInput {
+            embedding: &embedding,
+            types: None,
+            entities: None,
+            namespace: ns,
+            limit: 10,
+            include_stale: None,
+            include_invalidated: None,
+            time_range_hash: None,
+        });
         cache.put_results(&filter, vec![], ns).await;
 
         cache.bump_generation(ns).await;

@@ -423,7 +423,7 @@ impl MemoryService {
         let type_strs: Option<Vec<&str>> = req
             .types
             .as_ref()
-            .map(|ts| ts.iter().map(|t| t.as_str()).collect());
+            .map(|ts| ts.iter().map(MemoryType::as_str).collect());
         let entity_strs: Option<Vec<&str>> = req
             .entities
             .as_ref()
@@ -435,19 +435,19 @@ impl MemoryService {
             tr.end.map(|e| e.timestamp()).hash(&mut h);
             h.finish()
         });
-        let cache_key = cache::ResultCacheKey::new(
-            &embedding,
-            type_strs.as_deref(),
-            entity_strs.as_deref(),
+        let cache_key = cache::ResultCacheKey::new(&cache::ResultCacheKeyInput {
+            embedding: &embedding,
+            types: type_strs.as_deref(),
+            entities: entity_strs.as_deref(),
             namespace,
             limit,
-            req.include_stale,
-            req.include_invalidated,
-            time_hash,
-        );
+            include_stale: req.include_stale,
+            include_invalidated: req.include_invalidated,
+            time_range_hash: time_hash,
+        });
 
         if let Some(cached) = self.cache.get_results(&cache_key, namespace).await {
-            self.process_validate_ids(&req.validate_ids, &cached)
+            self.process_validate_ids(req.validate_ids.as_ref(), &cached)
                 .await?;
             return Ok(cached);
         }
@@ -596,7 +596,7 @@ impl MemoryService {
             .put_results(&cache_key, results.clone(), namespace)
             .await;
 
-        self.process_validate_ids(&req.validate_ids, &results)
+        self.process_validate_ids(req.validate_ids.as_ref(), &results)
             .await?;
 
         Ok(results)
@@ -604,7 +604,7 @@ impl MemoryService {
 
     async fn process_validate_ids(
         &self,
-        validate_ids: &Option<Vec<String>>,
+        validate_ids: Option<&Vec<String>>,
         results: &[RecallResult],
     ) -> Result<(), CoreError> {
         if let Some(validate_ids) = validate_ids
