@@ -60,7 +60,7 @@ pub trait MetadataStore: Send + Sync {
     fn recent_memories(
         &self,
         namespace: &str,
-        limit: usize,
+        limit: i64,
     ) -> impl Future<Output = Result<Vec<Memory>, StoreError>> + Send;
 
     fn delete_memory(&self, _id: &str) -> impl Future<Output = Result<bool, StoreError>> + Send {
@@ -123,7 +123,7 @@ pub trait MetadataStore: Send + Sync {
     fn get_low_access_memories(
         &self,
         _namespace: &str,
-        _max_count: u64,
+        _max_count: i64,
     ) -> impl Future<Output = Result<Vec<Memory>, StoreError>> + Send {
         async { Ok(vec![]) }
     }
@@ -735,7 +735,7 @@ impl MetadataStore for SqliteStore {
     async fn recent_memories(
         &self,
         namespace: &str,
-        limit: usize,
+        limit: i64,
     ) -> Result<Vec<Memory>, StoreError> {
         let ns = namespace.to_string();
         self.with_reader(move |conn| {
@@ -1031,7 +1031,7 @@ impl MetadataStore for SqliteStore {
     async fn get_low_access_memories(
         &self,
         namespace: &str,
-        max_count: u64,
+        max_count: i64,
     ) -> Result<Vec<Memory>, StoreError> {
         let ns = namespace.to_string();
         self.with_reader(move |conn| {
