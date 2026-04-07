@@ -10,23 +10,31 @@ Five MCP tools -- `store`, `recall`, `forget`, `reflect`, `stats` -- give agents
 
 ```mermaid
 flowchart TD
-    Agent["AI Agent"]
+    Agent -->|MCP stdio| Server["ferrex-server"]
+    Server --> Core["ferrex-core"]
 
-    Agent -->|MCP stdio| Server
-
-    subgraph ferrex["ferrex"]
-        Server["ferrex-server\n<i>MCP transport + tool routing</i>"]
-        Core["ferrex-core\n<i>MemoryService pipeline</i>"]
-        Embed["ferrex-embed\n<i>fastembed ONNX</i>"]
-        Store["ferrex-store\n<i>dual-write storage</i>"]
-
-        Server --> Core
-        Core --> Embed
-        Core --> Store
+    subgraph store_flow["store"]
+        Core -->|1| Validate["validate\n<i>field limits, type detect</i>"]
+        Validate -->|2| NormPred["normalize predicate\n<i>synonym groups</i>"]
+        NormPred -->|3| Embed["ferrex-embed\n<i>fastembed ONNX</i>"]
+        Embed -->|4| Dedup["dedup check\n<i>cosine >= 0.95 → reject</i>"]
+        Dedup -->|5| Conflict["conflict resolution\n<i>semantic triples only</i>"]
+        Conflict -->|6| Resolve["entity resolution\n<i>exact → fuzzy → embedding</i>"]
+        Resolve -->|7a| SQLite["SQLite\n<i>metadata, entities,\ntemporal validity</i>"]
+        Resolve -->|7b| Qdrant["Qdrant\n<i>dense + sparse vectors</i>"]
     end
 
-    Store --> SQLite["SQLite\n<i>metadata, entities,\ntemporal validity</i>"]
-    Store --> Qdrant["Qdrant\n<i>dense + sparse vectors</i>"]
+    subgraph recall_flow["recall"]
+        Core -->|1| EmbedQ["embed query\n<i>+ cache lookup</i>"]
+        EmbedQ -->|2| Hybrid["hybrid search\n<i>dense + BM25, RRF fusion</i>"]
+        Hybrid -->|3| Rerank["rerank\n<i>BGE cross-encoder</i>"]
+        Rerank -->|4| Boost["recency boost\n<i>type-specific half-life</i>"]
+        Boost -->|5| Stale["staleness scoring\n<i>age + access + validation</i>"]
+        Stale -->|6| Return["results → agent"]
+    end
+
+    Hybrid --> Qdrant
+    Stale --> SQLite
 ```
 
 Four crates:
