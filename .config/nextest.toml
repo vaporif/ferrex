@@ -1,6 +1,5 @@
 [profile.default]
 
-# Dont let multiple tests stuck on downloading model
 [[profile.default.overrides]]
 filter = 'package(ferrex-core) & kind(test)'
 test-group = 'serial-integration'

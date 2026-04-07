@@ -41,18 +41,11 @@ def main() -> None:
 
     matrix = []
     for binary_id, suite in suites.items():
-        # Integration test binaries have "::" in the name (e.g. ferrex-core::store_recall).
-        # Lib test binaries are just the package name — skip them.
         if "::" not in binary_id:
             continue
-        testcases = suite.get("testcases", {})
-        for test_name in testcases:
-            matrix.append(
-                {
-                    "binary": binary_id,
-                    "test": test_name,
-                }
-            )
+        package = binary_id.split("::")[0]
+        for test_name in suite.get("testcases", {}):
+            matrix.append({"package": package, "test": test_name})
 
     print(json.dumps(matrix))
 

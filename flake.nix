@@ -66,9 +66,6 @@
           nativeBuildInputs =
             (commonArgs.nativeBuildInputs or [])
             ++ [pkgs.makeWrapper];
-          # Skip ferrex-embed (needs ONNX) and ferrex-server (needs Qdrant).
-          # Only run lib tests for ferrex-core (integration tests need Qdrant).
-          # Full integration tests run in CI integration job.
           cargoTestExtraArgs = "--workspace --exclude ferrex-embed --exclude ferrex-server --lib";
           postInstall = ''
             wrapProgram $out/bin/ferrex \
