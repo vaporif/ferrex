@@ -63,6 +63,7 @@
       pkg = craneLib.buildPackage (commonArgs
         // {
           inherit cargoArtifacts;
+          meta.mainProgram = "ferrex";
           nativeBuildInputs =
             (commonArgs.nativeBuildInputs or [])
             ++ [pkgs.makeWrapper];
