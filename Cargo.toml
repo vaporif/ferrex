@@ -46,7 +46,7 @@ fastembed = "5"
 qdrant-client = { version = "1", default-features = false, features = ["serde"] }
 
 # SQLite
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 
 # String matching
 strsim = "0.11"
@@ -79,15 +79,15 @@ dirs = "6"
 tokio-util = { version = "0.7", features = ["rt"] }
 
 # Cache
-lru = "0.12"
+lru = "0.16"
 rustc-hash = "2"
 
 # Config
-toml = "0.8"
+toml = "1.1"
 
 # Connection pooling
-deadpool = { version = "0.12", features = ["rt_tokio_1"] }
-deadpool-sync = "0.1"
+deadpool = { version = "0.13", features = ["rt_tokio_1"] }
+deadpool-sync = "0.2"
 
 # Internal crates
 ferrex-embed = { path = "crates/embed" }
