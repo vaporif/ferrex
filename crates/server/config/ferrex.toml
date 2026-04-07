@@ -37,11 +37,22 @@ maintained_by = ["owned-by", "managed-by", "authored-by", "led-by"]
 # every N hours in the background. Leave unset to run manually via
 # `ferrex audit reconcile`.
 # audit_interval_hours = 24
+# Max entries to fix per audit run. Caps the blast radius of a single
+# reconciliation pass if Qdrant and SQLite have drifted significantly.
 audit_fix_limit = 1000
 
 # SQLite reader pool size. Writes use a single connection; reads spread across the pool.
 reader_pool_size = 4
 
+# Staleness scoring formula:
+#   score = weight_age * age_decay
+#         + weight_access * access_decay
+#         + weight_validated * validation_decay
+#         + weight_count * count_freshness
+#
+# Each component decays from 0.0 (fresh) to 1.0 (stale) based on half_life_days.
+# Higher score = more stale. Memories above stale_threshold are labeled "stale"
+# in recall results and surfaced by the `reflect` tool.
 [staleness]
 weight_age = 0.40
 weight_access = 0.25
@@ -61,6 +72,9 @@ stale_threshold = 0.80
 half_life_days = 365
 stale_threshold = 0.90
 
+# Cache capacities are in number of entries (not bytes).
+# embedding_capacity: cached embedding vectors for deduplication checks.
+# result_capacity: cached recall query results (invalidated on store/forget).
 [cache]
 embedding_capacity = 256
 result_capacity = 128
