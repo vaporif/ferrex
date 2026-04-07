@@ -52,6 +52,7 @@ async fn conflict_update_invalidates_old_fact() {
             include_invalidated: None,
             time_range: None,
             validate_ids: None,
+            explain: false,
         })
         .await
         .unwrap();
@@ -112,6 +113,7 @@ async fn supersedes_skips_dedup_and_conflict() {
             include_invalidated: None,
             time_range: None,
             validate_ids: None,
+            explain: false,
         })
         .await
         .unwrap();
@@ -148,6 +150,7 @@ async fn forget_removes_from_both_stores() {
             include_invalidated: None,
             time_range: None,
             validate_ids: None,
+            explain: false,
         })
         .await
         .unwrap();
@@ -247,6 +250,7 @@ async fn stats_reflects_stored_count() {
         .stats(StatsRequest {
             namespace: ctx.namespace.clone(),
             detailed: None,
+            diagnostics: None,
         })
         .await
         .unwrap();
@@ -261,6 +265,7 @@ async fn stats_reflects_stored_count() {
         .stats(StatsRequest {
             namespace: ctx.namespace.clone(),
             detailed: None,
+            diagnostics: None,
         })
         .await
         .unwrap();
@@ -427,4 +432,65 @@ async fn recall_include_stale_false_excludes_stale() {
             "stale memories should be excluded when include_stale=false"
         );
     }
+}
+
+#[tokio::test]
+async fn recall_explain_includes_scoring_breakdown() {
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
+    svc.store(episodic("The server crashed at midnight due to OOM"))
+        .await
+        .unwrap();
+
+    let results = svc
+        .recall(RecallRequest {
+            query: "server crash".into(),
+            types: None,
+            entities: None,
+            namespace: None,
+            limit: Some(5),
+            include_stale: None,
+            include_invalidated: None,
+            time_range: None,
+            validate_ids: None,
+            explain: true,
+        })
+        .await
+        .unwrap();
+
+    assert!(!results.is_empty(), "should find at least one result");
+    let first = &results[0];
+    let scoring = first
+        .scoring
+        .as_ref()
+        .expect("scoring should be Some when explain=true");
+    assert!(
+        scoring.rerank_score > 0.0,
+        "rerank_score should be positive"
+    );
+    assert!(
+        scoring.recency_boost >= 1.0,
+        "recency_boost should be >= 1.0"
+    );
+    assert!(scoring.staleness >= 0.0, "staleness should be non-negative");
+    assert_eq!(
+        scoring.final_rank, 1,
+        "first result should have final_rank=1"
+    );
+}
+
+#[tokio::test]
+async fn recall_no_explain_omits_scoring() {
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
+    svc.store(episodic("Testing without explain flag"))
+        .await
+        .unwrap();
+
+    let results = svc.recall(recall_query("testing")).await.unwrap();
+    assert!(!results.is_empty());
+    assert!(
+        results[0].scoring.is_none(),
+        "scoring should be None when explain=false"
+    );
 }

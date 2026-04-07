@@ -10,7 +10,7 @@ Five MCP tools -- `store`, `recall`, `forget`, `reflect`, `stats` -- give agents
 
 ```mermaid
 flowchart TD
-    Agent -->|MCP stdio| Server["ferrex-server"]
+    Agent -->|MCP stdio| Server["ferrex"]
     Server --> Core["ferrex-core"]
 
     subgraph store_flow["store"]

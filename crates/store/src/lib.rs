@@ -6,7 +6,7 @@ mod sidecar;
 mod vector;
 
 pub use error::StoreError;
-pub use journal::{PendingOp, PendingOpKind};
+pub use journal::{CompletedOp, PendingOp, PendingOpKind};
 pub use metadata::{MetadataStore, SqliteStore};
 pub use sidecar::QdrantSidecar;
 pub use vector::VectorStore;

@@ -3,6 +3,7 @@ use ferrex_store::MemoryType;
 use crate::error::CoreError;
 use crate::pipeline::StoreContext;
 
+#[tracing::instrument(name = "normalize_predicate", skip_all, fields(raw = ctx.req.predicate.as_deref().unwrap_or(""), normalized))]
 pub fn run(ctx: &mut StoreContext<'_>) -> Result<(), CoreError> {
     if ctx.memory_type != MemoryType::Semantic {
         return Ok(());
@@ -13,6 +14,10 @@ pub fn run(ctx: &mut StoreContext<'_>) -> Result<(), CoreError> {
         .as_deref()
         .ok_or_else(|| CoreError::Validation("semantic predicate missing".into()))?;
     ctx.normalized_predicate = Some(ctx.normalizer.normalize(predicate));
+    tracing::Span::current().record(
+        "normalized",
+        ctx.normalized_predicate.as_deref().unwrap_or(""),
+    );
     Ok(())
 }
 

@@ -117,6 +117,7 @@ async fn test_stats_brief_has_real_needs_attention() {
         .stats(StatsRequest {
             namespace: ctx.namespace.clone(),
             detailed: Some(false),
+            diagnostics: None,
         })
         .await
         .unwrap();
@@ -149,6 +150,7 @@ async fn test_stats_detailed_mode() {
         .stats(StatsRequest {
             namespace: ctx.namespace.clone(),
             detailed: Some(true),
+            diagnostics: None,
         })
         .await
         .unwrap();

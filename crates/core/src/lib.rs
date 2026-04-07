@@ -23,7 +23,7 @@ pub use types::*;
 pub use ferrex_embed::{ModelTier, RerankerTier};
 pub use ferrex_store::{Entity, Memory, MemoryType};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use access_tracker::AccessTracker;
@@ -31,6 +31,7 @@ use chrono::Utc;
 use ferrex_embed::{Embedder, Reranker};
 use ferrex_store::{MetadataStore, QdrantSidecar, SqliteStore, VectorStore};
 use qdrant_client::qdrant::{Condition, DatetimeRange, Filter, Timestamp};
+use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -41,12 +42,53 @@ const MAX_RECALL_LIMIT: usize = 200;
 const MIN_RERANK_POOL_SIZE: usize = 20;
 const STATS_RECENT_COUNT: usize = 5;
 const MAX_SCAN_MEMORIES: usize = 10_000;
+const OPS_BUFFER_CAPACITY: usize = 100;
 
-#[derive(Debug, Default)]
+struct OpsBuffer {
+    ops: std::sync::Mutex<VecDeque<OpRecord>>,
+}
+
+impl OpsBuffer {
+    fn new() -> Self {
+        Self {
+            ops: std::sync::Mutex::new(VecDeque::with_capacity(OPS_BUFFER_CAPACITY)),
+        }
+    }
+
+    const MAX_DETAIL_LEN: usize = 120;
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn record(&self, kind: &str, detail: &str, elapsed: std::time::Duration, outcome: &str) {
+        let duration_ms = elapsed.as_millis() as u64;
+        let detail = if detail.len() > Self::MAX_DETAIL_LEN {
+            &detail[..Self::MAX_DETAIL_LEN]
+        } else {
+            detail
+        };
+        let mut ops = self.ops.lock().expect("ops buffer poisoned");
+        if ops.len() == OPS_BUFFER_CAPACITY {
+            ops.pop_front();
+        }
+        ops.push_back(OpRecord {
+            kind: kind.to_string(),
+            detail: detail.to_string(),
+            duration_ms,
+            outcome: outcome.to_string(),
+            timestamp: Utc::now(),
+        });
+    }
+
+    fn recent(&self, n: usize) -> Vec<OpRecord> {
+        let ops = self.ops.lock().expect("ops buffer poisoned");
+        ops.iter().rev().take(n).cloned().collect()
+    }
+}
+
+#[derive(Debug, Default, Serialize)]
 pub struct AuditReport {
-    pub sqlite_only: u64,
-    pub qdrant_only: u64,
-    pub fixed: u64,
+    pub sqlite_only: Vec<String>,
+    pub qdrant_only: Vec<String>,
+    pub fixed: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -75,6 +117,7 @@ pub struct MemoryService {
     shutdown_token: CancellationToken,
     flush_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     cache: cache::RecallCache,
+    ops_buffer: OpsBuffer,
 }
 
 impl MemoryService {
@@ -167,6 +210,7 @@ impl MemoryService {
             shutdown_token,
             flush_handle: std::sync::Mutex::new(Some(flush_handle)),
             cache,
+            ops_buffer: OpsBuffer::new(),
         };
 
         let report = service.recover_on_startup().await?;
@@ -178,6 +222,14 @@ impl MemoryService {
                 cleared_pre_qdrant = report.cleared_pre_qdrant,
                 "recovered pending ops on startup"
             );
+        }
+
+        let pruned = service
+            .metadata_store
+            .prune_completed_ops(1000, chrono::Duration::days(7))
+            .await?;
+        if pruned > 0 {
+            tracing::info!(pruned, "pruned old completed_ops entries");
         }
 
         Ok(service)
@@ -241,13 +293,8 @@ impl MemoryService {
         let sqlite_set: HashSet<String> = sqlite_ids.into_iter().collect();
 
         let qdrant_only: Vec<String> = qdrant_set.difference(&sqlite_set).cloned().collect();
-        let sqlite_only_count = sqlite_set.difference(&qdrant_set).count() as u64;
+        let sqlite_only: Vec<String> = sqlite_set.difference(&qdrant_set).cloned().collect();
 
-        let mut report = AuditReport {
-            sqlite_only: sqlite_only_count,
-            qdrant_only: qdrant_only.len() as u64,
-            fixed: 0,
-        };
         if fix {
             if qdrant_only.len() as u64 > fix_limit {
                 return Err(CoreError::Validation(format!(
@@ -262,9 +309,18 @@ impl MemoryService {
             self.vector_store
                 .delete_by_ids(&self.config.namespace, &uuids)
                 .await?;
-            report.fixed = uuids.len() as u64;
+            Ok(AuditReport {
+                sqlite_only,
+                fixed: qdrant_only,
+                qdrant_only: vec![],
+            })
+        } else {
+            Ok(AuditReport {
+                sqlite_only,
+                qdrant_only,
+                fixed: vec![],
+            })
         }
-        Ok(report)
     }
 
     pub async fn backfill_normalized_predicates(
@@ -305,12 +361,16 @@ impl MemoryService {
         Ok(report)
     }
 
+    #[tracing::instrument(name = "store", skip_all, fields(memory_type, namespace))]
     pub async fn store(&self, req: StoreRequest) -> Result<StoreResponse, CoreError> {
+        let op_start = std::time::Instant::now();
         let memory_type = detect_memory_type(&req);
         let namespace = req
             .namespace
             .clone()
             .unwrap_or_else(|| self.config.namespace.clone());
+        tracing::Span::current().record("memory_type", memory_type.as_str());
+        tracing::Span::current().record("namespace", &*namespace);
         let normalizer = self
             .normalizers
             .get(&namespace)
@@ -365,6 +425,9 @@ impl MemoryService {
 
         self.cache.bump_generation(&ctx.namespace).await;
 
+        self.ops_buffer
+            .record("store", memory_type.as_str(), op_start.elapsed(), "ok");
+
         Ok(StoreResponse {
             id: memory.id,
             memory_type: memory_type.as_str().to_string(),
@@ -400,8 +463,11 @@ impl MemoryService {
             .await
     }
 
+    #[tracing::instrument(name = "recall", skip_all, fields(query = %req.query, namespace))]
     pub async fn recall(&self, req: RecallRequest) -> Result<Vec<RecallResult>, CoreError> {
+        let op_start = std::time::Instant::now();
         let namespace = req.namespace.as_deref().unwrap_or(&self.config.namespace);
+        tracing::Span::current().record("namespace", namespace);
         let limit = req
             .limit
             .unwrap_or(DEFAULT_RECALL_LIMIT)
@@ -444,6 +510,7 @@ impl MemoryService {
             include_stale: req.include_stale,
             include_invalidated: req.include_invalidated,
             time_range_hash: time_hash,
+            explain: req.explain,
         });
 
         if let Some(cached) = self.cache.get_results(&cache_key, namespace).await {
@@ -559,11 +626,27 @@ impl MemoryService {
                 let s_score = staleness_score(memory, now, staleness_config);
                 let threshold = threshold_for_type(staleness_config, memory.memory_type);
                 let label = freshness_label(s_score, threshold);
+                let scoring = if req.explain {
+                    Some(ScoringBreakdown {
+                        rrf_rank: 0,
+                        rrf_score: 0.0,
+                        rerank_score: r.score,
+                        recency_boost: recency,
+                        boosted_score: relevance_score,
+                        staleness: s_score,
+                        staleness_label: label,
+                        final_rank: 0,
+                    })
+                } else {
+                    None
+                };
+
                 Some(RecallResult {
                     memory: (*memory).clone(),
                     relevance_score,
                     staleness_score: s_score,
                     freshness_label: label,
+                    scoring,
                 })
             })
             .collect();
@@ -586,6 +669,17 @@ impl MemoryService {
             results.retain(|r| r.freshness_label != FreshnessLabel::Stale);
         }
 
+        if req.explain {
+            for (i, r) in results.iter_mut().enumerate() {
+                if let Some(ref mut s) = r.scoring {
+                    #[allow(clippy::cast_possible_truncation)]
+                    {
+                        s.final_rank = (i + 1) as u32;
+                    }
+                }
+            }
+        }
+
         let accessed_ids: Vec<String> = results.iter().map(|r| r.memory.id.clone()).collect();
         self.access_tracker.record(&accessed_ids);
         if let Some(ids) = self.access_tracker.drain_if_full() {
@@ -598,6 +692,13 @@ impl MemoryService {
 
         self.process_validate_ids(req.validate_ids.as_ref(), &results)
             .await?;
+
+        self.ops_buffer.record(
+            "recall",
+            &req.query,
+            op_start.elapsed(),
+            &format!("{} results", results.len()),
+        );
 
         Ok(results)
     }
@@ -767,21 +868,92 @@ impl MemoryService {
             None
         };
 
+        let diagnostics = if req.diagnostics.unwrap_or(false) {
+            Some(self.diagnostics().await?)
+        } else {
+            None
+        };
+
         Ok(StatsResponse {
             total_memories: total,
             recent_memories: recent,
             needs_attention,
             details,
+            diagnostics,
         })
+    }
+
+    pub async fn diagnostics(&self) -> Result<DiagnosticsReport, CoreError> {
+        let namespace = &self.config.namespace;
+        let memory_count = self.metadata_store.memory_count().await?;
+        let entity_count = self.metadata_store.entity_count(namespace).await?;
+        let sqlite_size = self.metadata_store.storage_size_bytes().await?;
+        let pending = self
+            .metadata_store
+            .count_pending_ops_older_than(std::time::Duration::ZERO)
+            .await?;
+        let cache = self.cache.cache_stats().await;
+        let recent_ops = self.ops_buffer.recent(10);
+
+        let qdrant_url = self
+            .config
+            .qdrant_url
+            .clone()
+            .unwrap_or_else(|| format!("localhost:{} (sidecar)", self.config.qdrant_port));
+
+        let qdrant_pid = self.sidecar.as_ref().and_then(QdrantSidecar::pid);
+
+        Ok(DiagnosticsReport {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            embedding_model: self.config.model_tier.model_name().to_string(),
+            qdrant_url,
+            qdrant_pid,
+            collection: namespace.clone(),
+            sqlite_path: self.config.db_path.display().to_string(),
+            sqlite_size_bytes: sqlite_size,
+            memory_count,
+            entity_count,
+            pending_ops: pending,
+            cache,
+            recent_ops,
+        })
+    }
+
+    pub async fn list_pending_ops(&self) -> Result<Vec<ferrex_store::PendingOp>, CoreError> {
+        Ok(self.metadata_store.list_pending_ops().await?)
+    }
+
+    pub async fn list_completed_ops(
+        &self,
+        status: Option<&str>,
+        limit: usize,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Vec<ferrex_store::CompletedOp>, CoreError> {
+        Ok(self
+            .metadata_store
+            .list_completed_ops(status, limit, since)
+            .await?)
+    }
+
+    pub async fn prune_journal(&self) -> Result<(), CoreError> {
+        self.metadata_store
+            .prune_completed_ops(1000, chrono::Duration::days(7))
+            .await?;
+        Ok(())
     }
 
     pub async fn forget(&self, req: ForgetRequest) -> Result<ForgetResponse, CoreError> {
         use ferrex_store::{PendingOp, PendingOpKind};
+        let op_start = std::time::Instant::now();
 
-        for id in &req.ids {
-            Uuid::parse_str(id)
-                .map_err(|_| CoreError::Validation(format!("invalid UUID: {id}")))?;
-        }
+        let uuids: Vec<Uuid> = req
+            .ids
+            .iter()
+            .map(|id| {
+                Uuid::parse_str(id)
+                    .map_err(|_| CoreError::Validation(format!("invalid UUID: {id}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         if req.cascade.is_some() {
             tracing::warn!("forget: `cascade` field is deprecated and ignored");
         }
@@ -789,7 +961,7 @@ impl MemoryService {
         let mut deleted = Vec::new();
         let mut not_found = Vec::new();
 
-        for id in &req.ids {
+        for (id, uuid) in req.ids.iter().zip(uuids.iter()) {
             let Some(memory) = self.metadata_store.get_memory(id).await? else {
                 not_found.push(id.clone());
                 continue;
@@ -806,9 +978,8 @@ impl MemoryService {
             };
             self.metadata_store.insert_pending_op(&op).await?;
 
-            let uuid = Uuid::parse_str(id).map_err(|e| CoreError::Validation(e.to_string()))?;
             self.vector_store
-                .delete_by_ids(&memory.namespace, &[uuid])
+                .delete_by_ids(&memory.namespace, &[*uuid])
                 .await?;
             self.metadata_store
                 .mark_pending_op_qdrant_written(&op.op_id)
@@ -817,11 +988,25 @@ impl MemoryService {
             self.metadata_store
                 .delete_memories(std::slice::from_ref(id))
                 .await?;
-            self.metadata_store.clear_pending_op(&op.op_id).await?;
+
+            let completed = op.into_completed(id.clone(), memory.namespace.clone());
+            self.metadata_store.complete_op(&completed).await?;
 
             deleted.push(id.clone());
             self.cache.bump_generation(&memory.namespace).await;
         }
+
+        let outcome = if not_found.is_empty() {
+            "ok".to_string()
+        } else {
+            format!("{} deleted, {} not found", deleted.len(), not_found.len())
+        };
+        self.ops_buffer.record(
+            "forget",
+            &format!("{} ids", req.ids.len()),
+            op_start.elapsed(),
+            &outcome,
+        );
 
         Ok(ForgetResponse {
             message: format!("deleted {} memories", deleted.len()),

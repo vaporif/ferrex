@@ -27,7 +27,7 @@ impl McpTestHarness {
         let db_path = temp_dir.path().join("ferrex.db");
         let config_path = temp_dir.path().join("ferrex.toml");
 
-        let bin = env!("CARGO_BIN_EXE_ferrex-server");
+        let bin = env!("CARGO_BIN_EXE_ferrex");
         let mut child = Command::new(bin)
             .arg("--qdrant-url")
             .arg(format!("http://localhost:{port}"))
@@ -41,7 +41,7 @@ impl McpTestHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn ferrex-server");
+            .expect("spawn ferrex");
 
         let stdin = child.stdin.take().expect("stdin");
         let stdout = child.stdout.take().expect("stdout");

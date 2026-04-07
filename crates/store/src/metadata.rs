@@ -177,6 +177,30 @@ pub trait MetadataStore: Send + Sync {
     ) -> impl Future<Output = Result<u64, StoreError>> + Send {
         async { Ok(0) }
     }
+
+    fn complete_op(
+        &self,
+        _op: &crate::journal::CompletedOp,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        async { Ok(()) }
+    }
+
+    fn list_completed_ops(
+        &self,
+        _status: Option<&str>,
+        _limit: usize,
+        _since: Option<DateTime<Utc>>,
+    ) -> impl Future<Output = Result<Vec<crate::journal::CompletedOp>, StoreError>> + Send {
+        async { Ok(vec![]) }
+    }
+
+    fn prune_completed_ops(
+        &self,
+        _max_count: usize,
+        _max_age: chrono::Duration,
+    ) -> impl Future<Output = Result<u64, StoreError>> + Send {
+        async { Ok(0) }
+    }
 }
 
 const DEFAULT_READER_POOL_SIZE: usize = 4;
@@ -1109,6 +1133,113 @@ impl MetadataStore for SqliteStore {
                 |r| r.get(0),
             )?;
             Ok(count.cast_unsigned())
+        })
+        .await
+    }
+<<<<<<< HEAD
+
+    async fn complete_op(&self, op: &crate::journal::CompletedOp) -> Result<(), StoreError> {
+        let op = op.clone();
+        self.with_writer(move |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO completed_ops \
+                 (op_id, kind, memory_id, namespace, started_at, completed_at, duration_ms, outcome) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    op.op_id,
+                    op.kind.as_str(),
+                    op.memory_id,
+                    op.namespace,
+                    op.started_at.to_rfc3339(),
+                    op.completed_at.to_rfc3339(),
+                    op.duration_ms,
+                    op.outcome,
+                ],
+            )?;
+            conn.execute("DELETE FROM pending_ops WHERE op_id = ?1", [&op.op_id])?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn list_completed_ops(
+        &self,
+        status: Option<&str>,
+        limit: usize,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<Vec<crate::journal::CompletedOp>, StoreError> {
+        let status = status.map(String::from);
+        let since = since.map(|s| s.to_rfc3339());
+        self.with_reader(move |conn| {
+            let mut sql = String::from(
+                "SELECT op_id, kind, memory_id, namespace, started_at, completed_at, duration_ms, outcome \
+                 FROM completed_ops WHERE 1=1",
+            );
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![];
+
+            if let Some(ref s) = status {
+                if s == "failed" {
+                    sql.push_str(" AND outcome != 'ok'");
+                } else if s == "completed" {
+                    sql.push_str(" AND outcome = 'ok'");
+                }
+            }
+            if let Some(ref since_str) = since {
+                sql.push_str(" AND completed_at >= ?");
+                params.push(Box::new(since_str.clone()));
+            }
+            sql.push_str(" ORDER BY completed_at DESC LIMIT ?");
+            #[allow(clippy::cast_possible_wrap)]
+            params.push(Box::new(limit as i64));
+
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                params.iter().map(AsRef::as_ref).collect();
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt
+                .query_map(param_refs.as_slice(), |row| {
+                    Ok(crate::journal::CompletedOp {
+                        op_id: row.get(0)?,
+                        kind: crate::journal::PendingOpKind::parse(
+                            &row.get::<_, String>(1)?,
+                        )
+                        .unwrap_or(crate::journal::PendingOpKind::Store),
+                        memory_id: row.get(2)?,
+                        namespace: row.get(3)?,
+                        started_at: row.get::<_, String>(4)?.parse().unwrap_or_default(),
+                        completed_at: row.get::<_, String>(5)?.parse().unwrap_or_default(),
+                        duration_ms: row.get(6)?,
+                        outcome: row.get(7)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    async fn prune_completed_ops(
+        &self,
+        max_count: usize,
+        max_age: chrono::Duration,
+    ) -> Result<u64, StoreError> {
+        let cutoff = (Utc::now() - max_age).to_rfc3339();
+        self.with_writer(move |conn| {
+            let before: i64 =
+                conn.query_row("SELECT COUNT(*) FROM completed_ops", [], |r| r.get(0))?;
+            conn.execute(
+                "DELETE FROM completed_ops WHERE completed_at < ?1",
+                [&cutoff],
+            )?;
+            conn.execute(
+                "DELETE FROM completed_ops WHERE op_id NOT IN \
+                 (SELECT op_id FROM completed_ops ORDER BY completed_at DESC LIMIT ?1)",
+                #[allow(clippy::cast_possible_wrap)]
+                [max_count as i64],
+            )?;
+            let after: i64 =
+                conn.query_row("SELECT COUNT(*) FROM completed_ops", [], |r| r.get(0))?;
+            #[allow(clippy::cast_sign_loss)]
+            Ok((before - after).max(0) as u64)
         })
         .await
     }

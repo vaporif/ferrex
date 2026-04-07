@@ -102,6 +102,7 @@ impl StalenessConfig {
     clippy::cast_precision_loss,  // seconds-to-f64 is fine for day-scale durations
     clippy::suboptimal_flops,     // readability over mul_add here
 )]
+#[tracing::instrument(level = "trace", name = "staleness_score", skip_all, fields(score))]
 pub fn staleness_score(memory: &Memory, now: DateTime<Utc>, config: &StalenessConfig) -> f64 {
     let type_cfg = config
         .type_config
@@ -123,11 +124,13 @@ pub fn staleness_score(memory: &Memory, now: DateTime<Utc>, config: &StalenessCo
     let count_freshness = 1.0 / (1.0 + memory.access_count as f64 / config.count_scale);
 
     let w = &config.weights;
-    (w.age * age_decay
+    let score = (w.age * age_decay
         + w.access * access_decay
         + w.validated * validation_decay
         + w.count * count_freshness)
-        .clamp(0.0, 1.0)
+        .clamp(0.0, 1.0);
+    tracing::Span::current().record("score", score);
+    score
 }
 
 #[must_use]

@@ -78,6 +78,20 @@ pub fn migrate(conn: &Connection) -> Result<(), StoreError> {
         CREATE INDEX IF NOT EXISTS idx_entity_aliases_alias ON entity_aliases(alias);",
     )?;
 
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS completed_ops (
+            op_id          TEXT PRIMARY KEY,
+            kind           TEXT NOT NULL,
+            memory_id      TEXT NOT NULL,
+            namespace      TEXT NOT NULL,
+            started_at     TEXT NOT NULL,
+            completed_at   TEXT NOT NULL,
+            duration_ms    INTEGER NOT NULL,
+            outcome        TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_completed_ops_completed ON completed_ops(completed_at);",
+    )?;
+
     let has_col: bool = conn
         .prepare("SELECT 1 FROM pragma_table_info('memories') WHERE name='normalized_predicate'")?
         .query([])?
@@ -245,6 +259,20 @@ mod tests {
             .count()
             == 1;
         assert!(has_col);
+    }
+
+    #[test]
+    fn test_migrate_creates_completed_ops_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='completed_ops'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]

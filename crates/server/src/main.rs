@@ -59,6 +59,13 @@ enum Command {
         #[command(subcommand)]
         backfill: BackfillCommand,
     },
+    /// Print system diagnostics.
+    Diagnose,
+    /// Inspect the transaction journal.
+    Journal {
+        #[command(subcommand)]
+        journal: JournalCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -68,6 +75,28 @@ enum AuditCommand {
         fix: bool,
         #[arg(long)]
         sample: Option<usize>,
+        /// Output format: "text" or "json".
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum JournalCommand {
+    /// Show journal entries.
+    Show {
+        /// Filter: "pending", "completed", "failed".
+        #[arg(long)]
+        status: Option<String>,
+        /// Max entries to show.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Time filter: "1h", "24h", "7d".
+        #[arg(long)]
+        since: Option<String>,
+        /// Output format: "text" or "json".
+        #[arg(long, default_value = "text")]
+        format: String,
     },
 }
 
@@ -173,6 +202,9 @@ struct RecallParams {
     include_invalidated: Option<bool>,
     /// Set false to exclude stale memories.
     include_stale: Option<bool>,
+    /// Include scoring breakdown for each result. Default: false.
+    #[serde(default)]
+    explain: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -201,6 +233,8 @@ struct StatsParams {
     namespace: String,
     /// Include per-type breakdown and staleness distribution.
     detailed: Option<bool>,
+    /// Include system diagnostics (`Qdrant` status, `SQLite` size, cache stats, recent ops).
+    diagnostics: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -338,13 +372,14 @@ impl FerrexServer {
             include_invalidated: p.include_invalidated,
             time_range,
             validate_ids: p.validate_ids,
+            explain: p.explain,
         };
 
         let results = self.service.recall(req).await.map_err(map_error)?;
         let output: Vec<serde_json::Value> = results
             .into_iter()
             .map(|r| {
-                serde_json::json!({
+                let mut obj = serde_json::json!({
                     "id": r.memory.id,
                     "type": r.memory.memory_type,
                     "content": r.memory.content,
@@ -356,7 +391,14 @@ impl FerrexServer {
                     "freshness": r.freshness_label,
                     "entities": r.memory.entities,
                     "created_at": r.memory.created_at.to_rfc3339(),
-                })
+                });
+                if let Some(ref scoring) = r.scoring
+                    && let Some(map) = obj.as_object_mut()
+                    && let Ok(val) = serde_json::to_value(scoring)
+                {
+                    map.insert("scoring".to_string(), val);
+                }
+                obj
             })
             .collect();
         Ok(serde_json::to_string_pretty(&output).unwrap_or_default())
@@ -398,6 +440,7 @@ impl FerrexServer {
         let req = StatsRequest {
             namespace: p.namespace,
             detailed: p.detailed,
+            diagnostics: p.diagnostics,
         };
         let resp = self.service.stats(req).await.map_err(map_error)?;
         Ok(serde_json::to_string_pretty(&resp).unwrap_or_default())
@@ -411,24 +454,255 @@ fn main() -> eyre::Result<()> {
     color_eyre::install()?;
     let mut cli = Cli::parse();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
+    let env_filter = tracing_subscriber::EnvFilter::try_from_env("FERREX_LOG")
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    let log_format = std::env::var("FERREX_LOG_FORMAT").unwrap_or_default();
+    if log_format.eq_ignore_ascii_case("json") {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .with_writer(std::io::stderr)
+            .json()
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .with_writer(std::io::stderr)
+            .init();
+    }
 
     match cli.command.take() {
         Some(Command::Audit {
-            audit: AuditCommand::Reconcile { fix, sample },
+            audit:
+                AuditCommand::Reconcile {
+                    fix,
+                    sample,
+                    format,
+                },
         }) => {
-            return audit::run_reconcile(build_config(cli)?, fix, sample);
+            return audit::run_reconcile(build_config(cli)?, fix, sample, &format);
         }
         Some(Command::Backfill {
             backfill: BackfillCommand::NormalizedPredicates { namespace, dry_run },
         }) => {
             return backfill::run_normalized_predicates(build_config(cli)?, namespace, dry_run);
+        }
+<<<<<<< HEAD
+        #[allow(clippy::cast_precision_loss)]
+        Some(Command::Diagnose) => {
+            let config = build_config(cli)?;
+            return tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(async move {
+                    let service = MemoryService::from_config(config).await?;
+                    let report = service.diagnostics().await?;
+
+                    println!("ferrex v{} | {}", report.version, report.embedding_model);
+                    println!();
+                    println!("Qdrant:");
+                    println!(
+                        "  url: {}{}",
+                        report.qdrant_url,
+                        report
+                            .qdrant_pid
+                            .map(|p| format!(" (sidecar, pid {p})"))
+                            .unwrap_or_default()
+                    );
+                    println!(
+                        "  collection: {} -- {} points",
+                        report.collection, report.memory_count
+                    );
+                    println!();
+                    println!("SQLite:");
+                    println!(
+                        "  path: {} -- {:.1} MB",
+                        report.sqlite_path,
+                        report.sqlite_size_bytes as f64 / 1_048_576.0
+                    );
+                    println!(
+                        "  memories: {} | entities: {}",
+                        report.memory_count, report.entity_count
+                    );
+                    println!("  pending ops: {}", report.pending_ops);
+                    println!();
+                    println!("Cache:");
+                    let emb_total = report.cache.embedding_hits + report.cache.embedding_misses;
+                    let emb_rate = if emb_total > 0 {
+                        report.cache.embedding_hits as f64 / emb_total as f64 * 100.0
+                    } else {
+                        0.0
+                    };
+                    let res_total = report.cache.result_hits + report.cache.result_misses;
+                    let res_rate = if res_total > 0 {
+                        report.cache.result_hits as f64 / res_total as f64 * 100.0
+                    } else {
+                        0.0
+                    };
+                    println!(
+                        "  embedding: {}/{} entries, {:.0}% hit rate",
+                        report.cache.embedding_len, report.cache.embedding_capacity, emb_rate
+                    );
+                    println!(
+                        "  result: {}/{} entries, {:.0}% hit rate",
+                        report.cache.result_len, report.cache.result_capacity, res_rate
+                    );
+
+                    if !report.recent_ops.is_empty() {
+                        println!();
+                        println!("Last {} operations:", report.recent_ops.len());
+                        for op in &report.recent_ops {
+                            let ago = chrono::Utc::now() - op.timestamp;
+                            let ago_str = if ago.num_seconds() < 60 {
+                                format!("{}s ago", ago.num_seconds())
+                            } else if ago.num_minutes() < 60 {
+                                format!("{}m ago", ago.num_minutes())
+                            } else {
+                                format!("{}h ago", ago.num_hours())
+                            };
+                            println!(
+                                "  {:<8} {:<30} {:>6}ms  {:<12} {}",
+                                op.kind,
+                                op.detail.chars().take(30).collect::<String>(),
+                                op.duration_ms,
+                                op.outcome,
+                                ago_str
+                            );
+                        }
+                    }
+
+                    service.shutdown().await;
+                    Ok::<_, eyre::Report>(())
+                });
+        }
+        Some(Command::Journal {
+            journal:
+                JournalCommand::Show {
+                    status,
+                    limit,
+                    since,
+                    format,
+                },
+        }) => {
+            let config = build_config(cli)?;
+            return tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(async move {
+                    let service = MemoryService::from_config(config).await?;
+
+                    let since_dt = since
+                        .as_deref()
+                        .map(|s| -> eyre::Result<_> {
+                            let now = chrono::Utc::now();
+                            match s {
+                                "1h" => Ok(now - chrono::Duration::hours(1)),
+                                "24h" => Ok(now - chrono::Duration::hours(24)),
+                                "7d" => Ok(now - chrono::Duration::days(7)),
+                                _ => Err(eyre::eyre!(
+                                    "invalid --since value: {s}. Use 1h, 24h, or 7d."
+                                )),
+                            }
+                        })
+                        .transpose()?;
+
+                    let status_filter = status.as_deref();
+                    let show_pending = status_filter.is_none() || status_filter == Some("pending");
+                    let show_completed = status_filter.is_none()
+                        || status_filter == Some("completed")
+                        || status_filter == Some("failed");
+
+                    service.prune_journal().await?;
+
+                    if format.eq_ignore_ascii_case("json") {
+                        let mut json_obj = serde_json::Map::new();
+
+                        if show_pending {
+                            let pending = service.list_pending_ops().await?;
+                            json_obj.insert(
+                                "pending".to_string(),
+                                serde_json::json!(
+                                    pending
+                                        .iter()
+                                        .map(|op| serde_json::json!({
+                                            "op_id": op.op_id,
+                                            "kind": op.kind.as_str(),
+                                            "memory_id": op.memory_id,
+                                            "namespace": op.namespace,
+                                            "started_at": op.started_at.to_rfc3339(),
+                                        }))
+                                        .collect::<Vec<_>>()
+                                ),
+                            );
+                        }
+
+                        if show_completed {
+                            let completed = service
+                                .list_completed_ops(status_filter, limit, since_dt)
+                                .await?;
+                            json_obj.insert(
+                                "completed".to_string(),
+                                serde_json::json!(
+                                    completed
+                                        .iter()
+                                        .map(|op| serde_json::json!({
+                                            "op_id": op.op_id,
+                                            "kind": op.kind.as_str(),
+                                            "memory_id": op.memory_id,
+                                            "outcome": op.outcome,
+                                            "duration_ms": op.duration_ms,
+                                            "completed_at": op.completed_at.to_rfc3339(),
+                                        }))
+                                        .collect::<Vec<_>>()
+                                ),
+                            );
+                        }
+
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&json_obj).unwrap_or_default()
+                        );
+                    } else {
+                        if show_pending {
+                            let pending = service.list_pending_ops().await?;
+                            println!("Pending ({}):", pending.len());
+                            if pending.is_empty() {
+                                println!("  (none)");
+                            } else {
+                                for op in &pending {
+                                    println!(
+                                        "  {}  {}  {}  since {}",
+                                        op.kind.as_str(),
+                                        op.memory_id,
+                                        op.namespace,
+                                        op.started_at.format("%Y-%m-%d %H:%M:%S")
+                                    );
+                                }
+                            }
+                            println!();
+                        }
+
+                        if show_completed {
+                            let completed = service
+                                .list_completed_ops(status_filter, limit, since_dt)
+                                .await?;
+                            println!("Completed (last {}):", completed.len());
+                            for op in &completed {
+                                println!(
+                                    "  {}  {}  {}  {:>5}  {:>6}ms",
+                                    op.completed_at.format("%Y-%m-%d %H:%M:%S"),
+                                    op.kind.as_str(),
+                                    op.memory_id,
+                                    op.outcome,
+                                    op.duration_ms,
+                                );
+                            }
+                        }
+                    }
+
+                    service.shutdown().await;
+                    Ok::<_, eyre::Report>(())
+                });
         }
         None => {}
     }

@@ -83,7 +83,7 @@ jobs:
         run: nix build
 
       - name: Smoke test
-        run: ./result/bin/ferrex-server --help
+        run: ./result/bin/ferrex --help
 
   gitleaks:
     name: Gitleaks
