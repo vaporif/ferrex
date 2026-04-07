@@ -136,6 +136,8 @@
             pkgs.typos
             pkgs.qdrant
             pkgs.onnxruntime
+            pkgs.maturin
+            pkgs.python3
           ]
           ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
             pkgs.pkg-config

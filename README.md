@@ -6,6 +6,30 @@ Local-first MCP memory server for AI agents. One Rust binary, a Qdrant sidecar, 
 
 Five MCP tools -- `store`, `recall`, `forget`, `reflect`, `stats` -- give agents persistent memory across conversations. Memories are typed (episodic events, semantic facts, procedural workflows), entities get resolved even when agents name them inconsistently, and facts carry temporal validity so stale stuff ages out instead of silently misleading.
 
+## Installation
+
+### uvx (recommended)
+
+```bash
+uvx ferrex
+```
+
+### Direct binary
+
+Download from [GitHub Releases](https://github.com/vaporif/ferrex/releases).
+
+### Nix
+
+```bash
+nix run github:vaporif/ferrex
+```
+
+### Build from source
+
+```bash
+cargo install --path crates/server
+```
+
 ## Architecture
 
 ```mermaid

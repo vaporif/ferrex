@@ -30,7 +30,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 authors = ["Dmytro Onypko <vaporif@proton.me>"]
-repository = ""
+repository = "https://github.com/vaporif/ferrex"
 
 [workspace.dependencies]
 # MCP
