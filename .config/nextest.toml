@@ -1,3 +1,11 @@
 [profile.default]
 
+# Dont let multiple tests stuck on downloading model
+[[profile.default.overrides]]
+filter = 'package(ferrex-core) & kind(test)'
+test-group = 'model-init'
+
+[test-groups.model-init]
+max-threads = 1
+
 [profile.ci]

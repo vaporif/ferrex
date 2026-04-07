@@ -71,9 +71,10 @@
           # Full integration tests run in CI integration job.
           cargoTestExtraArgs = "--workspace --exclude ferrex-embed --exclude ferrex-server --lib";
           postInstall = ''
-            wrapProgram $out/bin/server \
+            wrapProgram $out/bin/ferrex-server \
               --set ORT_DYLIB_PATH "${pkgs.onnxruntime}/lib/libonnxruntime${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}" \
-              --prefix PATH : "${pkgs.qdrant}/bin"
+              --prefix PATH : "${pkgs.qdrant}/bin" \
+              ${pkgs.lib.optionalString pkgs.stdenv.isLinux "--prefix LD_LIBRARY_PATH : \"${pkgs.lib.makeLibraryPath [pkgs.openssl]}\""}
           '';
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
