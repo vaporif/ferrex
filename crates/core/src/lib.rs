@@ -40,7 +40,7 @@ use crate::pipeline::StoreContext;
 const DEFAULT_RECALL_LIMIT: usize = 10;
 const MAX_RECALL_LIMIT: usize = 200;
 const MIN_RERANK_POOL_SIZE: usize = 20;
-const STATS_RECENT_COUNT: usize = 5;
+const STATS_RECENT_COUNT: i64 = 5;
 const MAX_SCAN_MEMORIES: usize = 10_000;
 const OPS_BUFFER_CAPACITY: usize = 100;
 

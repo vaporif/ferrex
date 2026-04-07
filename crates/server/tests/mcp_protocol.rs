@@ -890,9 +890,13 @@ async fn test_supersedes_invalidates_old_memory() {
     )
     .unwrap();
     assert_eq!(stored2["stored"], true);
-    assert_eq!(
-        stored2["superseded"].as_str().unwrap(),
-        old_id,
+    let superseded = stored2["superseded"]
+        .as_array()
+        .expect("superseded should be an array");
+    assert!(
+        superseded
+            .iter()
+            .any(|v| v.as_str() == Some(old_id.as_str())),
         "response should confirm which memory was superseded"
     );
 

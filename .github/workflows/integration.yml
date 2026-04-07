@@ -21,7 +21,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  FASTEMBED_CACHE_DIR: ${{ github.workspace }}/.fastembed_cache
+  FASTEMBED_CACHE_DIR: ${{ github.workspace }}/.ferrex/models
 
 jobs:
   build-and-generate:
@@ -37,6 +37,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Cache fastembed models
+        uses: actions/cache@v5
+        with:
+          path: .ferrex/models
+          key: fastembed-models-${{ runner.os }}
+
+      - name: Pre-download embedding models
+        run: |
+          nix develop --command cargo run --release -p ferrex-embed --example download_models
+          ls -la "$FASTEMBED_CACHE_DIR"
+
       - name: Archive integration tests
         run: >
           nix develop --command cargo nextest archive
@@ -48,6 +59,12 @@ jobs:
         with:
           name: integration-archive
           path: ferrex-integration.tar.zst
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fastembed-cache
+          path: ${{ github.workspace }}/.ferrex/models
+          if-no-files-found: error
 
       - name: Generate matrix
         id: matrix
@@ -71,11 +88,10 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
 
-      - name: Cache fastembed models
-        uses: actions/cache@v5
+      - uses: actions/download-artifact@v8
         with:
-          path: .fastembed_cache
-          key: fastembed-models-${{ runner.os }}
+          name: fastembed-cache
+          path: ${{ github.workspace }}/.ferrex/models
 
       - uses: actions/download-artifact@v8
         with:
