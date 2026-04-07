@@ -1,3 +1,12 @@
 [profile.default]
 
+# Integration tests that download/init embedding models must not race each other.
+# Serialize them so the first binary populates the model cache before others start.
+[[profile.default.overrides]]
+filter = 'package(ferrex-core) & kind(test)'
+test-group = 'model-init'
+
+[test-groups.model-init]
+max-threads = 1
+
 [profile.ci]
