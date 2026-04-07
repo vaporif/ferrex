@@ -61,7 +61,7 @@ impl OpsBuffer {
     fn record(&self, kind: &str, detail: &str, elapsed: std::time::Duration, outcome: &str) {
         let duration_ms = elapsed.as_millis() as u64;
         let detail = if detail.len() > Self::MAX_DETAIL_LEN {
-            &detail[..Self::MAX_DETAIL_LEN]
+            &detail[..detail.floor_char_boundary(Self::MAX_DETAIL_LEN)]
         } else {
             detail
         };
