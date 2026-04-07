@@ -1,9 +1,9 @@
 [workspace]
 members = [
-    "crates/ferrex-embed",
-    "crates/ferrex-store",
-    "crates/ferrex-core",
-    "crates/ferrex-server",
+    "crates/embed",
+    "crates/store",
+    "crates/core",
+    "crates/server",
 ]
 resolver = "3"
 
@@ -81,3 +81,19 @@ tokio-util = { version = "0.7", features = ["rt"] }
 # Cache
 lru = "0.12"
 rustc-hash = "2"
+
+# Config
+toml = "0.8"
+
+# Connection pooling
+deadpool = { version = "0.12", features = ["rt_tokio_1"] }
+deadpool-sync = "0.1"
+
+# Internal crates
+ferrex-embed = { path = "crates/embed" }
+ferrex-store = { path = "crates/store" }
+ferrex-core = { path = "crates/core" }
+
+# Dev / test
+portpicker = "0.1"
+tempfile = "3"
