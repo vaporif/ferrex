@@ -2,17 +2,22 @@ use std::collections::HashMap;
 
 const FUZZY_THRESHOLD: f64 = 0.85;
 
+struct SynonymEntry {
+    member: String,
+    canonical: String,
+}
+
 /// Collapses free-form predicates (typos, casing, separators) into canonical
 /// group names so that e.g. `uses`, `depends-on`, and `requires` all resolve
 /// to `depends_on`.
 pub struct PredicateNormalizer {
-    canonical_to_members: HashMap<String, Vec<String>>,
+    synonyms: Vec<SynonymEntry>,
     lookup: HashMap<String, String>,
 }
 
 impl PredicateNormalizer {
     pub fn new(groups: HashMap<String, Vec<String>>) -> Self {
-        let mut canonical_to_members: HashMap<String, Vec<String>> = HashMap::new();
+        let mut synonyms = Vec::new();
         let mut lookup: HashMap<String, String> = HashMap::new();
         let mut sorted_groups: Vec<_> = groups.into_iter().collect();
         sorted_groups.sort_by(|(a, _), (b, _)| a.cmp(b));
@@ -32,13 +37,13 @@ impl PredicateNormalizer {
                     continue;
                 }
                 lookup.insert(nm.clone(), canonical.clone());
+                synonyms.push(SynonymEntry {
+                    member: nm.clone(),
+                    canonical: canonical.clone(),
+                });
             }
-            canonical_to_members.insert(canonical, normalized_members);
         }
-        Self {
-            canonical_to_members,
-            lookup,
-        }
+        Self { synonyms, lookup }
     }
 
     pub fn text_normalize(s: &str) -> String {
@@ -59,12 +64,10 @@ impl PredicateNormalizer {
             return canonical.clone();
         }
         let mut best: Option<(&str, f64)> = None;
-        for (canonical, members) in &self.canonical_to_members {
-            for candidate in members {
-                let score = strsim::jaro_winkler(&text, candidate);
-                if score > FUZZY_THRESHOLD && best.as_ref().is_none_or(|(_, s)| score > *s) {
-                    best = Some((canonical.as_str(), score));
-                }
+        for entry in &self.synonyms {
+            let score = strsim::jaro_winkler(&text, &entry.member);
+            if score > FUZZY_THRESHOLD && best.as_ref().is_none_or(|(_, s)| score > *s) {
+                best = Some((entry.canonical.as_str(), score));
             }
         }
         match best {

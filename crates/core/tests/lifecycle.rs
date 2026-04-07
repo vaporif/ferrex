@@ -1,5 +1,4 @@
-use ferrex_core::{FreshnessLabel, RecallRequest, ReflectRequest, StatsRequest, StoreRequest};
-use ferrex_store::MemoryType;
+use ferrex_core::{FreshnessLabel, ReflectRequest, StatsRequest};
 
 mod common;
 use common::{episodic, recall_query, semantic};
