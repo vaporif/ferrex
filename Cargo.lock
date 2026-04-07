@@ -975,6 +975,7 @@ dependencies = [
 name = "ferrex-embed"
 version = "0.1.0"
 dependencies = [
+ "dirs",
  "fastembed",
  "thiserror 2.0.18",
  "tokio",

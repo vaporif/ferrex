@@ -1,7 +1,23 @@
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, Once};
 
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use fastembed::{RerankInitOptions, TextRerank};
+
+static SET_CACHE_DIR: Once = Once::new();
+
+fn ensure_cache_dir() {
+    SET_CACHE_DIR.call_once(|| {
+        if std::env::var("FASTEMBED_CACHE_DIR").is_err() {
+            let cache_dir = dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".ferrex")
+                .join("models");
+            // SAFETY: called once during init before any threads are spawned
+            unsafe { std::env::set_var("FASTEMBED_CACHE_DIR", &cache_dir) };
+        }
+    });
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub enum ModelTier {
@@ -123,6 +139,7 @@ pub struct Embedder {
 
 impl Embedder {
     pub fn new(tier: ModelTier) -> Result<Self, EmbedError> {
+        ensure_cache_dir();
         tracing::info!(tier = %tier, "initializing embedding model");
         let options = TextInitOptions::new(tier.to_fastembed()).with_show_download_progress(true);
         let model = TextEmbedding::try_new(options).map_err(|e| EmbedError::Init(e.to_string()))?;
@@ -169,6 +186,7 @@ pub struct Reranker {
 
 impl Reranker {
     pub fn new(tier: RerankerTier) -> Result<Self, EmbedError> {
+        ensure_cache_dir();
         tracing::info!(tier = %tier, "initializing reranker model");
         let options = RerankInitOptions::new(tier.to_fastembed()).with_show_download_progress(true);
         let model = TextRerank::try_new(options).map_err(|e| EmbedError::Init(e.to_string()))?;

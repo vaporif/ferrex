@@ -12,6 +12,7 @@ onnx = ["fastembed/ort-load-dynamic"]
 onnx-fetch = []
 
 [dependencies]
+dirs = { workspace = true }
 fastembed = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
