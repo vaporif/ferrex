@@ -1,5 +1,4 @@
-use ferrex_core::{FreshnessLabel, RecallRequest, ReflectRequest, StatsRequest, StoreRequest};
-use ferrex_store::MemoryType;
+use ferrex_core::{FreshnessLabel, ReflectRequest, StatsRequest};
 
 mod common;
 use common::{episodic, recall_query, semantic};
@@ -117,6 +116,7 @@ async fn test_stats_brief_has_real_needs_attention() {
         .stats(StatsRequest {
             namespace: ctx.namespace.clone(),
             detailed: Some(false),
+            diagnostics: None,
         })
         .await
         .unwrap();
@@ -149,6 +149,7 @@ async fn test_stats_detailed_mode() {
         .stats(StatsRequest {
             namespace: ctx.namespace.clone(),
             detailed: Some(true),
+            diagnostics: None,
         })
         .await
         .unwrap();

@@ -95,6 +95,10 @@ impl QdrantSidecar {
         Ok(sidecar)
     }
 
+    pub fn pid(&self) -> Option<u32> {
+        self.process.as_ref().map(Child::id)
+    }
+
     pub fn url(&self) -> String {
         format!("http://localhost:{}", self.port)
     }

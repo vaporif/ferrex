@@ -50,16 +50,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Cache fastembed models
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .fastembed_cache
           key: fastembed-models-${{ runner.os }}
 
       - name: Generate coverage
-        run: nix develop --command cargo llvm-cov nextest --workspace --lcov --output-path lcov.info
+        run: nix develop --command cargo llvm-cov nextest --workspace --profile ci --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
@@ -83,28 +83,7 @@ jobs:
         run: nix build
 
       - name: Smoke test
-        run: ./result/bin/ferrex-server --help
-
-  integration:
-    name: Integration tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Cache fastembed models
-        uses: actions/cache@v4
-        with:
-          path: .fastembed_cache
-          key: fastembed-models-${{ runner.os }}
-
-      - name: Integration tests
-        run: nix develop --command cargo nextest run --workspace --no-capture
+        run: ./result/bin/ferrex --help
 
   gitleaks:
     name: Gitleaks

@@ -120,6 +120,7 @@ pub struct RecallRequest {
     pub include_invalidated: Option<bool>,
     pub time_range: Option<TimeRange>,
     pub validate_ids: Option<Vec<String>>,
+    pub explain: bool,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -147,6 +148,7 @@ pub struct ReflectRequest {
 pub struct StatsRequest {
     pub namespace: String,
     pub detailed: Option<bool>,
+    pub diagnostics: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -208,6 +210,8 @@ pub struct StatsResponse {
     pub recent_memories: Vec<Memory>,
     pub needs_attention: NeedsAttention,
     pub details: Option<StatsDetails>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<DiagnosticsReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -248,4 +252,55 @@ pub struct RecallResult {
     pub relevance_score: f32,
     pub staleness_score: f64,
     pub freshness_label: crate::staleness::FreshnessLabel,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scoring: Option<ScoringBreakdown>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScoringBreakdown {
+    pub rrf_rank: u32,
+    pub rrf_score: f32,
+    pub rerank_score: f32,
+    pub recency_boost: f64,
+    pub boosted_score: f32,
+    pub staleness: f64,
+    pub staleness_label: crate::staleness::FreshnessLabel,
+    pub final_rank: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CacheStats {
+    pub embedding_hits: u64,
+    pub embedding_misses: u64,
+    pub result_hits: u64,
+    pub result_misses: u64,
+    pub embedding_capacity: usize,
+    pub embedding_len: usize,
+    pub result_capacity: usize,
+    pub result_len: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpRecord {
+    pub kind: String,
+    pub detail: String,
+    pub duration_ms: u64,
+    pub outcome: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DiagnosticsReport {
+    pub version: String,
+    pub embedding_model: String,
+    pub qdrant_url: String,
+    pub qdrant_pid: Option<u32>,
+    pub collection: String,
+    pub sqlite_path: String,
+    pub sqlite_size_bytes: u64,
+    pub memory_count: u64,
+    pub entity_count: u64,
+    pub pending_ops: u64,
+    pub cache: CacheStats,
+    pub recent_ops: Vec<OpRecord>,
 }

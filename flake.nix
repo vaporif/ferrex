@@ -15,7 +15,7 @@
     crane,
     ...
   }: let
-    systems = ["x86_64-linux" "aarch64-darwin"];
+    systems = ["x86_64-linux" "aarch64-linux" "aarch64-darwin"];
     forAllSystems = f:
       nixpkgs.lib.genAttrs systems (system:
         f {
@@ -33,7 +33,7 @@
     }: let
       src = craneLib.cleanCargoSource ./.;
 
-      pname = "workspace";
+      pname = "ferrex";
 
       commonArgs = {
         inherit src pname;
@@ -66,14 +66,12 @@
           nativeBuildInputs =
             (commonArgs.nativeBuildInputs or [])
             ++ [pkgs.makeWrapper];
-          # Skip ferrex-embed (needs ONNX) and ferrex-server (needs Qdrant).
-          # Only run lib tests for ferrex-core (integration tests need Qdrant).
-          # Full integration tests run in CI integration job.
           cargoTestExtraArgs = "--workspace --exclude ferrex-embed --exclude ferrex-server --lib";
           postInstall = ''
-            wrapProgram $out/bin/server \
+            wrapProgram $out/bin/ferrex \
               --set ORT_DYLIB_PATH "${pkgs.onnxruntime}/lib/libonnxruntime${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}" \
-              --prefix PATH : "${pkgs.qdrant}/bin"
+              --prefix PATH : "${pkgs.qdrant}/bin" \
+              ${pkgs.lib.optionalString pkgs.stdenv.isLinux "--prefix LD_LIBRARY_PATH : \"${pkgs.lib.makeLibraryPath [pkgs.openssl]}\""}
           '';
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {

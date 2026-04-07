@@ -9,6 +9,7 @@ const MAX_PREDICATE_LENGTH: usize = 256;
 const MAX_OBJECT_LENGTH: usize = 4096;
 const MAX_ENTITIES_PER_REQUEST: usize = 50;
 
+#[tracing::instrument(name = "validate", skip_all, fields(content_len = ctx.req.content.as_ref().map_or(0, String::len)))]
 pub fn run(ctx: &StoreContext<'_>) -> Result<(), CoreError> {
     if ctx.req.entities.len() > MAX_ENTITIES_PER_REQUEST {
         return Err(CoreError::Validation(format!(

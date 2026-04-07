@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[[bin]]
+name = "ferrex"
+path = "src/main.rs"
+
 [dependencies]
 ferrex-core = { workspace = true }
 chrono = { workspace = true }
