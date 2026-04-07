@@ -21,7 +21,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  FASTEMBED_CACHE_DIR: ${{ github.workspace }}/.fastembed_cache
+  FASTEMBED_CACHE_DIR: ${{ github.workspace }}/.ferrex/models
 
 jobs:
   build-and-generate:
@@ -40,7 +40,7 @@ jobs:
       - name: Cache fastembed models
         uses: actions/cache@v5
         with:
-          path: .fastembed_cache
+          path: .ferrex/models
           key: fastembed-models-${{ runner.os }}
 
       - name: Pre-download embedding models
@@ -63,7 +63,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: fastembed-cache
-          path: ${{ github.workspace }}/.fastembed_cache
+          path: ${{ github.workspace }}/.ferrex/models
           if-no-files-found: error
 
       - name: Generate matrix
@@ -91,7 +91,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: fastembed-cache
-          path: ${{ github.workspace }}/.fastembed_cache
+          path: ${{ github.workspace }}/.ferrex/models
 
       - uses: actions/download-artifact@v8
         with:
