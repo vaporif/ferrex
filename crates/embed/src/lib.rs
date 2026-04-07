@@ -126,7 +126,11 @@ impl Embedder {
         tracing::info!(tier = %tier, "initializing embedding model");
         let options = TextInitOptions::new(tier.to_fastembed()).with_show_download_progress(true);
         let model = TextEmbedding::try_new(options).map_err(|e| EmbedError::Init(e.to_string()))?;
-        tracing::info!(startup_phase = "embedding", startup_status = "ready", "embedding model loaded");
+        tracing::info!(
+            startup_phase = "embedding",
+            startup_status = "ready",
+            "embedding model loaded"
+        );
         Ok(Self {
             model: Arc::new(Mutex::new(model)),
             tier,
@@ -168,7 +172,11 @@ impl Reranker {
         tracing::info!(tier = %tier, "initializing reranker model");
         let options = RerankInitOptions::new(tier.to_fastembed()).with_show_download_progress(true);
         let model = TextRerank::try_new(options).map_err(|e| EmbedError::Init(e.to_string()))?;
-        tracing::info!(startup_phase = "reranker", startup_status = "ready", "reranker model loaded");
+        tracing::info!(
+            startup_phase = "reranker",
+            startup_status = "ready",
+            "reranker model loaded"
+        );
         Ok(Self {
             model: Arc::new(Mutex::new(model)),
         })

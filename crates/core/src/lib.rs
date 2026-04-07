@@ -162,7 +162,11 @@ impl MemoryService {
                 .await?;
         }
 
-        tracing::info!(startup_phase = "sqlite", startup_status = "ready", "metadata store ready");
+        tracing::info!(
+            startup_phase = "sqlite",
+            startup_status = "ready",
+            "metadata store ready"
+        );
         vector_store.ensure_collection(&config.namespace).await?;
 
         let default_normalizer =
@@ -215,7 +219,8 @@ impl MemoryService {
         };
 
         let report = service.recover_on_startup().await?;
-        let pending_ops = report.compensated_stores + report.rolled_forward_forgets + report.cleared_pre_qdrant;
+        let pending_ops =
+            report.compensated_stores + report.rolled_forward_forgets + report.cleared_pre_qdrant;
         if pending_ops > 0 {
             tracing::info!(
                 compensated_stores = report.compensated_stores,
@@ -224,7 +229,12 @@ impl MemoryService {
                 "recovered pending ops on startup"
             );
         }
-        tracing::info!(startup_phase = "recovery", startup_status = "complete", pending_ops, "startup recovery complete");
+        tracing::info!(
+            startup_phase = "recovery",
+            startup_status = "complete",
+            pending_ops,
+            "startup recovery complete"
+        );
 
         let pruned = service
             .metadata_store
