@@ -11,8 +11,11 @@ use ferrex_core::{
     ReflectRequest, RerankerTier, StatsRequest, StoreRequest,
 };
 use rmcp::{
-    ErrorData, ServerHandler, ServiceExt, handler::server::wrapper::Parameters, tool, tool_handler,
-    tool_router, transport::stdio,
+    ErrorData, ServerHandler, ServiceExt,
+    handler::server::wrapper::Parameters,
+    model::{ServerCapabilities, ServerInfo},
+    tool, tool_handler, tool_router,
+    transport::stdio,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -479,7 +482,11 @@ impl FerrexServer {
 }
 
 #[tool_handler]
-impl ServerHandler for FerrexServer {}
+impl ServerHandler for FerrexServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    }
+}
 
 fn main() -> eyre::Result<()> {
     color_eyre::install()?;
