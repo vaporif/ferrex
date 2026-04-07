@@ -1,5 +1,6 @@
 mod audit;
 mod backfill;
+mod hint;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -65,6 +66,21 @@ enum Command {
     Journal {
         #[command(subcommand)]
         journal: JournalCommand,
+    },
+    /// Re-embed all memories with the current model tier.
+    ReEmbed {
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Create a backup of the ferrex database.
+    Backup {
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// Restore a ferrex database from a backup.
+    Restore {
+        #[arg(long)]
+        from: PathBuf,
     },
 }
 
@@ -289,7 +305,7 @@ fn map_error(e: CoreError) -> ErrorData {
 impl FerrexServer {
     #[tool(
         name = "store",
-        description = "Save a memory. Episodic: events and observations (provide content). Semantic: facts as subject-predicate-object triples. Procedural: workflows (provide content, set type to 'procedural'). Type auto-detects when omitted."
+        description = "Save a memory. Auto-detects type: subject+predicate+object = semantic, otherwise = episodic. For workflows and runbooks, set memory_type='procedural' -- they persist 12x longer."
     )]
     async fn store(&self, Parameters(p): Parameters<StoreParams>) -> Result<String, ErrorData> {
         let memory_type = p
@@ -298,6 +314,8 @@ impl FerrexServer {
             .map(str::parse::<ferrex_core::MemoryType>)
             .transpose()
             .map_err(|e| ErrorData::invalid_params(e, None))?;
+
+        let content_for_hint = p.content.clone();
 
         let req = StoreRequest {
             content: p.content,
@@ -314,13 +332,26 @@ impl FerrexServer {
         };
 
         let resp = self.service.store(req).await.map_err(map_error)?;
-        Ok(serde_json::to_string_pretty(&serde_json::json!({
+
+        let mut json = serde_json::json!({
             "stored": true,
             "id": resp.id,
             "type": resp.memory_type,
             "superseded": resp.superseded,
-        }))
-        .unwrap_or_default())
+        });
+
+        if resp.memory_type == "episodic"
+            && let Some(ref content) = content_for_hint
+            && hint::looks_like_workflow(content)
+        {
+            json["hint"] = serde_json::json!(
+                "This looks like a workflow. Procedural memories persist 12x longer \
+                 (365d vs 30d half-life). Re-store with memory_type: 'procedural' \
+                 if this should be long-lived."
+            );
+        }
+
+        Ok(serde_json::to_string_pretty(&json).unwrap_or_default())
     }
 
     #[tool(
@@ -703,6 +734,18 @@ fn main() -> eyre::Result<()> {
                     Ok::<_, eyre::Report>(())
                 });
         }
+        Some(Command::ReEmbed { dry_run: _ }) => {
+            eprintln!("ferrex re-embed is not yet implemented");
+            std::process::exit(1);
+        }
+        Some(Command::Backup { output: _ }) => {
+            eprintln!("ferrex backup is not yet implemented");
+            std::process::exit(1);
+        }
+        Some(Command::Restore { from: _ }) => {
+            eprintln!("ferrex restore is not yet implemented");
+            std::process::exit(1);
+        }
         None => {}
     }
 
@@ -714,6 +757,7 @@ fn main() -> eyre::Result<()> {
         .block_on(async {
             let service = MemoryService::from_config(config).await?;
             let (service, mut sidecar) = service.into_parts();
+            eprintln!("ferrex ready");
             let service = Arc::new(service);
             let server = FerrexServer::new(Arc::clone(&service));
             let (stdin, stdout) = stdio();
