@@ -60,10 +60,9 @@
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [pkgs.openssl];
         });
 
-      pkg = craneLib.buildPackage (commonArgs
+      pkg = (craneLib.buildPackage (commonArgs
         // {
           inherit cargoArtifacts;
-          meta.mainProgram = "ferrex";
           nativeBuildInputs =
             (commonArgs.nativeBuildInputs or [])
             ++ [pkgs.makeWrapper];
@@ -77,7 +76,7 @@
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [pkgs.openssl];
-        });
+        })).overrideAttrs {meta.mainProgram = "ferrex";};
 
       toolchain = fenixPkgs.stable.withComponents [
         "cargo"
