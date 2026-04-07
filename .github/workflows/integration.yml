@@ -45,7 +45,8 @@ jobs:
 
       - name: Pre-download embedding models
         run: |
-          nix develop --command cargo run -p ferrex-embed --example download_models
+          nix develop --command cargo run --release -p ferrex-embed --example download_models
+          ls -la "$FASTEMBED_CACHE_DIR"
 
       - name: Archive integration tests
         run: >
@@ -62,7 +63,8 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: fastembed-cache
-          path: .fastembed_cache
+          path: ${{ github.workspace }}/.fastembed_cache
+          if-no-files-found: error
 
       - name: Generate matrix
         id: matrix
@@ -89,7 +91,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: fastembed-cache
-          path: .fastembed_cache
+          path: ${{ github.workspace }}/.fastembed_cache
 
       - uses: actions/download-artifact@v8
         with:
