@@ -79,7 +79,7 @@ dirs = "6"
 tokio-util = { version = "0.7", features = ["rt"] }
 
 # Cache
-lru = "0.12"
+lru = "0.16"
 rustc-hash = "2"
 
 # Config
