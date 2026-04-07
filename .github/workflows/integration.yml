@@ -24,9 +24,11 @@ env:
   FASTEMBED_CACHE_DIR: ${{ github.workspace }}/.fastembed_cache
 
 jobs:
-  integration:
-    name: Integration tests
+  build-and-generate:
+    name: Build & generate matrix
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v6
 
@@ -35,11 +37,72 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Archive integration tests
+        run: >
+          nix develop --command cargo nextest archive
+          --archive-file ferrex-integration.tar.zst
+          -p ferrex-core -p ferrex-server
+          --test '*'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: integration-archive
+          path: ferrex-integration.tar.zst
+
+      - name: Generate matrix
+        id: matrix
+        run: |
+          matrix=$(nix develop --command python3 .github/scripts/generate-integration-matrix.py ferrex-integration.tar.zst)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  integration:
+    name: ${{ matrix.binary }} / ${{ matrix.test }}
+    needs: build-and-generate
+    if: needs.build-and-generate.outputs.matrix != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.build-and-generate.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
       - name: Cache fastembed models
         uses: actions/cache@v4
         with:
           path: .fastembed_cache
           key: fastembed-models-${{ runner.os }}
 
-      - name: Integration tests
-        run: nix develop --command cargo nextest run --workspace --no-capture
+      - uses: actions/download-artifact@v4
+        with:
+          name: integration-archive
+
+      - name: Run test
+        run: >
+          nix develop --command cargo nextest run
+          --archive-file ferrex-integration.tar.zst
+          --workspace-remap .
+          --no-capture
+          -E 'binary(=${{ matrix.binary }}) & test(=${{ matrix.test }})'
+
+  lint-scripts:
+    name: Lint scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install ruff
+
+      - name: Ruff check
+        run: ruff check .github/scripts/
+
+      - name: Ruff format
+        run: ruff format --check .github/scripts/

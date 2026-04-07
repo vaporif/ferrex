@@ -55,8 +55,8 @@ jobs:
           path: .fastembed_cache
           key: fastembed-models-${{ runner.os }}
 
-      - name: Generate coverage
-        run: nix develop --command cargo llvm-cov nextest --workspace --lcov --output-path lcov.info
+      - name: Generate coverage (unit tests only, integration tests run in integration.yml)
+        run: nix develop --command cargo llvm-cov nextest --workspace --lib --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
