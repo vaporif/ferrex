@@ -1,10 +1,4 @@
-/// Returns `true` if the content looks like a workflow that should be procedural.
-///
-/// Triggers on:
-/// - 3+ lines starting with a number followed by `.` or `)`
-/// - Content containing "step 1" or "step 2" (case-insensitive)
-///
-/// Does NOT trigger on bullet lists (`- ` / `* `) — too many false positives.
+/// Bullet lists deliberately excluded — too many false positives.
 pub fn looks_like_workflow(content: &str) -> bool {
     let lower = content.to_lowercase();
     if lower.contains("step 1") || lower.contains("step 2") {
