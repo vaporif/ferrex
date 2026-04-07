@@ -7,7 +7,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-ferrex-core = { path = "../ferrex-core" }
+ferrex-core = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 dirs = { workspace = true }
@@ -22,10 +22,10 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-ferrex-store = { path = "../ferrex-store" }
-portpicker = "0.1"
+ferrex-store = { workspace = true }
+portpicker = { workspace = true }
 serde_json = { workspace = true }
-tempfile = "3"
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process", "io-util"] }
 
 [lints]
