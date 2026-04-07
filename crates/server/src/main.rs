@@ -488,18 +488,46 @@ fn main() -> eyre::Result<()> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_env("FERREX_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
+    let log_file = std::env::var("FERREX_LOG_FILE").ok().map(|p| {
+        let path = PathBuf::from(p);
+        let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let name = path
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("ferrex.log"));
+        tracing_appender::rolling::never(dir, name)
+    });
+
     let log_format = std::env::var("FERREX_LOG_FORMAT").unwrap_or_default();
-    if log_format.eq_ignore_ascii_case("json") {
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
-            .with_writer(std::io::stderr)
-            .json()
-            .init();
-    } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
-            .with_writer(std::io::stderr)
-            .init();
+    let is_json = log_format.eq_ignore_ascii_case("json");
+
+    match (log_file, is_json) {
+        (Some(file), true) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .with_writer(file)
+                .json()
+                .init();
+        }
+        (Some(file), false) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .with_writer(file)
+                .with_ansi(false)
+                .init();
+        }
+        (None, true) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .with_writer(std::io::stderr)
+                .json()
+                .init();
+        }
+        (None, false) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .with_writer(std::io::stderr)
+                .init();
+        }
     }
 
     match cli.command.take() {
