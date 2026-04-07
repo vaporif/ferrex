@@ -10,9 +10,11 @@ async fn diagnostics_returns_nonzero_after_operations() {
     svc.store(common::episodic("deployed api-server v2.3 to production"))
         .await
         .unwrap();
-    svc.store(common::episodic("ran database migration for user table schema"))
-        .await
-        .unwrap();
+    svc.store(common::episodic(
+        "ran database migration for user table schema",
+    ))
+    .await
+    .unwrap();
 
     svc.recall(RecallRequest {
         query: "diagnostics".into(),
