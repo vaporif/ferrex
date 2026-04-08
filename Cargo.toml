@@ -40,7 +40,7 @@ rmcp = { version = "1.2", features = ["server", "transport-io", "macros"] }
 tokio = { version = "1", features = ["full"] }
 
 # Embedding
-fastembed = "5.13"
+fastembed = { version = "5.13", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls", "image-models"] }
 
 # Vector store
 qdrant-client = { version = "1", default-features = false, features = ["serde"] }

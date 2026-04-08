@@ -1,7 +1,7 @@
 use chrono::Utc;
 use ferrex_store::{
-    Memory, MetadataStore, POINT_TYPE_FIELD, POINT_TYPE_MEMORY, PendingOp, PendingOpKind,
-    SqliteStore, VectorStore,
+    Memory, MetadataStore, PendingOp, PendingOpKind, PointType, QdrantField, SqliteStore,
+    VectorStore,
 };
 use qdrant_client::Payload;
 use uuid::Uuid;
@@ -64,12 +64,12 @@ async fn write_impl(
 
     let payload = Payload::try_from(serde_json::json!({
         "memory_id": memory.id,
-        "memory_type": memory.memory_type.as_str(),
-        "namespace": memory.namespace,
-        "searchable_text": search_text,
-        "entities": &memory.entities,
-        "created_at": memory.created_at.to_rfc3339(),
-        POINT_TYPE_FIELD: POINT_TYPE_MEMORY,
+        QdrantField::MEMORY_TYPE: memory.memory_type.as_str(),
+        QdrantField::NAMESPACE: memory.namespace,
+        QdrantField::SEARCHABLE_TEXT: search_text,
+        QdrantField::ENTITIES: &memory.entities,
+        QdrantField::CREATED_AT: memory.created_at.to_rfc3339(),
+        QdrantField::POINT_TYPE: PointType::MEMORY,
     }))
     .map_err(|e| CoreError::Validation(e.to_string()))?;
 

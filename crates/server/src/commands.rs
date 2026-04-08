@@ -250,6 +250,63 @@ async fn print_journal_text(
     Ok(())
 }
 
+pub fn nuke(config: FerrexConfig, force: bool) -> eyre::Result<()> {
+    let ferrex_dir = config
+        .db_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .to_path_buf();
+    let db_path = &config.db_path;
+    let qdrant_data = ferrex_dir.join("qdrant-data");
+    let qdrant_pid = ferrex_dir.join("qdrant.pid");
+    let qdrant_lock = ferrex_dir.join("qdrant.lock");
+    let qdrant_config = ferrex_dir.join("qdrant-config.yaml");
+
+    println!("This will delete:");
+    if db_path.exists() {
+        println!("  SQLite DB:    {}", db_path.display());
+    }
+    if qdrant_data.exists() {
+        println!("  Qdrant data:  {}", qdrant_data.display());
+    }
+    if qdrant_pid.exists() {
+        println!("  Qdrant PID:   {}", qdrant_pid.display());
+    }
+
+    let has_anything = db_path.exists() || qdrant_data.exists();
+    if !has_anything {
+        println!("  (nothing found)");
+        return Ok(());
+    }
+
+    if !force {
+        eprint!("\nContinue? [y/N]: ");
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    if db_path.exists() {
+        std::fs::remove_file(db_path)?;
+        println!("Deleted {}", db_path.display());
+    }
+    if qdrant_data.exists() {
+        std::fs::remove_dir_all(&qdrant_data)?;
+        println!("Deleted {}", qdrant_data.display());
+    }
+    for f in [&qdrant_pid, &qdrant_lock, &qdrant_config] {
+        if f.exists() {
+            std::fs::remove_file(f)?;
+        }
+    }
+
+    println!("Done. All ferrex data has been removed.");
+    Ok(())
+}
+
 fn runtime() -> eyre::Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

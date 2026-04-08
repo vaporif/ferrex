@@ -51,6 +51,12 @@ pub enum Command {
         #[command(subcommand)]
         journal: JournalCommand,
     },
+    /// Delete all data (SQLite DB, Qdrant storage, PID/lock files).
+    Nuke {
+        /// Skip confirmation prompt.
+        #[arg(long)]
+        force: bool,
+    },
     /// Re-embed all memories with current model tier.
     ReEmbed {
         #[arg(long)]

@@ -13,9 +13,26 @@ pub use qdrant_client::{Payload, qdrant::Filter};
 pub use sidecar::QdrantSidecar;
 pub use vector::{BatchPoint, ScoredPayload, VectorStore};
 
-pub const POINT_TYPE_FIELD: &str = "point_type";
-pub const POINT_TYPE_MEMORY: &str = "memory";
-pub const POINT_TYPE_ENTITY: &str = "entity";
+pub struct QdrantField;
+
+impl QdrantField {
+    pub const POINT_TYPE: &str = "point_type";
+    pub const MEMORY_TYPE: &str = "memory_type";
+    pub const NAMESPACE: &str = "namespace";
+    pub const ENTITIES: &str = "entities";
+    pub const AGENT_ID: &str = "agent_id";
+    pub const CREATED_AT: &str = "created_at";
+    pub const SEARCHABLE_TEXT: &str = "searchable_text";
+    pub const ENTITY_ID: &str = "entity_id";
+    pub const NAME: &str = "name";
+}
+
+pub struct PointType;
+
+impl PointType {
+    pub const MEMORY: &str = "memory";
+    pub const ENTITY: &str = "entity";
+}
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
