@@ -15,6 +15,7 @@ pub struct QdrantSidecar {
     pid_file: PathBuf,
     process: Option<Child>,
     port: u16,
+    cached_pid: Option<u32>,
 }
 
 impl QdrantSidecar {
@@ -44,6 +45,7 @@ impl QdrantSidecar {
                     pid_file,
                     process: None,
                     port,
+                    cached_pid: Some(existing_pid),
                 };
                 sidecar.health_check().await?;
                 return Ok(sidecar);
@@ -89,6 +91,7 @@ impl QdrantSidecar {
             pid_file,
             process: Some(child),
             port,
+            cached_pid: Some(pid),
         };
 
         sidecar.health_check().await?;
@@ -96,7 +99,7 @@ impl QdrantSidecar {
     }
 
     pub fn pid(&self) -> Option<u32> {
-        self.process.as_ref().map(Child::id)
+        self.cached_pid
     }
 
     pub fn url(&self) -> String {
