@@ -11,7 +11,7 @@ pub use journal::{CompletedOp, PendingOp, PendingOpKind};
 pub use metadata::{MetadataStore, SqliteStore};
 pub use qdrant_client::{Payload, qdrant::Filter};
 pub use sidecar::QdrantSidecar;
-pub use vector::VectorStore;
+pub use vector::{BatchPoint, ScoredPayload, VectorStore};
 
 pub const POINT_TYPE_FIELD: &str = "point_type";
 pub const POINT_TYPE_MEMORY: &str = "memory";
