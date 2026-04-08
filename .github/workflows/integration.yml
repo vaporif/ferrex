@@ -32,10 +32,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
-        with:
-          use-flakehub: false
+      - uses: dtolnay/rust-toolchain@1.94.1
 
       - uses: Swatinem/rust-cache@v2
 
@@ -51,12 +48,12 @@ jobs:
 
       - name: Pre-download embedding models
         run: |
-          nix develop --command cargo run --release -p ferrex-embed --example download_models
+          cargo run --release -p ferrex-embed --example download_models
           ls -la "$FASTEMBED_CACHE_DIR"
 
       - name: Archive integration tests
         run: >
-          nix develop --command cargo nextest archive
+          cargo nextest archive
           --archive-file ferrex-integration.tar.zst
           -p ferrex-core -p ferrex-server
           --test '*'
@@ -91,10 +88,14 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: taiki-e/install-action@v2
         with:
-          use-flakehub: false
+          tool: cargo-nextest
+
+      - name: Install qdrant
+        run: |
+          curl -sL https://github.com/qdrant/qdrant/releases/latest/download/qdrant-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          sudo mv qdrant /usr/local/bin/
 
       - uses: actions/download-artifact@v8
         with:
@@ -107,7 +108,7 @@ jobs:
 
       - name: Run test
         run: >
-          nix develop --command cargo nextest run
+          cargo nextest run
           --archive-file ferrex-integration.tar.zst
           --workspace-remap .
           --no-capture
