@@ -115,6 +115,13 @@
             fenixPkgs.targets."x86_64-apple-darwin".stable.rust-std
           ]
         else toolchain;
+
+      musl64OpensslStatic = pkgs.pkgsCross.musl64.openssl.overrideAttrs {
+        dontAddStaticConfigureFlags = false;
+      };
+      aarch64MuslOpensslStatic = pkgs.pkgsCross.aarch64-multiplatform-musl.openssl.overrideAttrs {
+        dontAddStaticConfigureFlags = false;
+      };
     in {
       packages = {
         inherit pkg cargoArtifacts;
@@ -192,11 +199,11 @@
             CC_aarch64_unknown_linux_musl = "${pkgs.pkgsCross.aarch64-multiplatform-musl.stdenv.cc}/bin/${pkgs.pkgsCross.aarch64-multiplatform-musl.stdenv.cc.targetPrefix}cc";
             CFLAGS_aarch64_unknown_linux_musl = "-U_FORTIFY_SOURCE";
             X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_STATIC = "1";
-            X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_LIB_DIR = "${pkgs.pkgsCross.musl64.openssl.out}/lib";
-            X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_INCLUDE_DIR = "${pkgs.pkgsCross.musl64.openssl.dev}/include";
+            X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_LIB_DIR = "${musl64OpensslStatic.out}/lib";
+            X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_INCLUDE_DIR = "${musl64OpensslStatic.dev}/include";
             AARCH64_UNKNOWN_LINUX_MUSL_OPENSSL_STATIC = "1";
-            AARCH64_UNKNOWN_LINUX_MUSL_OPENSSL_LIB_DIR = "${pkgs.pkgsCross.aarch64-multiplatform-musl.openssl.out}/lib";
-            AARCH64_UNKNOWN_LINUX_MUSL_OPENSSL_INCLUDE_DIR = "${pkgs.pkgsCross.aarch64-multiplatform-musl.openssl.dev}/include";
+            AARCH64_UNKNOWN_LINUX_MUSL_OPENSSL_LIB_DIR = "${aarch64MuslOpensslStatic.out}/lib";
+            AARCH64_UNKNOWN_LINUX_MUSL_OPENSSL_INCLUDE_DIR = "${aarch64MuslOpensslStatic.dev}/include";
           };
       };
     });
