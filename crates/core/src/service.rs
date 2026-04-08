@@ -221,6 +221,18 @@ impl MemoryService {
         }
     }
 
+    pub fn embedder(&self) -> &Embedder {
+        &self.embedder
+    }
+
+    pub fn vector_store(&self) -> &VectorStore {
+        &self.vector_store
+    }
+
+    pub fn reranker(&self) -> &Reranker {
+        &self.reranker
+    }
+
     pub const fn into_parts(mut self) -> (Self, Option<QdrantSidecar>) {
         let sidecar = self.sidecar.take();
         (self, sidecar)

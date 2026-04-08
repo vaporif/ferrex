@@ -22,5 +22,5 @@ pub use service::MemoryService;
 pub use staleness::{FreshnessLabel, StalenessConfig, StalenessWeights, TypeStalenessConfig};
 pub use types::*;
 
-pub use ferrex_embed::{ModelTier, RerankerTier};
-pub use ferrex_store::{Entity, Memory, MemoryType};
+pub use ferrex_embed::{EmbedError, Embedder, ModelTier, Reranker, RerankerTier};
+pub use ferrex_store::{Entity, Filter, Memory, MemoryType, Payload, VectorStore};
