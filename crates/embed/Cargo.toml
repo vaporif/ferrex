@@ -7,7 +7,7 @@ license.workspace = true
 authors.workspace = true
 
 [features]
-default = ["onnx"]
+default = []
 onnx = ["fastembed/ort-load-dynamic"]
 onnx-fetch = []
 

@@ -38,6 +38,7 @@
       commonArgs = {
         inherit src pname;
         strictDeps = true;
+        cargoExtraArgs = "--features ferrex-embed/onnx";
         nativeBuildInputs =
           [
             pkgs.pkg-config
