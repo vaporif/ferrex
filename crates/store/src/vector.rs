@@ -10,6 +10,19 @@ use uuid::Uuid;
 
 use crate::StoreError;
 
+pub struct BatchPoint<'a> {
+    pub id: Uuid,
+    pub vector: Vec<f32>,
+    pub content_text: &'a str,
+    pub payload: Payload,
+}
+
+pub struct ScoredPayload {
+    pub id: String,
+    pub score: f32,
+    pub payload: Payload,
+}
+
 const QDRANT_CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 pub(crate) const DENSE_VECTOR: &str = "dense";
 const SPARSE_VECTOR: &str = "sparse";
@@ -157,6 +170,31 @@ impl VectorStore {
         Ok(())
     }
 
+    pub async fn upsert_batch_hybrid(
+        &self,
+        namespace: &str,
+        points: Vec<BatchPoint<'_>>,
+    ) -> Result<(), StoreError> {
+        if points.is_empty() {
+            return Ok(());
+        }
+        let name = Self::collection_name(namespace)?;
+        let point_structs: Vec<PointStruct> = points
+            .into_iter()
+            .map(|p| {
+                let vectors = NamedVectors::default()
+                    .add_vector(DENSE_VECTOR, p.vector)
+                    .add_vector(SPARSE_VECTOR, Document::new(p.content_text, BM25_TOKENIZER));
+                PointStruct::new(p.id.to_string(), vectors, p.payload)
+            })
+            .collect();
+        self.client
+            .upsert_points(UpsertPointsBuilder::new(&name, point_structs).wait(true))
+            .await
+            .map_err(|e| StoreError::Qdrant(e.to_string()))?;
+        Ok(())
+    }
+
     pub async fn search(
         &self,
         namespace: &str,
@@ -210,6 +248,66 @@ impl VectorStore {
                 };
                 let score = point.score;
                 Some((id, score))
+            })
+            .collect())
+    }
+
+    pub async fn search_with_payload(
+        &self,
+        namespace: &str,
+        vector: Vec<f32>,
+        query_text: &str,
+        limit: usize,
+        filter: Option<Filter>,
+    ) -> Result<Vec<ScoredPayload>, StoreError> {
+        let name = Self::collection_name(namespace)?;
+        let prefetch_limit = (limit as u64).max(MIN_PREFETCH_LIMIT);
+
+        let make_prefetch = |query, using, f: Option<Filter>| -> PrefetchQueryBuilder {
+            let mut b = PrefetchQueryBuilder::default()
+                .query(query)
+                .using(using)
+                .limit(prefetch_limit);
+            if let Some(f) = f {
+                b = b.filter(f);
+            }
+            b
+        };
+
+        let dense_prefetch =
+            make_prefetch(VectorInput::new_dense(vector), DENSE_VECTOR, filter.clone());
+        let sparse_prefetch = make_prefetch(
+            VectorInput::from(Document::new(query_text, BM25_TOKENIZER)),
+            SPARSE_VECTOR,
+            filter,
+        );
+
+        let builder = QueryPointsBuilder::new(&name)
+            .add_prefetch(dense_prefetch)
+            .add_prefetch(sparse_prefetch)
+            .query(Query::new_fusion(Fusion::Rrf))
+            .limit(limit as u64)
+            .with_payload(true);
+
+        let results = self
+            .client
+            .query(builder)
+            .await
+            .map_err(|e| StoreError::Qdrant(e.to_string()))?;
+
+        Ok(results
+            .result
+            .into_iter()
+            .filter_map(|point| {
+                let id = match point.id?.point_id_options? {
+                    PointIdOptions::Uuid(s) => s,
+                    PointIdOptions::Num(n) => n.to_string(),
+                };
+                Some(ScoredPayload {
+                    id,
+                    score: point.score,
+                    payload: point.payload.into(),
+                })
             })
             .collect())
     }
