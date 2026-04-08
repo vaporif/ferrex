@@ -53,3 +53,6 @@ check-typos:
 
 lint-actions:
     actionlint
+
+e2e:
+    cargo nextest run -p ferrex-core -p ferrex-server --test '*' --no-capture
