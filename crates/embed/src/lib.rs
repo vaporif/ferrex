@@ -171,6 +171,20 @@ impl Embedder {
         .map_err(|e| EmbedError::Embed(e.to_string()))?
     }
 
+    pub async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        let model = Arc::clone(&self.model);
+        let texts: Vec<String> = texts.iter().copied().map(String::from).collect();
+        tokio::task::spawn_blocking(move || {
+            let mut model = model.lock().expect("embedding model lock poisoned");
+            let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+            model
+                .embed(refs, None)
+                .map_err(|e| EmbedError::Embed(e.to_string()))
+        })
+        .await
+        .map_err(|e| EmbedError::Embed(e.to_string()))?
+    }
+
     pub const fn dimension(&self) -> usize {
         self.tier.dimension()
     }
