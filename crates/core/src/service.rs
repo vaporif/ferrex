@@ -25,6 +25,7 @@ const MAX_RECALL_LIMIT: usize = 200;
 const MIN_RERANK_POOL_SIZE: usize = 20;
 const STATS_RECENT_COUNT: i64 = 5;
 const MAX_SCAN_MEMORIES: usize = 10_000;
+const ACCESS_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub struct MemoryService {
     pub(crate) embedder: Embedder,
@@ -112,7 +113,7 @@ impl MemoryService {
                     tokio::select! {
                         biased;
                         () = token.cancelled() => break,
-                        () = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+                        () = tokio::time::sleep(ACCESS_FLUSH_INTERVAL) => {
                             let ids = tracker.drain();
                             if !ids.is_empty()
                                 && let Err(e) = store.update_last_accessed(&ids).await {

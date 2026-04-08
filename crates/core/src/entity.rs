@@ -85,8 +85,8 @@ impl<M: MetadataStore> EntityResolver<'_, M> {
     ) -> Result<Entity, CoreError> {
         let embedding = self.embedder.embed(normalized).await?;
         let filter = Filter::must([Condition::matches(
-            ferrex_store::POINT_TYPE_FIELD,
-            ferrex_store::POINT_TYPE_ENTITY.to_string(),
+            ferrex_store::QdrantField::POINT_TYPE,
+            ferrex_store::PointType::ENTITY.to_string(),
         )]);
         let results = self
             .vector_store
@@ -134,10 +134,10 @@ impl<M: MetadataStore> EntityResolver<'_, M> {
             .parse()
             .map_err(|e| CoreError::Validation(format!("invalid entity UUID: {e}")))?;
         let payload = Payload::try_from(serde_json::json!({
-            "entity_id": entity.id,
-            "name": entity.name,
-            ferrex_store::POINT_TYPE_FIELD: ferrex_store::POINT_TYPE_ENTITY,
-            "namespace": namespace,
+            ferrex_store::QdrantField::ENTITY_ID: entity.id,
+            ferrex_store::QdrantField::NAME: entity.name,
+            ferrex_store::QdrantField::POINT_TYPE: ferrex_store::PointType::ENTITY,
+            ferrex_store::QdrantField::NAMESPACE: namespace,
         }))
         .map_err(|e| CoreError::Validation(e.to_string()))?;
 

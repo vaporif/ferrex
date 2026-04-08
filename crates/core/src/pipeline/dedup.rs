@@ -18,10 +18,13 @@ pub async fn run(ctx: &StoreContext<'_>, vectors: &VectorStore) -> Result<(), Co
 
     let filter = Filter::must(vec![
         Condition::matches(
-            ferrex_store::POINT_TYPE_FIELD,
-            ferrex_store::POINT_TYPE_MEMORY.to_string(),
+            ferrex_store::QdrantField::POINT_TYPE,
+            ferrex_store::PointType::MEMORY.to_string(),
         ),
-        Condition::matches("memory_type", ctx.memory_type.as_str().to_string()),
+        Condition::matches(
+            ferrex_store::QdrantField::MEMORY_TYPE,
+            ctx.memory_type.as_str().to_string(),
+        ),
     ]);
 
     let results = vectors

@@ -229,13 +229,16 @@ impl MemoryService {
 
 fn build_qdrant_filter(req: &RecallRequest) -> Filter {
     let mut must_conditions = vec![Condition::matches(
-        ferrex_store::POINT_TYPE_FIELD,
-        ferrex_store::POINT_TYPE_MEMORY.to_string(),
+        ferrex_store::QdrantField::POINT_TYPE,
+        ferrex_store::PointType::MEMORY.to_string(),
     )];
 
     if let Some(ref types) = req.types {
         let type_strings: Vec<String> = types.iter().map(|t| t.as_str().to_string()).collect();
-        must_conditions.push(Condition::matches("memory_type", type_strings));
+        must_conditions.push(Condition::matches(
+            ferrex_store::QdrantField::MEMORY_TYPE,
+            type_strings,
+        ));
     }
 
     if let Some(ref range) = req.time_range {
@@ -246,7 +249,7 @@ fn build_qdrant_filter(req: &RecallRequest) -> Filter {
                 nanos: start.timestamp_subsec_nanos() as i32,
             };
             must_conditions.push(Condition::datetime_range(
-                "created_at",
+                ferrex_store::QdrantField::CREATED_AT,
                 DatetimeRange {
                     gte: Some(ts),
                     ..Default::default()
@@ -260,7 +263,7 @@ fn build_qdrant_filter(req: &RecallRequest) -> Filter {
                 nanos: end.timestamp_subsec_nanos() as i32,
             };
             must_conditions.push(Condition::datetime_range(
-                "created_at",
+                ferrex_store::QdrantField::CREATED_AT,
                 DatetimeRange {
                     lte: Some(ts),
                     ..Default::default()
@@ -276,7 +279,7 @@ fn build_qdrant_filter(req: &RecallRequest) -> Filter {
     {
         let should = entities
             .iter()
-            .map(|e| Condition::matches("entities", e.clone()))
+            .map(|e| Condition::matches(ferrex_store::QdrantField::ENTITIES, e.clone()))
             .collect();
         filter = Filter { should, ..filter };
     }

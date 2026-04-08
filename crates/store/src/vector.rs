@@ -92,10 +92,11 @@ impl VectorStore {
             .map_err(|e| StoreError::Qdrant(e.to_string()))?;
 
         for field in [
-            "memory_type",
-            "namespace",
-            "entities",
-            crate::POINT_TYPE_FIELD,
+            crate::QdrantField::MEMORY_TYPE,
+            crate::QdrantField::NAMESPACE,
+            crate::QdrantField::ENTITIES,
+            crate::QdrantField::POINT_TYPE,
+            crate::QdrantField::AGENT_ID,
         ] {
             self.client
                 .create_field_index(CreateFieldIndexCollectionBuilder::new(
@@ -110,7 +111,7 @@ impl VectorStore {
         self.client
             .create_field_index(CreateFieldIndexCollectionBuilder::new(
                 &name,
-                "created_at",
+                crate::QdrantField::CREATED_AT,
                 FieldType::Datetime,
             ))
             .await
@@ -448,7 +449,7 @@ mod tests {
             "searchable_text": content,
             "entities": Vec::<String>::new(),
             "created_at": "2026-01-01T00:00:00Z",
-            crate::POINT_TYPE_FIELD: crate::POINT_TYPE_MEMORY,
+            crate::QdrantField::POINT_TYPE: crate::PointType::MEMORY,
         }))
         .unwrap();
 
@@ -458,8 +459,8 @@ mod tests {
             .unwrap();
 
         let filter = Filter::must([Condition::matches(
-            crate::POINT_TYPE_FIELD,
-            crate::POINT_TYPE_MEMORY.to_string(),
+            crate::QdrantField::POINT_TYPE,
+            crate::PointType::MEMORY.to_string(),
         )]);
         let results = store
             .search(ns, test_vector(), "Rust programming", 10, Some(filter))
@@ -477,7 +478,7 @@ mod tests {
 
         let id = Uuid::now_v7();
         let payload = Payload::try_from(serde_json::json!({
-            crate::POINT_TYPE_FIELD: crate::POINT_TYPE_MEMORY,
+            crate::QdrantField::POINT_TYPE: crate::PointType::MEMORY,
         }))
         .unwrap();
         store
@@ -496,7 +497,7 @@ mod tests {
         let ids: Vec<Uuid> = (0..3).map(|_| Uuid::now_v7()).collect();
         for id in &ids {
             let payload = Payload::try_from(serde_json::json!({
-                crate::POINT_TYPE_FIELD: crate::POINT_TYPE_MEMORY,
+                crate::QdrantField::POINT_TYPE: crate::PointType::MEMORY,
             }))
             .unwrap();
             store
@@ -527,7 +528,7 @@ mod tests {
             "searchable_text": content,
             "entities": Vec::<String>::new(),
             "created_at": "2026-01-01T00:00:00Z",
-            crate::POINT_TYPE_FIELD: crate::POINT_TYPE_MEMORY,
+            crate::QdrantField::POINT_TYPE: crate::PointType::MEMORY,
         }))
         .unwrap();
 

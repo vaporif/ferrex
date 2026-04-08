@@ -37,6 +37,8 @@ fn main() -> eyre::Result<()> {
 
         Some(Command::Diagnose) => commands::diagnose(cli::build_config(cli)?),
 
+        Some(Command::Nuke { force }) => commands::nuke(cli::build_config(cli)?, force),
+
         Some(Command::Journal {
             journal:
                 JournalCommand::Show {
