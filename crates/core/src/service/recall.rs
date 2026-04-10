@@ -22,7 +22,10 @@ impl MemoryService {
             .limit
             .unwrap_or(DEFAULT_RECALL_LIMIT)
             .min(MAX_RECALL_LIMIT);
-        let candidate_pool_size = if req.include_stale == Some(false) {
+        // Widen when post-fetch filters will drop rows below `limit`.
+        let needs_wider_pool =
+            req.include_stale == Some(false) || req.as_of.is_some();
+        let candidate_pool_size = if needs_wider_pool {
             limit.max(MIN_RERANK_POOL_SIZE) * 2
         } else {
             limit.max(MIN_RERANK_POOL_SIZE)
@@ -51,6 +54,7 @@ impl MemoryService {
             tr.end.map(|e| e.timestamp()).hash(&mut h);
             h.finish()
         });
+        let as_of_nanos = req.as_of.and_then(|t| t.timestamp_nanos_opt());
         let cache_key = cache::ResultCacheKey::new(&cache::ResultCacheKeyInput {
             embedding: &embedding,
             types: type_strs.as_deref(),
@@ -60,6 +64,7 @@ impl MemoryService {
             include_stale: req.include_stale,
             include_invalidated: req.include_invalidated,
             time_range_hash: time_hash,
+            as_of_nanos,
             explain: req.explain,
         });
 
@@ -91,9 +96,23 @@ impl MemoryService {
         let ids: Vec<String> = results.iter().map(|(id, _)| id.clone()).collect();
         let memories = self.metadata_store.get_memories_by_ids(&ids).await?;
 
+        let as_of = req.as_of;
+        let include_invalidated = req.include_invalidated.unwrap_or(false);
         let memory_map: HashMap<&str, &ferrex_store::Memory> = memories
             .iter()
-            .filter(|m| req.include_invalidated.unwrap_or(false) || m.t_invalid.is_none())
+            .filter(|m| {
+                let Some(as_of) = as_of else {
+                    return include_invalidated || m.t_invalid.is_none();
+                };
+                let effective_start = m.t_valid.unwrap_or(m.created_at);
+                if effective_start > as_of {
+                    return false;
+                }
+                if include_invalidated {
+                    return true;
+                }
+                m.t_invalid.is_none_or(|ti| ti > as_of)
+            })
             .map(|m| (m.id.as_str(), m))
             .collect();
 

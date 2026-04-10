@@ -296,6 +296,7 @@ async fn test_golden_set_recall_at_3() {
             include_stale: None,
             include_invalidated: None,
             time_range: None,
+            as_of: None,
             validate_ids: None,
             explain: false,
         };
@@ -370,6 +371,7 @@ async fn test_golden_set_cache_returns_identical_results() {
             include_stale: None,
             include_invalidated: None,
             time_range: None,
+            as_of: None,
             validate_ids: None,
             explain: false,
         };
@@ -389,6 +391,7 @@ async fn test_golden_set_cache_returns_identical_results() {
             include_stale: None,
             include_invalidated: None,
             time_range: None,
+            as_of: None,
             validate_ids: None,
             explain: false,
         };

@@ -25,6 +25,7 @@ async fn diagnostics_returns_nonzero_after_operations() {
         include_stale: None,
         include_invalidated: None,
         time_range: None,
+        as_of: None,
         validate_ids: None,
         explain: false,
     })

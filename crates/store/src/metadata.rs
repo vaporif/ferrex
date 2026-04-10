@@ -134,10 +134,13 @@ pub trait MetadataStore: Send + Sync {
     ) -> impl Future<Output = Result<(), StoreError>> + Send {
         async { Ok(()) }
     }
+    /// Counts of live memories by type. Rows with unrecognized `memory_type`
+    /// are logged and dropped, so the sum can lag the raw row count after a
+    /// schema change.
     fn memory_count_by_type(
         &self,
         _namespace: &str,
-    ) -> impl Future<Output = Result<HashMap<String, u64>, StoreError>> + Send {
+    ) -> impl Future<Output = Result<HashMap<MemoryType, u64>, StoreError>> + Send {
         async { Ok(HashMap::new()) }
     }
     fn storage_size_bytes(&self) -> impl Future<Output = Result<u64, StoreError>> + Send {
@@ -148,6 +151,41 @@ pub trait MetadataStore: Send + Sync {
         _namespace: &str,
     ) -> impl Future<Output = Result<u64, StoreError>> + Send {
         async { Ok(0) }
+    }
+
+    /// Memories linked to `entity_id`, newest first by
+    /// `COALESCE(t_valid, created_at)`. Type filter runs in SQL before `LIMIT`.
+    fn timeline_by_entity(
+        &self,
+        _entity_id: &str,
+        _namespace: &str,
+        _limit: i64,
+        _include_invalidated: bool,
+        _types: Option<&[MemoryType]>,
+    ) -> impl Future<Output = Result<Vec<Memory>, StoreError>> + Send {
+        async { Ok(vec![]) }
+    }
+
+    fn top_entities(
+        &self,
+        _namespace: &str,
+        _limit: i64,
+    ) -> impl Future<Output = Result<Vec<(String, u64)>, StoreError>> + Send {
+        async { Ok(vec![]) }
+    }
+
+    fn top_predicates(
+        &self,
+        _namespace: &str,
+        _limit: i64,
+    ) -> impl Future<Output = Result<Vec<(String, u64)>, StoreError>> + Send {
+        async { Ok(vec![]) }
+    }
+
+    fn list_namespaces(
+        &self,
+    ) -> impl Future<Output = Result<Vec<String>, StoreError>> + Send {
+        async { Ok(vec![]) }
     }
 
     fn insert_pending_op(
@@ -1089,7 +1127,7 @@ impl MetadataStore for SqliteStore {
     async fn memory_count_by_type(
         &self,
         namespace: &str,
-    ) -> Result<HashMap<String, u64>, StoreError> {
+    ) -> Result<HashMap<MemoryType, u64>, StoreError> {
         let ns = namespace.to_string();
         self.with_reader(move |conn| {
             let mut stmt = conn.prepare(
@@ -1099,9 +1137,20 @@ impl MetadataStore for SqliteStore {
             let mut map = HashMap::new();
             let mut rows = stmt.query(rusqlite::params![ns])?;
             while let Some(row) = rows.next()? {
-                let mt: String = row.get(0)?;
+                let raw: String = row.get(0)?;
                 let count: u64 = row.get::<_, i64>(1)?.cast_unsigned();
-                map.insert(mt, count);
+                match raw.parse::<MemoryType>() {
+                    Ok(mt) => {
+                        map.insert(mt, count);
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            unknown_memory_type = %raw,
+                            count,
+                            "memory_count_by_type: dropped rows with unrecognized memory_type",
+                        );
+                    }
+                }
             }
             Ok(map)
         })
@@ -1133,6 +1182,148 @@ impl MetadataStore for SqliteStore {
                 |r| r.get(0),
             )?;
             Ok(count.cast_unsigned())
+        })
+        .await
+    }
+
+    async fn timeline_by_entity(
+        &self,
+        entity_id: &str,
+        namespace: &str,
+        limit: i64,
+        include_invalidated: bool,
+        types: Option<&[MemoryType]>,
+    ) -> Result<Vec<Memory>, StoreError> {
+        // ?1..=?3 are entity_id, namespace, limit. Type filters start at ?4.
+        const FIXED_PARAM_COUNT: usize = 3;
+
+        let entity_id = entity_id.to_string();
+        let ns = namespace.to_string();
+        let type_strs: Vec<&'static str> = types
+            .unwrap_or(&[])
+            .iter()
+            .map(MemoryType::as_str)
+            .collect();
+        self.with_reader(move |conn| {
+            let invalid_clause = if include_invalidated {
+                ""
+            } else {
+                " AND m.t_invalid IS NULL"
+            };
+            let type_clause = if type_strs.is_empty() {
+                String::new()
+            } else {
+                let placeholders = (1..=type_strs.len())
+                    .map(|i| format!("?{}", i + FIXED_PARAM_COUNT))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(" AND m.memory_type IN ({placeholders})")
+            };
+            let sql = format!(
+                "SELECT m.*, GROUP_CONCAT(ae.name, '\u{1f}') AS entity_names \
+                 FROM memories m \
+                 INNER JOIN memory_entities me ON me.memory_id = m.id AND me.entity_id = ?1 \
+                 LEFT JOIN memory_entities me_all ON me_all.memory_id = m.id \
+                 LEFT JOIN entities ae ON ae.id = me_all.entity_id \
+                 WHERE m.namespace = ?2{invalid_clause}{type_clause} \
+                 GROUP BY m.id \
+                 ORDER BY COALESCE(m.t_valid, m.created_at) DESC \
+                 LIMIT ?3"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let mut params: Vec<&dyn rusqlite::ToSql> =
+                Vec::with_capacity(FIXED_PARAM_COUNT + type_strs.len());
+            params.extend([
+                &entity_id as &dyn rusqlite::ToSql,
+                &ns as &dyn rusqlite::ToSql,
+                &limit as &dyn rusqlite::ToSql,
+            ]);
+            params.extend(type_strs.iter().map(|s| s as &dyn rusqlite::ToSql));
+            let mut rows = stmt.query(params.as_slice())?;
+            let mut memories = Vec::new();
+            while let Some(row) = rows.next()? {
+                let entity_names: Option<String> = row.get("entity_names")?;
+                let entities: Vec<String> = entity_names
+                    .map(|s| s.split('\u{1f}').map(String::from).collect())
+                    .unwrap_or_default();
+                memories.push(row_to_memory(row, entities)?);
+            }
+            Ok(memories)
+        })
+        .await
+    }
+
+    async fn top_entities(
+        &self,
+        namespace: &str,
+        limit: i64,
+    ) -> Result<Vec<(String, u64)>, StoreError> {
+        let ns = namespace.to_string();
+        self.with_reader(move |conn| {
+            // PK on (memory_id, entity_id) makes each pair unique, so
+            // COUNT(*) equals COUNT(DISTINCT m.id) for free.
+            let mut stmt = conn.prepare_cached(
+                "SELECT e.name, COUNT(*) AS cnt \
+                 FROM entities e \
+                 INNER JOIN memory_entities me ON me.entity_id = e.id \
+                 INNER JOIN memories m ON m.id = me.memory_id \
+                 WHERE m.namespace = ?1 AND m.t_invalid IS NULL \
+                 GROUP BY e.id \
+                 ORDER BY cnt DESC \
+                 LIMIT ?2",
+            )?;
+            let mut rows = stmt.query(rusqlite::params![ns, limit])?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next()? {
+                let name: String = row.get("name")?;
+                let cnt: i64 = row.get("cnt")?;
+                out.push((name, cnt.cast_unsigned()));
+            }
+            Ok(out)
+        })
+        .await
+    }
+
+    async fn top_predicates(
+        &self,
+        namespace: &str,
+        limit: i64,
+    ) -> Result<Vec<(String, u64)>, StoreError> {
+        let ns = namespace.to_string();
+        self.with_reader(move |conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT COALESCE(normalized_predicate, predicate) AS pred, COUNT(*) AS cnt \
+                 FROM memories \
+                 WHERE namespace = ?1 AND memory_type = 'semantic' \
+                   AND t_invalid IS NULL \
+                   AND COALESCE(normalized_predicate, predicate) IS NOT NULL \
+                 GROUP BY pred \
+                 ORDER BY cnt DESC \
+                 LIMIT ?2",
+            )?;
+            let mut rows = stmt.query(rusqlite::params![ns, limit])?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next()? {
+                let pred: String = row.get("pred")?;
+                let cnt: i64 = row.get("cnt")?;
+                out.push((pred, cnt.cast_unsigned()));
+            }
+            Ok(out)
+        })
+        .await
+    }
+
+    async fn list_namespaces(&self) -> Result<Vec<String>, StoreError> {
+        self.with_reader(|conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT DISTINCT namespace FROM memories \
+                 WHERE t_invalid IS NULL \
+                 ORDER BY namespace",
+            )?;
+            let rows: Vec<String> = stmt
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
+            Ok(rows)
         })
         .await
     }
@@ -1724,8 +1915,8 @@ mod tests {
             .unwrap();
 
         let counts = store.memory_count_by_type("test").await.unwrap();
-        assert_eq!(counts.get("episodic"), Some(&2));
-        assert_eq!(counts.get("semantic"), Some(&1));
+        assert_eq!(counts.get(&MemoryType::Episodic), Some(&2));
+        assert_eq!(counts.get(&MemoryType::Semantic), Some(&1));
     }
 
     #[tokio::test]
@@ -1746,5 +1937,229 @@ mod tests {
 
         let count = store.entity_count("test").await.unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_timeline_by_entity_orders_by_t_valid_desc() {
+        let store = SqliteStore::open(":memory:").unwrap();
+        let now = Utc::now();
+
+        let entity = Entity {
+            id: "auth-mig".into(),
+            name: "auth-migration".into(),
+            aliases: vec![],
+            entity_type: None,
+            created_at: now,
+            updated_at: now,
+        };
+        store.insert_entity(&entity).await.unwrap();
+
+        let mut m_old = make_test_memory("t-old", MemoryType::Semantic);
+        m_old.t_valid = Some(now - chrono::Duration::days(10));
+        m_old.created_at = now - chrono::Duration::days(10);
+        store.insert_memory(&m_old).await.unwrap();
+        store.link_memory_entity("t-old", "auth-mig").await.unwrap();
+
+        let mut m_new = make_test_memory("t-new", MemoryType::Semantic);
+        m_new.t_valid = Some(now - chrono::Duration::days(1));
+        m_new.created_at = now - chrono::Duration::days(1);
+        store.insert_memory(&m_new).await.unwrap();
+        store.link_memory_entity("t-new", "auth-mig").await.unwrap();
+
+        let mut m_invalid = make_test_memory("t-invalid", MemoryType::Semantic);
+        m_invalid.t_valid = Some(now - chrono::Duration::days(5));
+        m_invalid.created_at = now - chrono::Duration::days(5);
+        m_invalid.t_invalid = Some(now);
+        store.insert_memory(&m_invalid).await.unwrap();
+        store
+            .link_memory_entity("t-invalid", "auth-mig")
+            .await
+            .unwrap();
+
+        let other = Entity {
+            id: "other".into(),
+            name: "unrelated".into(),
+            aliases: vec![],
+            entity_type: None,
+            created_at: now,
+            updated_at: now,
+        };
+        store.insert_entity(&other).await.unwrap();
+        let mut other_mem = make_test_memory("t-other", MemoryType::Semantic);
+        other_mem.t_valid = Some(now);
+        store.insert_memory(&other_mem).await.unwrap();
+        store.link_memory_entity("t-other", "other").await.unwrap();
+
+        let active = store
+            .timeline_by_entity("auth-mig", "test", 10, false, None)
+            .await
+            .unwrap();
+        let ids: Vec<&str> = active.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["t-new", "t-old"],
+            "should return active memories newest-first"
+        );
+
+        let with_invalid = store
+            .timeline_by_entity("auth-mig", "test", 10, true, None)
+            .await
+            .unwrap();
+        let ids: Vec<&str> = with_invalid.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["t-new", "t-invalid", "t-old"],
+            "include_invalidated=true should include superseded rows in chronological place"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_timeline_by_entity_filters_types_in_sql() {
+        // Regression: type filter must run in SQL before LIMIT. A Rust-side
+        // post-filter with a small LIMIT would silently drop rows for sparse
+        // types.
+        let store = SqliteStore::open(":memory:").unwrap();
+        let now = Utc::now();
+
+        let entity = Entity {
+            id: "proj".into(),
+            name: "project-x".into(),
+            aliases: vec![],
+            entity_type: None,
+            created_at: now,
+            updated_at: now,
+        };
+        store.insert_entity(&entity).await.unwrap();
+
+        // Three episodics newer than one semantic. limit=2 + post-filter
+        // would return [] for a semantic-only query.
+        for i in 0..3 {
+            let mut m = make_test_memory(&format!("ep-{i}"), MemoryType::Episodic);
+            m.t_valid = Some(now - chrono::Duration::hours(i64::from(i) + 1));
+            store.insert_memory(&m).await.unwrap();
+            store.link_memory_entity(&m.id, "proj").await.unwrap();
+        }
+        let mut sem = make_test_memory("sem-old", MemoryType::Semantic);
+        sem.t_valid = Some(now - chrono::Duration::days(10));
+        store.insert_memory(&sem).await.unwrap();
+        store.link_memory_entity("sem-old", "proj").await.unwrap();
+
+        let only_semantic = store
+            .timeline_by_entity("proj", "test", 2, false, Some(&[MemoryType::Semantic]))
+            .await
+            .unwrap();
+        let ids: Vec<&str> = only_semantic.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["sem-old"]);
+
+        let two_kinds = store
+            .timeline_by_entity(
+                "proj",
+                "test",
+                10,
+                false,
+                Some(&[MemoryType::Episodic, MemoryType::Semantic]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(two_kinds.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_top_entities_counts_active_only() {
+        let store = SqliteStore::open(":memory:").unwrap();
+        let now = Utc::now();
+        for (id, name) in [("e1", "tokio"), ("e2", "sqlite"), ("e3", "rare")] {
+            let entity = Entity {
+                id: id.into(),
+                name: name.into(),
+                aliases: vec![],
+                entity_type: None,
+                created_at: now,
+                updated_at: now,
+            };
+            store.insert_entity(&entity).await.unwrap();
+        }
+
+        for i in 0..3 {
+            let mem = make_test_memory(&format!("m-tokio-{i}"), MemoryType::Semantic);
+            store.insert_memory(&mem).await.unwrap();
+            store
+                .link_memory_entity(&mem.id, "e1")
+                .await
+                .unwrap();
+        }
+        for i in 0..2 {
+            let mem = make_test_memory(&format!("m-sqlite-{i}"), MemoryType::Semantic);
+            store.insert_memory(&mem).await.unwrap();
+            store
+                .link_memory_entity(&mem.id, "e2")
+                .await
+                .unwrap();
+        }
+        let mut invalid = make_test_memory("m-rare-invalid", MemoryType::Semantic);
+        invalid.t_invalid = Some(now);
+        store.insert_memory(&invalid).await.unwrap();
+        store
+            .link_memory_entity("m-rare-invalid", "e3")
+            .await
+            .unwrap();
+
+        let top = store.top_entities("test", 10).await.unwrap();
+        assert_eq!(top[0], ("tokio".to_string(), 3));
+        assert_eq!(top[1], ("sqlite".to_string(), 2));
+        assert!(
+            !top.iter().any(|(n, _)| n == "rare"),
+            "entities with only invalidated memories should be absent"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_top_predicates_prefers_normalized() {
+        let store = SqliteStore::open(":memory:").unwrap();
+
+        let mut m1 = make_test_memory("p1", MemoryType::Semantic);
+        m1.predicate = Some("uses".into());
+        m1.normalized_predicate = Some("depends_on".into());
+        store.insert_memory(&m1).await.unwrap();
+
+        let mut m2 = make_test_memory("p2", MemoryType::Semantic);
+        m2.predicate = Some("depends-on".into());
+        m2.normalized_predicate = Some("depends_on".into());
+        store.insert_memory(&m2).await.unwrap();
+
+        let mut m3 = make_test_memory("p3", MemoryType::Semantic);
+        m3.predicate = Some("owns".into());
+        m3.normalized_predicate = None;
+        store.insert_memory(&m3).await.unwrap();
+
+        let top = store.top_predicates("test", 10).await.unwrap();
+        assert_eq!(top[0], ("depends_on".to_string(), 2));
+        assert!(top.iter().any(|(p, c)| p == "owns" && *c == 1));
+    }
+
+    #[tokio::test]
+    async fn test_list_namespaces_returns_distinct_live() {
+        let store = SqliteStore::open(":memory:").unwrap();
+        let now = Utc::now();
+
+        let mut a = make_test_memory("ns-a", MemoryType::Episodic);
+        a.namespace = "alpha".into();
+        store.insert_memory(&a).await.unwrap();
+
+        let mut b = make_test_memory("ns-b", MemoryType::Episodic);
+        b.namespace = "beta".into();
+        store.insert_memory(&b).await.unwrap();
+
+        let mut b2 = make_test_memory("ns-b2", MemoryType::Episodic);
+        b2.namespace = "beta".into();
+        store.insert_memory(&b2).await.unwrap();
+
+        let mut dead = make_test_memory("ns-dead", MemoryType::Episodic);
+        dead.namespace = "gamma".into();
+        dead.t_invalid = Some(now);
+        store.insert_memory(&dead).await.unwrap();
+
+        let namespaces = store.list_namespaces().await.unwrap();
+        assert_eq!(namespaces, vec!["alpha".to_string(), "beta".to_string()]);
     }
 }

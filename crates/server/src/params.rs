@@ -46,6 +46,9 @@ pub struct RecallParams {
     /// IDs to mark as still accurate.
     pub validate_ids: Option<Vec<String>>,
     pub time_range: Option<TimeRangeParam>,
+    /// ISO-8601 instant (e.g. "2026-01-15T00:00:00Z"). Returns memories whose
+    /// validity window covered this time.
+    pub as_of: Option<String>,
     /// Include superseded memories (default false).
     pub include_invalidated: Option<bool>,
     /// Include stale memories (default true).
@@ -53,6 +56,28 @@ pub struct RecallParams {
     /// Return scoring breakdown per result.
     #[serde(default)]
     pub explain: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct TimelineParams {
+    /// Entity name or alias (resolved via the entity registry).
+    pub entity: String,
+    pub namespace: Option<String>,
+    /// Default 10, max 200.
+    pub limit: Option<usize>,
+    /// Filter by memory type, e.g. `["semantic"]`.
+    pub types: Option<Vec<String>>,
+    /// Include superseded memories (default false).
+    pub include_invalidated: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct TaxonomyParams {
+    /// Defaults to the server namespace. Omit to also list all namespaces
+    /// with live memories.
+    pub namespace: Option<String>,
+    /// Top-N size for entities and predicates. Default 10, max 100.
+    pub limit: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]

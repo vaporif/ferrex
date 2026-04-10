@@ -37,6 +37,9 @@ pub struct ResultCacheKeyInput<'a> {
     pub include_stale: Option<bool>,
     pub include_invalidated: Option<bool>,
     pub time_range_hash: Option<u64>,
+    /// Nanosecond resolution. The post-fetch filter compares full
+    /// `DateTime<Utc>`, so sub-second `as_of` values would otherwise collide.
+    pub as_of_nanos: Option<i64>,
     pub explain: bool,
 }
 
@@ -53,6 +56,7 @@ impl ResultCacheKey {
         input.include_stale.hash(&mut hasher);
         input.include_invalidated.hash(&mut hasher);
         input.time_range_hash.hash(&mut hasher);
+        input.as_of_nanos.hash(&mut hasher);
         input.explain.hash(&mut hasher);
         Self {
             hash: hasher.finish(),
@@ -217,6 +221,7 @@ mod tests {
             include_stale: None,
             include_invalidated: None,
             time_range_hash: None,
+            as_of_nanos: None,
             explain: false,
         });
         cache.put_results(&filter, results, ns).await;
@@ -242,6 +247,7 @@ mod tests {
             include_stale: None,
             include_invalidated: None,
             time_range_hash: None,
+            as_of_nanos: None,
             explain: false,
         });
         cache.put_results(&filter, vec![], ns).await;
