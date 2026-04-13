@@ -23,7 +23,7 @@ pub struct ScoredPayload {
     pub payload: Payload,
 }
 
-const QDRANT_CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+const QDRANT_CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 pub(crate) const DENSE_VECTOR: &str = "dense";
 const SPARSE_VECTOR: &str = "sparse";
 const BM25_TOKENIZER: &str = "Qdrant/bm25";

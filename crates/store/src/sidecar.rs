@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use crate::StoreError;
 
-const HEALTH_CHECK_CLIENT_TIMEOUT: Duration = Duration::from_secs(2);
-const HEALTH_CHECK_INITIAL_DELAY: Duration = Duration::from_millis(100);
-const HEALTH_CHECK_MAX_TIMEOUT: Duration = Duration::from_secs(5);
-const HEALTH_CHECK_MAX_DELAY: Duration = Duration::from_secs(1);
+const HEALTH_CHECK_CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
+const HEALTH_CHECK_INITIAL_DELAY: Duration = Duration::from_millis(200);
+const HEALTH_CHECK_MAX_TIMEOUT: Duration = Duration::from_secs(30);
+const HEALTH_CHECK_MAX_DELAY: Duration = Duration::from_secs(2);
 const MIN_PORT: u16 = 2;
 
 pub struct QdrantSidecar {
