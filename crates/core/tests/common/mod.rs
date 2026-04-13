@@ -110,6 +110,7 @@ pub fn recall_query(query: &str) -> RecallRequest {
         include_stale: None,
         include_invalidated: None,
         time_range: None,
+        as_of: None,
         validate_ids: None,
         explain: false,
     }

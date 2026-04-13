@@ -4,6 +4,8 @@ mod recall;
 mod reflect_op;
 mod stats;
 mod store;
+mod taxonomy;
+mod timeline;
 
 use std::collections::HashMap;
 use std::sync::Arc;

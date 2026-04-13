@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use ferrex_core::{
     CoreError, ForgetRequest, MemoryService, RecallRequest, ReflectRequest, StatsRequest,
-    StoreRequest,
+    StoreRequest, TaxonomyRequest, TimelineRequest,
 };
 use rmcp::{
     ErrorData, ServerHandler,
@@ -12,7 +12,28 @@ use rmcp::{
 };
 
 use crate::hint;
-use crate::params::{ForgetParams, RecallParams, ReflectParams, StatsParams, StoreParams};
+use crate::params::{
+    ForgetParams, RecallParams, ReflectParams, StatsParams, StoreParams, TaxonomyParams,
+    TimelineParams,
+};
+
+fn parse_memory_types(
+    types: Option<Vec<String>>,
+) -> Result<Option<Vec<ferrex_core::MemoryType>>, ErrorData> {
+    types
+        .map(|ts| {
+            ts.iter()
+                .map(|s| s.parse::<ferrex_core::MemoryType>())
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()
+        .map_err(|e| ErrorData::invalid_params(e, None))
+}
+
+fn parse_datetime(s: &str, field: &str) -> Result<chrono::DateTime<chrono::Utc>, ErrorData> {
+    s.parse::<chrono::DateTime<chrono::Utc>>()
+        .map_err(|e| ErrorData::invalid_params(format!("invalid {field}: {e}"), None))
+}
 
 #[derive(Clone)]
 pub struct FerrexServer {
@@ -120,27 +141,22 @@ impl FerrexServer {
         description = "Search memories by semantic similarity. Returns the most relevant memories matching your query. Filter by type or entity names. Use this when you need to remember something."
     )]
     async fn recall(&self, Parameters(p): Parameters<RecallParams>) -> Result<String, ErrorData> {
-        let types = p
-            .types
-            .map(|ts| {
-                ts.iter()
-                    .map(|s| s.parse::<ferrex_core::MemoryType>())
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .transpose()
-            .map_err(|e| ErrorData::invalid_params(e, None))?;
+        let types = parse_memory_types(p.types)?;
 
         let time_range = p
             .time_range
             .map(|tr| {
-                let parse = |s: &str| -> Result<chrono::DateTime<chrono::Utc>, ErrorData> {
-                    s.parse::<chrono::DateTime<chrono::Utc>>().map_err(|e| {
-                        ErrorData::invalid_params(format!("invalid datetime: {e}"), None)
-                    })
-                };
                 let range = ferrex_core::TimeRange {
-                    start: tr.start.as_deref().map(parse).transpose()?,
-                    end: tr.end.as_deref().map(parse).transpose()?,
+                    start: tr
+                        .start
+                        .as_deref()
+                        .map(|s| parse_datetime(s, "datetime"))
+                        .transpose()?,
+                    end: tr
+                        .end
+                        .as_deref()
+                        .map(|s| parse_datetime(s, "datetime"))
+                        .transpose()?,
                 };
                 if let (Some(s), Some(e)) = (range.start, range.end)
                     && s > e
@@ -154,6 +170,12 @@ impl FerrexServer {
             })
             .transpose()?;
 
+        let as_of = p
+            .as_of
+            .as_deref()
+            .map(|s| parse_datetime(s, "as_of datetime"))
+            .transpose()?;
+
         let req = RecallRequest {
             query: p.query,
             types,
@@ -163,6 +185,7 @@ impl FerrexServer {
             include_stale: p.include_stale,
             include_invalidated: p.include_invalidated,
             time_range,
+            as_of,
             validate_ids: p.validate_ids,
             explain: p.explain,
         };
@@ -235,6 +258,43 @@ impl FerrexServer {
             diagnostics: p.diagnostics,
         };
         let resp = self.service.stats(req).await.map_err(map_error)?;
+        Ok(serde_json::to_string_pretty(&resp).unwrap_or_default())
+    }
+
+    #[tool(
+        name = "timeline",
+        description = "Return memories touching an entity, newest first by t_valid, falling back to created_at when null. Entity names are resolved via aliases. Use this to pull an entity's history without going through semantic search."
+    )]
+    async fn timeline(
+        &self,
+        Parameters(p): Parameters<TimelineParams>,
+    ) -> Result<String, ErrorData> {
+        let types = parse_memory_types(p.types)?;
+
+        let req = TimelineRequest {
+            entity: p.entity,
+            namespace: p.namespace,
+            limit: p.limit,
+            types,
+            include_invalidated: p.include_invalidated,
+        };
+        let resp = self.service.timeline(req).await.map_err(map_error)?;
+        Ok(serde_json::to_string_pretty(&resp).unwrap_or_default())
+    }
+
+    #[tool(
+        name = "taxonomy",
+        description = "Structural overview: per-type counts, top entities by memory count, top predicates, and (when no namespace is given) all namespaces with live memories. Use this before recall to discover what's in memory."
+    )]
+    async fn taxonomy(
+        &self,
+        Parameters(p): Parameters<TaxonomyParams>,
+    ) -> Result<String, ErrorData> {
+        let req = TaxonomyRequest {
+            namespace: p.namespace,
+            limit: p.limit,
+        };
+        let resp = self.service.taxonomy(req).await.map_err(map_error)?;
         Ok(serde_json::to_string_pretty(&resp).unwrap_or_default())
     }
 }

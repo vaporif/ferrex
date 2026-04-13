@@ -119,6 +119,14 @@ pub struct RecallRequest {
     pub include_stale: Option<bool>,
     pub include_invalidated: Option<bool>,
     pub time_range: Option<TimeRange>,
+    /// Point-in-time filter. Keeps rows whose validity window (`t_valid` or
+    /// `created_at` through `t_invalid`) covered this instant.
+    /// `include_invalidated = true` drops the end check.
+    ///
+    /// Scoring and `include_stale` still use the current clock, so a row that
+    /// was fresh at `as_of` but is stale today still gets dropped. `as_of`
+    /// asks "what did we know at T", it does not replay the whole pipeline at T.
+    pub as_of: Option<DateTime<Utc>>,
     pub validate_ids: Option<Vec<String>>,
     pub explain: bool,
 }
@@ -149,6 +157,58 @@ pub struct StatsRequest {
     pub namespace: String,
     pub detailed: Option<bool>,
     pub diagnostics: Option<bool>,
+}
+
+#[derive(Debug)]
+pub struct TimelineRequest {
+    pub entity: String,
+    pub namespace: Option<String>,
+    pub limit: Option<usize>,
+    pub types: Option<Vec<MemoryType>>,
+    pub include_invalidated: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TimelineEntry {
+    pub memory: Memory,
+    pub occurred_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TimelineResponse {
+    pub entity: String,
+    pub resolved_entity_id: Option<String>,
+    pub entries: Vec<TimelineEntry>,
+}
+
+#[derive(Debug)]
+pub struct TaxonomyRequest {
+    pub namespace: Option<String>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TaxonomyEntityEntry {
+    pub name: String,
+    pub memory_count: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TaxonomyPredicateEntry {
+    pub predicate: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TaxonomyResponse {
+    pub namespace: String,
+    pub total_memories: u64,
+    pub by_type: HashMap<MemoryType, u64>,
+    pub top_entities: Vec<TaxonomyEntityEntry>,
+    pub top_predicates: Vec<TaxonomyPredicateEntry>,
+    /// Distinct namespaces with live memories. `None` when the request was scoped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub all_namespaces: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]

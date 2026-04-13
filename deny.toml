@@ -6,6 +6,7 @@ all-features = true
 ignore = [
     { id = "RUSTSEC-2024-0436", reason = "paste unmaintained — transitive dep from tokenizers" },
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained — transitive dep from tonic/qdrant-client" },
+    { id = "RUSTSEC-2025-0119", reason = "number_prefix unmaintained — transitive dep from fastembed/hf-hub/indicatif" },
 ]
 
 [licenses]

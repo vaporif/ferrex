@@ -53,6 +53,8 @@ pub fn migrate(conn: &Connection) -> Result<(), StoreError> {
             FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE,
             FOREIGN KEY (entity_id) REFERENCES entities(id) ON DELETE CASCADE
         );
+        -- PK leads with memory_id; entity_id lookups need this index.
+        CREATE INDEX IF NOT EXISTS idx_memory_entities_entity ON memory_entities(entity_id);
 
         CREATE TABLE IF NOT EXISTS metadata (
             key TEXT PRIMARY KEY,

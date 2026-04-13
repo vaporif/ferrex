@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use ferrex_core::{
     CoreError, ForgetRequest, PredicatesConfig, RecallRequest, StatsRequest, StoreRequest,
+    TaxonomyRequest, TimelineRequest,
 };
 use ferrex_store::MemoryType;
 
@@ -51,6 +52,7 @@ async fn conflict_update_invalidates_old_fact() {
             include_stale: None,
             include_invalidated: None,
             time_range: None,
+            as_of: None,
             validate_ids: None,
             explain: false,
         })
@@ -112,6 +114,7 @@ async fn supersedes_skips_dedup_and_conflict() {
             include_stale: None,
             include_invalidated: None,
             time_range: None,
+            as_of: None,
             validate_ids: None,
             explain: false,
         })
@@ -149,6 +152,7 @@ async fn forget_removes_from_both_stores() {
             include_stale: None,
             include_invalidated: None,
             time_range: None,
+            as_of: None,
             validate_ids: None,
             explain: false,
         })
@@ -452,6 +456,7 @@ async fn recall_explain_includes_scoring_breakdown() {
             include_stale: None,
             include_invalidated: None,
             time_range: None,
+            as_of: None,
             validate_ids: None,
             explain: true,
         })
@@ -493,4 +498,140 @@ async fn recall_no_explain_omits_scoring() {
         results[0].scoring.is_none(),
         "scoring should be None when explain=false"
     );
+}
+
+#[tokio::test]
+async fn recall_as_of_in_future_returns_stored_memories() {
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
+    svc.store(episodic("The auth service was deployed"))
+        .await
+        .unwrap();
+
+    let future = chrono::Utc::now() + chrono::Duration::days(1);
+    let mut req = recall_query("auth deployment");
+    req.as_of = Some(future);
+    let results = svc.recall(req).await.unwrap();
+    assert!(
+        !results.is_empty(),
+        "as_of in the future should include memories whose validity has begun"
+    );
+}
+
+#[tokio::test]
+async fn recall_as_of_before_storage_returns_empty() {
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
+    svc.store(episodic("An event that happened today"))
+        .await
+        .unwrap();
+
+    let past = chrono::Utc::now() - chrono::Duration::days(365);
+    let mut req = recall_query("event today");
+    req.as_of = Some(past);
+    let results = svc.recall(req).await.unwrap();
+    assert!(
+        results.is_empty(),
+        "as_of before storage should exclude memories whose validity hadn't begun"
+    );
+}
+
+#[tokio::test]
+async fn timeline_returns_memories_for_known_entity() {
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
+    svc.store(StoreRequest {
+        content: Some("auth-service rolled out canary".into()),
+        memory_type: Some(MemoryType::Episodic),
+        subject: None,
+        predicate: None,
+        object: None,
+        confidence: None,
+        source: None,
+        context: None,
+        entities: vec!["auth-service".into()],
+        namespace: None,
+        supersedes: None,
+    })
+    .await
+    .unwrap();
+
+    let resp = svc
+        .timeline(TimelineRequest {
+            entity: "auth-service".into(),
+            namespace: None,
+            limit: Some(10),
+            types: None,
+            include_invalidated: None,
+        })
+        .await
+        .unwrap();
+    assert!(resp.resolved_entity_id.is_some(), "entity should resolve");
+    assert_eq!(resp.entries.len(), 1);
+}
+
+#[tokio::test]
+async fn timeline_unknown_entity_returns_empty() {
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
+    let resp = svc
+        .timeline(TimelineRequest {
+            entity: "no-such-thing".into(),
+            namespace: None,
+            limit: None,
+            types: None,
+            include_invalidated: None,
+        })
+        .await
+        .unwrap();
+    assert!(resp.resolved_entity_id.is_none());
+    assert!(resp.entries.is_empty());
+}
+
+#[tokio::test]
+async fn taxonomy_scoped_reports_per_type_counts_and_no_namespace_list() {
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
+    svc.store(episodic("first event")).await.unwrap();
+    svc.store(episodic("second unrelated event")).await.unwrap();
+    svc.store(semantic("alice", "likes", "tea")).await.unwrap();
+
+    let resp = svc
+        .taxonomy(TaxonomyRequest {
+            namespace: Some(ctx.namespace.clone()),
+            limit: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(resp.total_memories, 3);
+    assert_eq!(resp.by_type.get(&MemoryType::Episodic), Some(&2));
+    assert_eq!(resp.by_type.get(&MemoryType::Semantic), Some(&1));
+    assert!(
+        resp.all_namespaces.is_none(),
+        "all_namespaces should be omitted when caller scopes the request"
+    );
+    // If `MemoryType` stops being a plain string, `by_type` stops being a
+    // JSON object.
+    let json = serde_json::to_string(&resp).expect("TaxonomyResponse must be JSON-serializable");
+    assert!(json.contains("\"episodic\""));
+    assert!(json.contains("\"semantic\""));
+}
+
+#[tokio::test]
+async fn taxonomy_unscoped_includes_namespace_list() {
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
+    svc.store(episodic("an event")).await.unwrap();
+
+    let resp = svc
+        .taxonomy(TaxonomyRequest {
+            namespace: None,
+            limit: None,
+        })
+        .await
+        .unwrap();
+    let ns_list = resp
+        .all_namespaces
+        .expect("unscoped taxonomy should populate all_namespaces");
+    assert!(ns_list.contains(&ctx.namespace));
 }
