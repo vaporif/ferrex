@@ -593,12 +593,8 @@ async fn taxonomy_scoped_reports_per_type_counts_and_no_namespace_list() {
     let ctx = common::TestContext::new().await;
     let svc = &ctx.service;
     svc.store(episodic("first event")).await.unwrap();
-    svc.store(episodic("second unrelated event"))
-        .await
-        .unwrap();
-    svc.store(semantic("alice", "likes", "tea"))
-        .await
-        .unwrap();
+    svc.store(episodic("second unrelated event")).await.unwrap();
+    svc.store(semantic("alice", "likes", "tea")).await.unwrap();
 
     let resp = svc
         .taxonomy(TaxonomyRequest {

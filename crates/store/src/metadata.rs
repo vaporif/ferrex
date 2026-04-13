@@ -182,9 +182,7 @@ pub trait MetadataStore: Send + Sync {
         async { Ok(vec![]) }
     }
 
-    fn list_namespaces(
-        &self,
-    ) -> impl Future<Output = Result<Vec<String>, StoreError>> + Send {
+    fn list_namespaces(&self) -> impl Future<Output = Result<Vec<String>, StoreError>> + Send {
         async { Ok(vec![]) }
     }
 
@@ -2083,18 +2081,12 @@ mod tests {
         for i in 0..3 {
             let mem = make_test_memory(&format!("m-tokio-{i}"), MemoryType::Semantic);
             store.insert_memory(&mem).await.unwrap();
-            store
-                .link_memory_entity(&mem.id, "e1")
-                .await
-                .unwrap();
+            store.link_memory_entity(&mem.id, "e1").await.unwrap();
         }
         for i in 0..2 {
             let mem = make_test_memory(&format!("m-sqlite-{i}"), MemoryType::Semantic);
             store.insert_memory(&mem).await.unwrap();
-            store
-                .link_memory_entity(&mem.id, "e2")
-                .await
-                .unwrap();
+            store.link_memory_entity(&mem.id, "e2").await.unwrap();
         }
         let mut invalid = make_test_memory("m-rare-invalid", MemoryType::Semantic);
         invalid.t_invalid = Some(now);

@@ -158,7 +158,9 @@ async fn test_tools_list_returns_all_tools() {
     assert!(names.contains(&"forget"), "missing forget tool");
     assert!(names.contains(&"reflect"), "missing reflect tool");
     assert!(names.contains(&"stats"), "missing stats tool");
-    assert_eq!(names.len(), 5, "unexpected tool count: {names:?}");
+    assert!(names.contains(&"timeline"), "missing timeline tool");
+    assert!(names.contains(&"taxonomy"), "missing taxonomy tool");
+    assert_eq!(names.len(), 7, "unexpected tool count: {names:?}");
 
     let store_tool = tools.iter().find(|t| t["name"] == "store").unwrap();
     let props = &store_tool["inputSchema"]["properties"];

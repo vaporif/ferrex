@@ -11,10 +11,7 @@ const MAX_TAXONOMY_LIMIT: usize = 100;
 
 impl MemoryService {
     #[tracing::instrument(name = "taxonomy", skip_all, fields(namespace))]
-    pub async fn taxonomy(
-        &self,
-        req: TaxonomyRequest,
-    ) -> Result<TaxonomyResponse, CoreError> {
+    pub async fn taxonomy(&self, req: TaxonomyRequest) -> Result<TaxonomyResponse, CoreError> {
         let scope_given = req.namespace.is_some();
         let namespace = req
             .namespace

@@ -23,8 +23,7 @@ impl MemoryService {
             .unwrap_or(DEFAULT_RECALL_LIMIT)
             .min(MAX_RECALL_LIMIT);
         // Widen when post-fetch filters will drop rows below `limit`.
-        let needs_wider_pool =
-            req.include_stale == Some(false) || req.as_of.is_some();
+        let needs_wider_pool = req.include_stale == Some(false) || req.as_of.is_some();
         let candidate_pool_size = if needs_wider_pool {
             limit.max(MIN_RERANK_POOL_SIZE) * 2
         } else {

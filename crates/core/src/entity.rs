@@ -148,7 +148,7 @@ impl<M: MetadataStore> EntityResolver<'_, M> {
     }
 }
 
-fn normalize(name: &str) -> String {
+pub(crate) fn normalize(name: &str) -> String {
     name.trim()
         .to_lowercase()
         .replace(['-', '_', '/'], " ")

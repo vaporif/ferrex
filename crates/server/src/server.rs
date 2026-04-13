@@ -30,10 +30,7 @@ fn parse_memory_types(
         .map_err(|e| ErrorData::invalid_params(e, None))
 }
 
-fn parse_datetime(
-    s: &str,
-    field: &str,
-) -> Result<chrono::DateTime<chrono::Utc>, ErrorData> {
+fn parse_datetime(s: &str, field: &str) -> Result<chrono::DateTime<chrono::Utc>, ErrorData> {
     s.parse::<chrono::DateTime<chrono::Utc>>()
         .map_err(|e| ErrorData::invalid_params(format!("invalid {field}: {e}"), None))
 }
@@ -150,8 +147,16 @@ impl FerrexServer {
             .time_range
             .map(|tr| {
                 let range = ferrex_core::TimeRange {
-                    start: tr.start.as_deref().map(|s| parse_datetime(s, "datetime")).transpose()?,
-                    end: tr.end.as_deref().map(|s| parse_datetime(s, "datetime")).transpose()?,
+                    start: tr
+                        .start
+                        .as_deref()
+                        .map(|s| parse_datetime(s, "datetime"))
+                        .transpose()?,
+                    end: tr
+                        .end
+                        .as_deref()
+                        .map(|s| parse_datetime(s, "datetime"))
+                        .transpose()?,
                 };
                 if let (Some(s), Some(e)) = (range.start, range.end)
                     && s > e
