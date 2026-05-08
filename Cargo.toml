@@ -34,7 +34,7 @@ repository = "https://github.com/vaporif/ferrex"
 
 [workspace.dependencies]
 # MCP
-rmcp = { version = "1.2", features = ["server", "transport-io", "macros"] }
+rmcp = { version = "1.4", features = ["server", "transport-io", "macros"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
