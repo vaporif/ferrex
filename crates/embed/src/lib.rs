@@ -4,18 +4,25 @@ use std::sync::{Arc, Mutex, Once};
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use fastembed::{RerankInitOptions, TextRerank};
 
-static SET_CACHE_DIR: Once = Once::new();
+static INIT_EMBED_ENV: Once = Once::new();
 
-fn ensure_cache_dir() {
-    SET_CACHE_DIR.call_once(|| {
-        if std::env::var("FASTEMBED_CACHE_DIR").is_err() {
-            let cache_dir = dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".ferrex")
-                .join("models");
-            // SAFETY: called once during init before any threads are spawned
-            unsafe { std::env::set_var("FASTEMBED_CACHE_DIR", &cache_dir) };
+/// Initialize the `FASTEMBED_CACHE_DIR` environment variable.
+///
+/// MUST be called from `main` before any threads are spawned (i.e. before any
+/// tokio runtime is built). `set_var` is not thread-safe; calling it after
+/// worker threads exist is undefined behavior on POSIX. Idempotent across
+/// repeated calls and across crates.
+pub fn init_embed_env() {
+    INIT_EMBED_ENV.call_once(|| {
+        if std::env::var_os("FASTEMBED_CACHE_DIR").is_some() {
+            return;
         }
+        let cache_dir = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".ferrex")
+            .join("models");
+        // SAFETY: documented contract — caller invokes before spawning any threads.
+        unsafe { std::env::set_var("FASTEMBED_CACHE_DIR", &cache_dir) };
     });
 }
 
@@ -139,7 +146,6 @@ pub struct Embedder {
 
 impl Embedder {
     pub fn new(tier: ModelTier) -> Result<Self, EmbedError> {
-        ensure_cache_dir();
         tracing::info!(tier = %tier, "initializing embedding model");
         let options = TextInitOptions::new(tier.to_fastembed()).with_show_download_progress(true);
         let model = TextEmbedding::try_new(options).map_err(|e| EmbedError::Init(e.to_string()))?;
@@ -200,7 +206,6 @@ pub struct Reranker {
 
 impl Reranker {
     pub fn new(tier: RerankerTier) -> Result<Self, EmbedError> {
-        ensure_cache_dir();
         tracing::info!(tier = %tier, "initializing reranker model");
         let options = RerankInitOptions::new(tier.to_fastembed()).with_show_download_progress(true);
         let model = TextRerank::try_new(options).map_err(|e| EmbedError::Init(e.to_string()))?;

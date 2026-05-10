@@ -1,26 +1,125 @@
+use chrono::{DateTime, Utc};
 use qdrant_client::qdrant::{
-    CreateCollectionBuilder, CreateFieldIndexCollectionBuilder, DeletePointsBuilder, Distance,
-    Document, FieldType, Filter, Fusion, Modifier, NamedVectors, PointStruct, PrefetchQueryBuilder,
-    Query, QueryPointsBuilder, ScrollPointsBuilder, SparseVectorParamsBuilder,
-    SparseVectorsConfigBuilder, UpsertPointsBuilder, VectorInput, VectorParamsBuilder,
-    VectorsConfigBuilder, point_id::PointIdOptions,
+    Condition, CreateCollectionBuilder, CreateFieldIndexCollectionBuilder, DatetimeRange,
+    DeletePointsBuilder, Distance, Document, FieldType, Filter, Fusion, Modifier, NamedVectors,
+    PointStruct, PrefetchQueryBuilder, Query, QueryPointsBuilder, ScrollPointsBuilder,
+    SparseVectorParamsBuilder, SparseVectorsConfigBuilder, Timestamp, UpsertPointsBuilder,
+    VectorInput, VectorParamsBuilder, VectorsConfigBuilder, point_id::PointIdOptions,
 };
 use qdrant_client::{Payload, Qdrant};
 use uuid::Uuid;
 
-use crate::StoreError;
+use crate::{MemoryType, StoreError};
 
-pub struct BatchPoint<'a> {
-    pub id: Uuid,
-    pub vector: Vec<f32>,
-    pub content_text: &'a str,
-    pub payload: Payload,
+/// Filter spec for memory searches. Builder over the abstract query, not over
+/// Qdrant types — keeps the Qdrant dep contained in this crate.
+#[derive(Debug, Default, Clone)]
+pub struct MemorySearch {
+    pub memory_types: Vec<MemoryType>,
+    pub entities_any: Vec<String>,
+    pub created_after: Option<DateTime<Utc>>,
+    pub created_before: Option<DateTime<Utc>>,
 }
 
-pub struct ScoredPayload {
-    pub id: String,
-    pub score: f32,
-    pub payload: Payload,
+impl MemorySearch {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn with_types(mut self, types: Vec<MemoryType>) -> Self {
+        self.memory_types = types;
+        self
+    }
+    pub fn only_type(mut self, t: MemoryType) -> Self {
+        self.memory_types = vec![t];
+        self
+    }
+    pub fn with_entities(mut self, entities: Vec<String>) -> Self {
+        self.entities_any = entities;
+        self
+    }
+    pub fn created_after(mut self, t: DateTime<Utc>) -> Self {
+        self.created_after = Some(t);
+        self
+    }
+    pub fn created_before(mut self, t: DateTime<Utc>) -> Self {
+        self.created_before = Some(t);
+        self
+    }
+}
+
+/// Typed payload for memory upserts. The vector store owns the Qdrant payload
+/// shape; callers stay agnostic to vendor types.
+pub struct MemoryFields<'a> {
+    pub memory_id: &'a str,
+    pub memory_type: MemoryType,
+    pub namespace: &'a str,
+    pub entities: &'a [String],
+    pub created_at: DateTime<Utc>,
+}
+
+fn memory_filter(search: &MemorySearch) -> Filter {
+    let mut must: Vec<Condition> = vec![Condition::matches(
+        crate::QdrantField::POINT_TYPE,
+        crate::PointType::MEMORY.to_string(),
+    )];
+
+    if !search.memory_types.is_empty() {
+        let types: Vec<String> = search
+            .memory_types
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect();
+        must.push(Condition::matches(crate::QdrantField::MEMORY_TYPE, types));
+    }
+
+    if let Some(start) = search.created_after {
+        #[allow(clippy::cast_possible_wrap)]
+        let ts = Timestamp {
+            seconds: start.timestamp(),
+            nanos: start.timestamp_subsec_nanos() as i32,
+        };
+        must.push(Condition::datetime_range(
+            crate::QdrantField::CREATED_AT,
+            DatetimeRange {
+                gte: Some(ts),
+                ..Default::default()
+            },
+        ));
+    }
+
+    if let Some(end) = search.created_before {
+        #[allow(clippy::cast_possible_wrap)]
+        let ts = Timestamp {
+            seconds: end.timestamp(),
+            nanos: end.timestamp_subsec_nanos() as i32,
+        };
+        must.push(Condition::datetime_range(
+            crate::QdrantField::CREATED_AT,
+            DatetimeRange {
+                lte: Some(ts),
+                ..Default::default()
+            },
+        ));
+    }
+
+    let should: Vec<Condition> = search
+        .entities_any
+        .iter()
+        .map(|e| Condition::matches(crate::QdrantField::ENTITIES, e.clone()))
+        .collect();
+
+    Filter {
+        must,
+        should,
+        ..Default::default()
+    }
+}
+
+fn entity_filter() -> Filter {
+    Filter::must([Condition::matches(
+        crate::QdrantField::POINT_TYPE,
+        crate::PointType::ENTITY.to_string(),
+    )])
 }
 
 const QDRANT_CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -151,7 +250,91 @@ impl VectorStore {
         Ok(())
     }
 
-    pub async fn upsert(
+    /// Upsert a memory point. Owns Qdrant payload construction.
+    pub async fn upsert_memory(
+        &self,
+        id: Uuid,
+        vector: Vec<f32>,
+        search_text: &str,
+        fields: MemoryFields<'_>,
+    ) -> Result<(), StoreError> {
+        let payload = Payload::try_from(serde_json::json!({
+            "memory_id": fields.memory_id,
+            crate::QdrantField::MEMORY_TYPE: fields.memory_type.as_str(),
+            crate::QdrantField::NAMESPACE: fields.namespace,
+            crate::QdrantField::SEARCHABLE_TEXT: search_text,
+            crate::QdrantField::ENTITIES: fields.entities,
+            crate::QdrantField::CREATED_AT: fields.created_at.to_rfc3339(),
+            crate::QdrantField::POINT_TYPE: crate::PointType::MEMORY,
+        }))
+        .map_err(|e| StoreError::Qdrant(e.to_string()))?;
+        self.upsert(fields.namespace, id, vector, search_text, payload)
+            .await
+    }
+
+    /// Upsert an entity point. Owns Qdrant payload construction.
+    pub async fn upsert_entity(
+        &self,
+        namespace: &str,
+        id: Uuid,
+        name: &str,
+        vector: Vec<f32>,
+    ) -> Result<(), StoreError> {
+        let payload = Payload::try_from(serde_json::json!({
+            crate::QdrantField::ENTITY_ID: id.to_string(),
+            crate::QdrantField::NAME: name,
+            crate::QdrantField::POINT_TYPE: crate::PointType::ENTITY,
+            crate::QdrantField::NAMESPACE: namespace,
+        }))
+        .map_err(|e| StoreError::Qdrant(e.to_string()))?;
+        self.upsert(namespace, id, vector, name, payload).await
+    }
+
+    /// Hybrid (dense + BM25) search filtered to memory points.
+    pub async fn search_memories(
+        &self,
+        namespace: &str,
+        vector: Vec<f32>,
+        query_text: &str,
+        limit: usize,
+        search: &MemorySearch,
+    ) -> Result<Vec<(String, f32)>, StoreError> {
+        self.search(
+            namespace,
+            vector,
+            query_text,
+            limit,
+            Some(memory_filter(search)),
+        )
+        .await
+    }
+
+    /// Dense-only search filtered to memory points (used for dedup where RRF
+    /// fusion would obscure the actual cosine similarity).
+    pub async fn search_memories_dense(
+        &self,
+        namespace: &str,
+        vector: Vec<f32>,
+        limit: usize,
+        search: &MemorySearch,
+    ) -> Result<Vec<(String, f32)>, StoreError> {
+        self.search_dense(namespace, vector, limit, Some(memory_filter(search)))
+            .await
+    }
+
+    /// Hybrid search filtered to entity points.
+    pub async fn search_entities(
+        &self,
+        namespace: &str,
+        vector: Vec<f32>,
+        query_text: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, f32)>, StoreError> {
+        self.search(namespace, vector, query_text, limit, Some(entity_filter()))
+            .await
+    }
+
+    pub(crate) async fn upsert(
         &self,
         namespace: &str,
         id: Uuid,
@@ -171,32 +354,7 @@ impl VectorStore {
         Ok(())
     }
 
-    pub async fn upsert_batch_hybrid(
-        &self,
-        namespace: &str,
-        points: Vec<BatchPoint<'_>>,
-    ) -> Result<(), StoreError> {
-        if points.is_empty() {
-            return Ok(());
-        }
-        let name = Self::collection_name(namespace)?;
-        let point_structs: Vec<PointStruct> = points
-            .into_iter()
-            .map(|p| {
-                let vectors = NamedVectors::default()
-                    .add_vector(DENSE_VECTOR, p.vector)
-                    .add_vector(SPARSE_VECTOR, Document::new(p.content_text, BM25_TOKENIZER));
-                PointStruct::new(p.id.to_string(), vectors, p.payload)
-            })
-            .collect();
-        self.client
-            .upsert_points(UpsertPointsBuilder::new(&name, point_structs).wait(true))
-            .await
-            .map_err(|e| StoreError::Qdrant(e.to_string()))?;
-        Ok(())
-    }
-
-    pub async fn search(
+    pub(crate) async fn search(
         &self,
         namespace: &str,
         vector: Vec<f32>,
@@ -253,68 +411,8 @@ impl VectorStore {
             .collect())
     }
 
-    pub async fn search_with_payload(
-        &self,
-        namespace: &str,
-        vector: Vec<f32>,
-        query_text: &str,
-        limit: usize,
-        filter: Option<Filter>,
-    ) -> Result<Vec<ScoredPayload>, StoreError> {
-        let name = Self::collection_name(namespace)?;
-        let prefetch_limit = (limit as u64).max(MIN_PREFETCH_LIMIT);
-
-        let make_prefetch = |query, using, f: Option<Filter>| -> PrefetchQueryBuilder {
-            let mut b = PrefetchQueryBuilder::default()
-                .query(query)
-                .using(using)
-                .limit(prefetch_limit);
-            if let Some(f) = f {
-                b = b.filter(f);
-            }
-            b
-        };
-
-        let dense_prefetch =
-            make_prefetch(VectorInput::new_dense(vector), DENSE_VECTOR, filter.clone());
-        let sparse_prefetch = make_prefetch(
-            VectorInput::from(Document::new(query_text, BM25_TOKENIZER)),
-            SPARSE_VECTOR,
-            filter,
-        );
-
-        let builder = QueryPointsBuilder::new(&name)
-            .add_prefetch(dense_prefetch)
-            .add_prefetch(sparse_prefetch)
-            .query(Query::new_fusion(Fusion::Rrf))
-            .limit(limit as u64)
-            .with_payload(true);
-
-        let results = self
-            .client
-            .query(builder)
-            .await
-            .map_err(|e| StoreError::Qdrant(e.to_string()))?;
-
-        Ok(results
-            .result
-            .into_iter()
-            .filter_map(|point| {
-                let id = match point.id?.point_id_options? {
-                    PointIdOptions::Uuid(s) => s,
-                    PointIdOptions::Num(n) => n.to_string(),
-                };
-                Some(ScoredPayload {
-                    id,
-                    score: point.score,
-                    payload: point.payload.into(),
-                })
-            })
-            .collect())
-    }
-
     /// Dense-only search; dedup needs actual cosine similarity, not RRF fusion scores.
-    pub async fn search_dense(
+    pub(crate) async fn search_dense(
         &self,
         namespace: &str,
         vector: Vec<f32>,
@@ -419,6 +517,23 @@ impl VectorStore {
             .await
             .map_err(|e| StoreError::Qdrant(e.to_string()))?;
         Ok(())
+    }
+
+    /// List ferrex-owned namespaces by enumerating Qdrant collections with the
+    /// `ferrex_` prefix and stripping it.
+    pub async fn list_namespaces(&self) -> Result<Vec<String>, StoreError> {
+        let resp = self
+            .client
+            .list_collections()
+            .await
+            .map_err(|e| StoreError::Qdrant(e.to_string()))?;
+        let mut namespaces: Vec<String> = resp
+            .collections
+            .into_iter()
+            .filter_map(|c| c.name.strip_prefix("ferrex_").map(str::to_owned))
+            .collect();
+        namespaces.sort();
+        Ok(namespaces)
     }
 }
 

@@ -20,6 +20,9 @@ fn main() -> eyre::Result<()> {
     let mut cli = cli::Cli::parse();
 
     init_tracing();
+    // Must run before any tokio runtime is built — sets FASTEMBED_CACHE_DIR
+    // via setenv, which is unsound after worker threads exist.
+    ferrex_embed::init_embed_env();
 
     match cli.command.take() {
         Some(Command::Audit {

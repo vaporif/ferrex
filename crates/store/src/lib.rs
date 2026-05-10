@@ -9,29 +9,28 @@ mod vector;
 pub use error::StoreError;
 pub use journal::{CompletedOp, PendingOp, PendingOpKind};
 pub use metadata::{MetadataStore, SqliteStore};
-pub use qdrant_client::{Payload, qdrant::Filter};
 pub use sidecar::QdrantSidecar;
-pub use vector::{BatchPoint, ScoredPayload, VectorStore};
+pub use vector::{MemoryFields, MemorySearch, VectorStore};
 
-pub struct QdrantField;
+pub(crate) struct QdrantField;
 
 impl QdrantField {
-    pub const POINT_TYPE: &str = "point_type";
-    pub const MEMORY_TYPE: &str = "memory_type";
-    pub const NAMESPACE: &str = "namespace";
-    pub const ENTITIES: &str = "entities";
-    pub const AGENT_ID: &str = "agent_id";
-    pub const CREATED_AT: &str = "created_at";
-    pub const SEARCHABLE_TEXT: &str = "searchable_text";
-    pub const ENTITY_ID: &str = "entity_id";
-    pub const NAME: &str = "name";
+    pub(crate) const POINT_TYPE: &str = "point_type";
+    pub(crate) const MEMORY_TYPE: &str = "memory_type";
+    pub(crate) const NAMESPACE: &str = "namespace";
+    pub(crate) const ENTITIES: &str = "entities";
+    pub(crate) const AGENT_ID: &str = "agent_id";
+    pub(crate) const CREATED_AT: &str = "created_at";
+    pub(crate) const SEARCHABLE_TEXT: &str = "searchable_text";
+    pub(crate) const ENTITY_ID: &str = "entity_id";
+    pub(crate) const NAME: &str = "name";
 }
 
-pub struct PointType;
+pub(crate) struct PointType;
 
 impl PointType {
-    pub const MEMORY: &str = "memory";
-    pub const ENTITY: &str = "entity";
+    pub(crate) const MEMORY: &str = "memory";
+    pub(crate) const ENTITY: &str = "entity";
 }
 
 use chrono::{DateTime, Utc};

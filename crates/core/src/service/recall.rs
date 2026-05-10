@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
 use chrono::Utc;
-use ferrex_store::{MemoryType, MetadataStore};
-use qdrant_client::qdrant::{Condition, DatetimeRange, Filter, Timestamp};
+use ferrex_store::{MemorySearch, MemoryType, MetadataStore};
 use uuid::Uuid;
 
 use super::{DEFAULT_RECALL_LIMIT, MAX_RECALL_LIMIT, MIN_RERANK_POOL_SIZE, MemoryService};
@@ -73,16 +72,16 @@ impl MemoryService {
             return Ok(cached);
         }
 
-        let filter = build_qdrant_filter(&req);
+        let search = build_memory_search(&req);
 
         let results = self
             .vector_store
-            .search(
+            .search_memories(
                 namespace,
                 embedding,
                 &req.query,
                 candidate_pool_size,
-                Some(filter),
+                &search,
             )
             .await?;
 
@@ -245,62 +244,27 @@ impl MemoryService {
     }
 }
 
-fn build_qdrant_filter(req: &RecallRequest) -> Filter {
-    let mut must_conditions = vec![Condition::matches(
-        ferrex_store::QdrantField::POINT_TYPE,
-        ferrex_store::PointType::MEMORY.to_string(),
-    )];
+fn build_memory_search(req: &RecallRequest) -> MemorySearch {
+    let mut search = MemorySearch::new();
 
     if let Some(ref types) = req.types {
-        let type_strings: Vec<String> = types.iter().map(|t| t.as_str().to_string()).collect();
-        must_conditions.push(Condition::matches(
-            ferrex_store::QdrantField::MEMORY_TYPE,
-            type_strings,
-        ));
+        search = search.with_types(types.clone());
     }
 
     if let Some(ref range) = req.time_range {
         if let Some(start) = range.start {
-            #[allow(clippy::cast_possible_wrap)]
-            let ts = Timestamp {
-                seconds: start.timestamp(),
-                nanos: start.timestamp_subsec_nanos() as i32,
-            };
-            must_conditions.push(Condition::datetime_range(
-                ferrex_store::QdrantField::CREATED_AT,
-                DatetimeRange {
-                    gte: Some(ts),
-                    ..Default::default()
-                },
-            ));
+            search = search.created_after(start);
         }
         if let Some(end) = range.end {
-            #[allow(clippy::cast_possible_wrap)]
-            let ts = Timestamp {
-                seconds: end.timestamp(),
-                nanos: end.timestamp_subsec_nanos() as i32,
-            };
-            must_conditions.push(Condition::datetime_range(
-                ferrex_store::QdrantField::CREATED_AT,
-                DatetimeRange {
-                    lte: Some(ts),
-                    ..Default::default()
-                },
-            ));
+            search = search.created_before(end);
         }
     }
-
-    let mut filter = Filter::must(must_conditions);
 
     if let Some(ref entities) = req.entities
         && !entities.is_empty()
     {
-        let should = entities
-            .iter()
-            .map(|e| Condition::matches(ferrex_store::QdrantField::ENTITIES, e.clone()))
-            .collect();
-        filter = Filter { should, ..filter };
+        search = search.with_entities(entities.clone());
     }
 
-    filter
+    search
 }

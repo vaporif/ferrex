@@ -34,7 +34,7 @@ impl QdrantSidecar {
         let config_path = ferrex_dir.join("qdrant-config.yaml");
 
         // lock file prevents two processes from racing to spawn qdrant
-        let lock_file = acquire_lock_file(&lock_file_path)?;
+        let lock_file = acquire_lock_file(&lock_file_path).await?;
 
         if let Some(existing_pid) = read_pid(&pid_file) {
             if is_process_alive(existing_pid) {
@@ -155,7 +155,7 @@ fn dirs_home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn acquire_lock_file(path: &Path) -> Result<std::fs::File, StoreError> {
+async fn acquire_lock_file(path: &Path) -> Result<std::fs::File, StoreError> {
     const MAX_ATTEMPTS: u32 = 10;
     const RETRY_DELAY: Duration = Duration::from_millis(200);
     const STALE_LOCK_AGE: Duration = Duration::from_secs(30);
@@ -173,7 +173,7 @@ fn acquire_lock_file(path: &Path) -> Result<std::fs::File, StoreError> {
                     continue;
                 }
                 if attempt + 1 < MAX_ATTEMPTS {
-                    std::thread::sleep(RETRY_DELAY);
+                    tokio::time::sleep(RETRY_DELAY).await;
                 }
             }
             Err(e) => {

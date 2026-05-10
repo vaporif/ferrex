@@ -1,8 +1,6 @@
 use chrono::Utc;
 use ferrex_embed::Embedder;
 use ferrex_store::{Entity, MetadataStore, VectorStore};
-use qdrant_client::Payload;
-use qdrant_client::qdrant::{Condition, Filter};
 use uuid::Uuid;
 
 use crate::CoreError;
@@ -84,13 +82,9 @@ impl<M: MetadataStore> EntityResolver<'_, M> {
         all_entities: &[Entity],
     ) -> Result<Entity, CoreError> {
         let embedding = self.embedder.embed(normalized).await?;
-        let filter = Filter::must([Condition::matches(
-            ferrex_store::QdrantField::POINT_TYPE,
-            ferrex_store::PointType::ENTITY.to_string(),
-        )]);
         let results = self
             .vector_store
-            .search(namespace, embedding.clone(), normalized, 1, Some(filter))
+            .search_entities(namespace, embedding.clone(), normalized, 1)
             .await?;
 
         if let Some((point_id, score)) = results.first()
@@ -133,16 +127,9 @@ impl<M: MetadataStore> EntityResolver<'_, M> {
             .id
             .parse()
             .map_err(|e| CoreError::Validation(format!("invalid entity UUID: {e}")))?;
-        let payload = Payload::try_from(serde_json::json!({
-            ferrex_store::QdrantField::ENTITY_ID: entity.id,
-            ferrex_store::QdrantField::NAME: entity.name,
-            ferrex_store::QdrantField::POINT_TYPE: ferrex_store::PointType::ENTITY,
-            ferrex_store::QdrantField::NAMESPACE: namespace,
-        }))
-        .map_err(|e| CoreError::Validation(e.to_string()))?;
 
         self.vector_store
-            .upsert(namespace, id, embedding, &entity.name, payload)
+            .upsert_entity(namespace, id, &entity.name, embedding)
             .await?;
         Ok(())
     }

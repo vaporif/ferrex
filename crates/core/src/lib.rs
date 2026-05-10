@@ -23,4 +23,4 @@ pub use staleness::{FreshnessLabel, StalenessConfig, StalenessWeights, TypeStale
 pub use types::*;
 
 pub use ferrex_embed::{EmbedError, Embedder, ModelTier, Reranker, RerankerTier};
-pub use ferrex_store::{Entity, Filter, Memory, MemoryType, Payload, VectorStore};
+pub use ferrex_store::{Entity, Memory, MemoryType, VectorStore};

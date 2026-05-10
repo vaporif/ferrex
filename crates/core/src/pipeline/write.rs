@@ -1,9 +1,7 @@
 use chrono::Utc;
 use ferrex_store::{
-    Memory, MetadataStore, PendingOp, PendingOpKind, PointType, QdrantField, SqliteStore,
-    VectorStore,
+    Memory, MemoryFields, MetadataStore, PendingOp, PendingOpKind, SqliteStore, VectorStore,
 };
-use qdrant_client::Payload;
 use uuid::Uuid;
 
 use crate::error::CoreError;
@@ -62,19 +60,19 @@ async fn write_impl(
     };
     metadata.insert_pending_op(&op).await?;
 
-    let payload = Payload::try_from(serde_json::json!({
-        "memory_id": memory.id,
-        QdrantField::MEMORY_TYPE: memory.memory_type.as_str(),
-        QdrantField::NAMESPACE: memory.namespace,
-        QdrantField::SEARCHABLE_TEXT: search_text,
-        QdrantField::ENTITIES: &memory.entities,
-        QdrantField::CREATED_AT: memory.created_at.to_rfc3339(),
-        QdrantField::POINT_TYPE: PointType::MEMORY,
-    }))
-    .map_err(|e| CoreError::Validation(e.to_string()))?;
-
     vectors
-        .upsert(&memory.namespace, ctx.id, embedding, &search_text, payload)
+        .upsert_memory(
+            ctx.id,
+            embedding,
+            &search_text,
+            MemoryFields {
+                memory_id: &memory.id,
+                memory_type: memory.memory_type,
+                namespace: &memory.namespace,
+                entities: &memory.entities,
+                created_at: memory.created_at,
+            },
+        )
         .await?;
     metadata.mark_pending_op_qdrant_written(&op.op_id).await?;
     tracing::Span::current().record("qdrant_ok", true);

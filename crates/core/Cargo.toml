@@ -10,7 +10,6 @@ authors.workspace = true
 ferrex-embed = { workspace = true }
 ferrex-store = { workspace = true }
 chrono = { workspace = true }
-qdrant-client = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 strsim = { workspace = true }

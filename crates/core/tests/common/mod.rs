@@ -6,6 +6,7 @@ use ferrex_core::{
     CacheConfig, DedupConfig, FerrexConfig, MemoryService, ModelTier, RecallRequest, RerankerTier,
     StalenessConfig, StoreRequest,
 };
+use ferrex_embed::init_embed_env;
 use ferrex_store::{MemoryType, QdrantSidecar};
 
 pub struct TestContext {
@@ -21,6 +22,7 @@ impl TestContext {
     }
 
     pub async fn with_config(f: impl FnOnce(FerrexConfig) -> FerrexConfig) -> Self {
+        init_embed_env();
         let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
         let base_dir = temp_dir.path().to_path_buf();
 

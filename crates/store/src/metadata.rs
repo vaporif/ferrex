@@ -427,15 +427,24 @@ impl SqliteStore {
     }
 }
 
-fn parse_dt(s: &str) -> DateTime<Utc> {
-    s.parse::<DateTime<Utc>>().unwrap_or_else(|_| {
-        tracing::warn!(value = %s, "failed to parse datetime, falling back to epoch");
-        DateTime::default()
+fn parse_dt(s: &str) -> Result<DateTime<Utc>, rusqlite::Error> {
+    s.parse::<DateTime<Utc>>().map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
     })
 }
 
-fn parse_optional_dt(s: Option<String>) -> Option<DateTime<Utc>> {
-    s.and_then(|s| s.parse::<DateTime<Utc>>().ok())
+fn parse_optional_dt(s: Option<String>) -> Result<Option<DateTime<Utc>>, rusqlite::Error> {
+    s.map(|s| parse_dt(&s)).transpose()
+}
+
+fn parse_memory_type(s: &str) -> Result<MemoryType, rusqlite::Error> {
+    s.parse::<MemoryType>().map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+        )
+    })
 }
 
 fn row_to_memory(
@@ -445,10 +454,7 @@ fn row_to_memory(
     Ok(Memory {
         id: row.get("id")?,
         namespace: row.get("namespace")?,
-        memory_type: row
-            .get::<_, String>("memory_type")?
-            .parse::<MemoryType>()
-            .unwrap_or(MemoryType::Episodic),
+        memory_type: parse_memory_type(&row.get::<_, String>("memory_type")?)?,
         content: row.get("content")?,
         subject: row.get("subject")?,
         predicate: row.get("predicate")?,
@@ -459,12 +465,12 @@ fn row_to_memory(
             .get::<_, Option<String>>("context")?
             .and_then(|s| serde_json::from_str(&s).ok()),
         entities,
-        created_at: parse_dt(&row.get::<_, String>("created_at")?),
-        updated_at: parse_dt(&row.get::<_, String>("updated_at")?),
-        t_valid: parse_optional_dt(row.get("t_valid")?),
-        t_invalid: parse_optional_dt(row.get("t_invalid")?),
-        last_accessed: parse_dt(&row.get::<_, String>("last_accessed")?),
-        last_validated: parse_optional_dt(row.get("last_validated")?),
+        created_at: parse_dt(&row.get::<_, String>("created_at")?)?,
+        updated_at: parse_dt(&row.get::<_, String>("updated_at")?)?,
+        t_valid: parse_optional_dt(row.get("t_valid")?)?,
+        t_invalid: parse_optional_dt(row.get("t_invalid")?)?,
+        last_accessed: parse_dt(&row.get::<_, String>("last_accessed")?)?,
+        last_validated: parse_optional_dt(row.get("last_validated")?)?,
         access_count: row.get::<_, i64>("access_count")?.cast_unsigned(),
         normalized_predicate: row.get("normalized_predicate")?,
     })
@@ -476,8 +482,8 @@ fn row_to_entity_without_aliases(row: &rusqlite::Row<'_>) -> Result<Entity, rusq
         name: row.get("name")?,
         aliases: vec![],
         entity_type: row.get("entity_type")?,
-        created_at: parse_dt(&row.get::<_, String>("created_at")?),
-        updated_at: parse_dt(&row.get::<_, String>("updated_at")?),
+        created_at: parse_dt(&row.get::<_, String>("created_at")?)?,
+        updated_at: parse_dt(&row.get::<_, String>("updated_at")?)?,
     })
 }
 
@@ -936,7 +942,7 @@ impl MetadataStore for SqliteStore {
                     namespace: row.get("namespace")?,
                     target_id: row.get("target_id")?,
                     qdrant_written: row.get::<_, i64>("qdrant_written")? != 0,
-                    started_at: parse_dt(&row.get::<_, String>("started_at")?),
+                    started_at: parse_dt(&row.get::<_, String>("started_at")?)?,
                 });
             }
             Ok(ops)

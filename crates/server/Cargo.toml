@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 ferrex-core = { workspace = true }
+ferrex-embed = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 dirs = { workspace = true }

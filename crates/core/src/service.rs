@@ -179,11 +179,16 @@ impl MemoryService {
         let mut report = RecoveryReport::default();
         for op in pending {
             match (op.kind, op.qdrant_written) {
-                (_, false) => {
+                (PendingOpKind::Store | PendingOpKind::Supersede, false) => {
+                    // Crash before Qdrant write: nothing to compensate.
                     self.metadata_store.clear_pending_op(&op.op_id).await?;
                     report.cleared_pre_qdrant += 1;
                 }
                 (PendingOpKind::Store | PendingOpKind::Supersede, true) => {
+                    // Crash after Qdrant write but before SQLite commit:
+                    // the caller never received a success ACK, so roll back
+                    // the Qdrant point. The Memory body is not in the journal,
+                    // so we cannot roll forward.
                     let Ok(uuid) = uuid::Uuid::parse_str(&op.memory_id) else {
                         tracing::warn!(op_id = %op.op_id, "invalid memory_id uuid in journal");
                         self.metadata_store.clear_pending_op(&op.op_id).await?;
@@ -198,7 +203,19 @@ impl MemoryService {
                     self.metadata_store.clear_pending_op(&op.op_id).await?;
                     report.compensated_stores += 1;
                 }
-                (PendingOpKind::Forget, true) => {
+                (PendingOpKind::Forget, _) => {
+                    // Forget is idempotent on both stores (delete-by-id is a
+                    // no-op when missing), so always roll forward regardless
+                    // of `qdrant_written`. This closes the crash window
+                    // between the Qdrant delete and the journal flag update.
+                    let Ok(uuid) = uuid::Uuid::parse_str(&op.memory_id) else {
+                        tracing::warn!(op_id = %op.op_id, "invalid memory_id uuid in journal");
+                        self.metadata_store.clear_pending_op(&op.op_id).await?;
+                        continue;
+                    };
+                    self.vector_store
+                        .delete_by_ids(&op.namespace, &[uuid])
+                        .await?;
                     self.metadata_store
                         .delete_memories(std::slice::from_ref(&op.memory_id))
                         .await?;
@@ -226,6 +243,10 @@ impl MemoryService {
 
     pub fn embedder(&self) -> &Embedder {
         &self.embedder
+    }
+
+    pub fn metadata_store(&self) -> &SqliteStore {
+        &self.metadata_store
     }
 
     pub fn vector_store(&self) -> &VectorStore {

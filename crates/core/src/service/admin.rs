@@ -13,43 +13,69 @@ impl MemoryService {
         fix: bool,
         fix_limit: u64,
     ) -> Result<AuditReport, CoreError> {
-        let qdrant_ids = self
-            .vector_store
-            .scroll_all_ids(&self.config.namespace)
-            .await?;
-        let qdrant_set: HashSet<String> = qdrant_ids.iter().map(ToString::to_string).collect();
+        let mut namespaces: HashSet<String> = HashSet::new();
+        namespaces.extend(self.metadata_store.list_namespaces().await?);
+        namespaces.extend(self.vector_store.list_namespaces().await?);
+        namespaces.insert(self.config.namespace.clone());
+        let mut namespaces: Vec<String> = namespaces.into_iter().collect();
+        namespaces.sort();
 
-        let sqlite_ids = self
-            .metadata_store
-            .list_all_memory_ids(&self.config.namespace)
-            .await?;
-        let sqlite_set: HashSet<String> = sqlite_ids.into_iter().collect();
+        let mut sqlite_only_all: Vec<String> = Vec::new();
+        let mut qdrant_only_all: Vec<String> = Vec::new();
+        for namespace in &namespaces {
+            let qdrant_ids = self.vector_store.scroll_all_ids(namespace).await?;
+            let qdrant_set: HashSet<String> = qdrant_ids.iter().map(ToString::to_string).collect();
+            let sqlite_ids = self.metadata_store.list_all_memory_ids(namespace).await?;
+            let sqlite_set: HashSet<String> = sqlite_ids.into_iter().collect();
 
-        let qdrant_only: Vec<String> = qdrant_set.difference(&sqlite_set).cloned().collect();
-        let sqlite_only: Vec<String> = sqlite_set.difference(&qdrant_set).cloned().collect();
+            sqlite_only_all.extend(sqlite_set.difference(&qdrant_set).cloned());
+            qdrant_only_all.extend(qdrant_set.difference(&sqlite_set).cloned().map(|id| {
+                // Tag qdrant-only entries with their namespace so the fix pass
+                // can route deletes to the right collection.
+                format!("{namespace}:{id}")
+            }));
+        }
 
         if fix {
-            if qdrant_only.len() as u64 > fix_limit {
+            if qdrant_only_all.len() as u64 > fix_limit {
                 return Err(CoreError::Validation(format!(
                     "audit refuses to auto-fix {} qdrant-only ids (limit {fix_limit})",
-                    qdrant_only.len(),
+                    qdrant_only_all.len(),
                 )));
             }
-            let uuids: Vec<uuid::Uuid> = qdrant_only
+            // Group ids by namespace, then issue one delete per collection.
+            let mut by_ns: std::collections::HashMap<String, Vec<uuid::Uuid>> =
+                std::collections::HashMap::new();
+            for tagged in &qdrant_only_all {
+                let Some((ns, id)) = tagged.split_once(':') else {
+                    continue;
+                };
+                if let Ok(uuid) = uuid::Uuid::parse_str(id) {
+                    by_ns.entry(ns.to_string()).or_default().push(uuid);
+                }
+            }
+            for (ns, uuids) in &by_ns {
+                self.vector_store.delete_by_ids(ns, uuids).await?;
+            }
+            // Strip the namespace prefix from the report so the output stays
+            // back-compat for callers that just want the bare ids.
+            let fixed: Vec<String> = qdrant_only_all
                 .iter()
-                .filter_map(|s| uuid::Uuid::parse_str(s).ok())
+                .filter_map(|tagged| tagged.split_once(':').map(|(_, id)| id.to_string()))
                 .collect();
-            self.vector_store
-                .delete_by_ids(&self.config.namespace, &uuids)
-                .await?;
             Ok(AuditReport {
-                sqlite_only,
-                fixed: qdrant_only,
+                sqlite_only: sqlite_only_all,
+                fixed,
                 qdrant_only: vec![],
             })
         } else {
+            // Strip the namespace prefix for unfixed reports too.
+            let qdrant_only: Vec<String> = qdrant_only_all
+                .iter()
+                .filter_map(|tagged| tagged.split_once(':').map(|(_, id)| id.to_string()))
+                .collect();
             Ok(AuditReport {
-                sqlite_only,
+                sqlite_only: sqlite_only_all,
                 qdrant_only,
                 fixed: vec![],
             })
