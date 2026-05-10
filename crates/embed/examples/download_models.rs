@@ -1,4 +1,4 @@
-use ferrex_embed::{init_embed_env, Embedder, ModelTier, Reranker, RerankerTier};
+use ferrex_embed::{Embedder, ModelTier, Reranker, RerankerTier, init_embed_env};
 
 fn main() {
     init_embed_env();
