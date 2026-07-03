@@ -34,7 +34,7 @@ repository = "https://github.com/vaporif/ferrex"
 
 [workspace.dependencies]
 # MCP
-rmcp = { version = "1.2", features = ["server", "transport-io", "macros"] }
+rmcp = { version = "2.1", features = ["server", "transport-io", "macros"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -46,7 +46,7 @@ fastembed = { version = "5.13", default-features = false, features = ["hf-hub-ru
 qdrant-client = { version = "1", default-features = false, features = ["serde"] }
 
 # SQLite
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 # String matching
 strsim = "0.11"
@@ -80,7 +80,7 @@ dirs = "6"
 tokio-util = { version = "0.7", features = ["rt"] }
 
 # Cache
-lru = "0.16"
+lru = "0.18"
 rustc-hash = "2"
 
 # Config
