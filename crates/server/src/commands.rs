@@ -250,7 +250,7 @@ async fn print_journal_text(
     Ok(())
 }
 
-pub fn nuke(config: FerrexConfig, force: bool) -> eyre::Result<()> {
+pub fn nuke(config: &FerrexConfig, force: bool) -> eyre::Result<()> {
     let ferrex_dir = config
         .db_path
         .parent()

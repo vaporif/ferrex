@@ -98,7 +98,7 @@ impl QdrantSidecar {
         Ok(sidecar)
     }
 
-    pub fn pid(&self) -> Option<u32> {
+    pub const fn pid(&self) -> Option<u32> {
         self.cached_pid
     }
 

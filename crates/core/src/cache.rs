@@ -261,9 +261,9 @@ mod tests {
     #[tokio::test]
     async fn test_embedding_cache_eviction() {
         let cache = make_cache(); // capacity 4
-        for i in 0..5 {
+        for i in 0..5u8 {
             cache
-                .put_embedding(&format!("query {i}"), vec![i as f32])
+                .put_embedding(&format!("query {i}"), vec![f32::from(i)])
                 .await;
         }
         assert!(cache.get_embedding("query 0").await.is_none());

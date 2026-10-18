@@ -43,21 +43,21 @@
           [
             pkgs.pkg-config
           ]
-          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             pkgs.openssl
           ];
         buildInputs =
-          pkgs.lib.optionals pkgs.stdenv.isLinux [
+          pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             pkgs.openssl
           ]
-          ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
             pkgs.libiconv
             pkgs.apple-sdk_26
           ];
       };
 
       cargoArtifacts = craneLib.buildDepsOnly (commonArgs
-        // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [pkgs.openssl];
         });
 
@@ -72,10 +72,10 @@
             wrapProgram $out/bin/ferrex \
               --set ORT_DYLIB_PATH "${pkgs.onnxruntime}/lib/libonnxruntime${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}" \
               --prefix PATH : "${pkgs.qdrant}/bin" \
-              ${pkgs.lib.optionalString pkgs.stdenv.isLinux "--prefix LD_LIBRARY_PATH : \"${pkgs.lib.makeLibraryPath [pkgs.openssl]}\""}
+              ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "--prefix LD_LIBRARY_PATH : \"${pkgs.lib.makeLibraryPath [pkgs.openssl]}\""}
           '';
         }
-        // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [pkgs.openssl];
         })).overrideAttrs {meta.mainProgram = "ferrex";};
 
@@ -90,7 +90,7 @@
       ];
 
       devToolchain =
-        if pkgs.stdenv.isLinux
+        if pkgs.stdenv.hostPlatform.isLinux
         then
           fenixPkgs.combine [
             fenixPkgs.stable.cargo
@@ -103,7 +103,7 @@
             fenixPkgs.targets."x86_64-unknown-linux-musl".stable.rust-std
             fenixPkgs.targets."aarch64-unknown-linux-musl".stable.rust-std
           ]
-        else if pkgs.stdenv.isDarwin && pkgs.stdenv.isAarch64
+        else if pkgs.stdenv.hostPlatform.isDarwin && pkgs.stdenv.hostPlatform.isAarch64
         then
           fenixPkgs.combine [
             fenixPkgs.stable.cargo
@@ -175,13 +175,13 @@
             pkgs.maturin
             pkgs.python3
           ]
-          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             pkgs.pkg-config
             pkgs.openssl
             pkgs.pkgsCross.musl64.stdenv.cc
             pkgs.pkgsCross.aarch64-multiplatform-musl.stdenv.cc
           ]
-          ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
             pkgs.apple-sdk_26
           ];
 
@@ -191,7 +191,7 @@
             RUST_SRC_PATH = "${devToolchain}/lib/rustlib/src/rust/library";
             ORT_DYLIB_PATH = "${pkgs.onnxruntime}/lib/libonnxruntime${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}";
           }
-          // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [pkgs.openssl pkgs.stdenv.cc.cc.lib];
             CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER = "${pkgs.pkgsCross.musl64.stdenv.cc}/bin/${pkgs.pkgsCross.musl64.stdenv.cc.targetPrefix}cc";
             CC_x86_64_unknown_linux_musl = "${pkgs.pkgsCross.musl64.stdenv.cc}/bin/${pkgs.pkgsCross.musl64.stdenv.cc.targetPrefix}cc";
