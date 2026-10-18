@@ -1,6 +1,8 @@
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    # qdrant 1.18.2 fails to build on x86_64-linux in newer nixpkgs (AVX512-VNNI intrinsic mismatch)
+    nixpkgs-qdrant.url = "github:NixOS/nixpkgs/8d8c1fa5b412c223ffa47410867813290cdedfef";
     fenix = {
       url = "github:nix-community/fenix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -11,6 +13,7 @@
   outputs = {
     self,
     nixpkgs,
+    nixpkgs-qdrant,
     fenix,
     crane,
     ...
@@ -20,6 +23,7 @@
       nixpkgs.lib.genAttrs systems (system:
         f {
           pkgs = nixpkgs.legacyPackages.${system};
+          qdrant = nixpkgs-qdrant.legacyPackages.${system}.qdrant;
           fenixPkgs = fenix.packages.${system};
           craneLib =
             (crane.mkLib nixpkgs.legacyPackages.${system}).overrideToolchain
@@ -28,6 +32,7 @@
 
     perSystem = forAllSystems ({
       pkgs,
+      qdrant,
       fenixPkgs,
       craneLib,
     }: let
@@ -71,7 +76,7 @@
           postInstall = ''
             wrapProgram $out/bin/ferrex \
               --set ORT_DYLIB_PATH "${pkgs.onnxruntime}/lib/libonnxruntime${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}" \
-              --prefix PATH : "${pkgs.qdrant}/bin" \
+              --prefix PATH : "${qdrant}/bin" \
               ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "--prefix LD_LIBRARY_PATH : \"${pkgs.lib.makeLibraryPath [pkgs.openssl]}\""}
           '';
         }
@@ -170,7 +175,7 @@
             pkgs.cargo-deny
             pkgs.taplo
             pkgs.typos
-            pkgs.qdrant
+            qdrant
             pkgs.onnxruntime
             pkgs.maturin
             pkgs.python3
