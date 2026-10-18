@@ -58,13 +58,12 @@ async fn conflict_update_invalidates_old_fact() {
         })
         .await
         .unwrap();
-    let ids: Vec<&str> = results.iter().map(|r| r.memory.id.as_str()).collect();
     assert!(
-        ids.contains(&second.id.as_str()),
+        results.iter().any(|r| r.memory.id == second.id),
         "recall should return new fact"
     );
     assert!(
-        !ids.contains(&first.id.as_str()),
+        !results.iter().any(|r| r.memory.id == first.id),
         "recall should not return old fact"
     );
 }
@@ -120,9 +119,8 @@ async fn supersedes_skips_dedup_and_conflict() {
         })
         .await
         .unwrap();
-    let ids: Vec<&str> = results.iter().map(|r| r.memory.id.as_str()).collect();
     assert!(
-        !ids.contains(&first.id.as_str()),
+        !results.iter().any(|r| r.memory.id == first.id),
         "old fact should not appear"
     );
 }
@@ -158,9 +156,8 @@ async fn forget_removes_from_both_stores() {
         })
         .await
         .unwrap();
-    let ids: Vec<&str> = results.iter().map(|r| r.memory.id.as_str()).collect();
     assert!(
-        !ids.contains(&resp.id.as_str()),
+        !results.iter().any(|r| r.memory.id == resp.id),
         "forgotten memory should not be recalled"
     );
 }
@@ -239,9 +236,8 @@ async fn store_and_recall_episodic_round_trip() {
         .recall(recall_query("deployment staging"))
         .await
         .unwrap();
-    let ids: Vec<&str> = results.iter().map(|r| r.memory.id.as_str()).collect();
     assert!(
-        ids.contains(&resp.id.as_str()),
+        results.iter().any(|r| r.memory.id == resp.id),
         "stored memory should be recallable"
     );
 }

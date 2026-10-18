@@ -5,10 +5,7 @@ use ferrex_core::{
     StoreRequest, TaxonomyRequest, TimelineRequest,
 };
 use rmcp::{
-    ErrorData, ServerHandler,
-    handler::server::wrapper::Parameters,
-    model::{ServerCapabilities, ServerInfo},
-    tool, tool_handler, tool_router,
+    ErrorData, ServerHandler, handler::server::wrapper::Parameters, tool, tool_handler, tool_router,
 };
 
 use crate::hint;
@@ -299,9 +296,5 @@ impl FerrexServer {
     }
 }
 
-#[tool_handler]
-impl ServerHandler for FerrexServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-    }
-}
+#[tool_handler(router = self.tool_router)]
+impl ServerHandler for FerrexServer {}

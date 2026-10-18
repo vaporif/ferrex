@@ -227,7 +227,7 @@ fn golden_memories() -> Vec<(&'static str, StoreRequest)> {
     ]
 }
 
-fn default_store() -> StoreRequest {
+const fn default_store() -> StoreRequest {
     StoreRequest {
         content: None,
         memory_type: None,
@@ -313,6 +313,7 @@ async fn test_golden_set_recall_at_3() {
             .filter(|id| result_ids.contains(id))
             .count();
 
+        #[allow(clippy::cast_precision_loss)]
         let recall_at_3 = if expected_ids.is_empty() {
             1.0
         } else {
@@ -331,6 +332,7 @@ async fn test_golden_set_recall_at_3() {
         total_recall += recall_at_3;
     }
 
+    #[allow(clippy::cast_precision_loss)]
     let avg_recall = total_recall / queries.len() as f64;
     eprintln!("avg_recall@3 = {avg_recall:.3}");
 

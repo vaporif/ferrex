@@ -224,15 +224,15 @@ impl MemoryService {
         }
     }
 
-    pub fn embedder(&self) -> &Embedder {
+    pub const fn embedder(&self) -> &Embedder {
         &self.embedder
     }
 
-    pub fn vector_store(&self) -> &VectorStore {
+    pub const fn vector_store(&self) -> &VectorStore {
         &self.vector_store
     }
 
-    pub fn reranker(&self) -> &Reranker {
+    pub const fn reranker(&self) -> &Reranker {
         &self.reranker
     }
 

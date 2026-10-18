@@ -7,7 +7,7 @@ use crate::types::OpRecord;
 
 const OPS_BUFFER_CAPACITY: usize = 100;
 
-pub(crate) struct OpsBuffer {
+pub struct OpsBuffer {
     ops: std::sync::Mutex<VecDeque<OpRecord>>,
 }
 

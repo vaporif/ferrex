@@ -84,7 +84,7 @@ impl RerankerTier {
     const fn to_fastembed(self) -> fastembed::RerankerModel {
         match self {
             Self::Default => fastembed::RerankerModel::BGERerankerBase,
-            Self::Multilingual => fastembed::RerankerModel::JINARerankerV2BaseMultiligual,
+            Self::Multilingual => fastembed::RerankerModel::JINARerankerV2BaseMultilingual,
         }
     }
 
