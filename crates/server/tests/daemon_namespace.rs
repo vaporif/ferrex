@@ -126,6 +126,14 @@ async fn explicit_namespace_param_wins() {
     assert_eq!(ids(&in_b), vec![id], "{in_b}");
     let in_a = call_tool(&mut a, "recall", json!({"query": "orders table"})).await;
     assert!(ids(&in_a).is_empty(), "{in_a}");
+
+    let explicit = call_tool(
+        &mut a,
+        "recall",
+        json!({"query": "orders table", "namespace": "ns_b"}),
+    )
+    .await;
+    assert_eq!(ids(&explicit), vec![id], "{explicit}");
 }
 
 #[tokio::test]

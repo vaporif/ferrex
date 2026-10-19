@@ -638,20 +638,24 @@ async fn taxonomy_unscoped_includes_namespace_list() {
 async fn taxonomy_default_namespace_used_when_unscoped() {
     let ctx = common::TestContext::new().await;
     let svc = &ctx.service;
+    let other = format!("{}_other", ctx.namespace);
     svc.store(episodic("an event")).await.unwrap();
+    let mut in_other = episodic("an event elsewhere");
+    in_other.namespace = Some(other.clone());
+    svc.store(in_other).await.unwrap();
 
     let resp = svc
         .taxonomy(TaxonomyRequest {
             namespace: None,
             limit: None,
-            default_namespace: Some(ctx.namespace.clone()),
+            default_namespace: Some(other.clone()),
         })
         .await
         .unwrap();
-    assert_eq!(resp.namespace, ctx.namespace);
+    assert_eq!(resp.namespace, other);
     assert_eq!(resp.total_memories, 1);
     let ns_list = resp
         .all_namespaces
         .expect("unscoped taxonomy should still list namespaces");
-    assert!(ns_list.contains(&ctx.namespace));
+    assert!(ns_list.contains(&ctx.namespace) && ns_list.contains(&other));
 }
