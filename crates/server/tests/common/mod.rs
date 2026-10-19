@@ -42,6 +42,8 @@ pub struct CmdOpts {
     /// Appended after every top-level flag; starts with the subcommand.
     pub extra_args: Vec<OsString>,
     pub env: Vec<(String, String)>,
+    /// Runs this binary instead of the cargo-built `ferrex`.
+    pub exe: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -106,7 +108,7 @@ impl TestEnv {
     }
 
     pub fn ferrex_cmd_with(&self, opts: CmdOpts) -> Command {
-        let mut cmd = Command::new(ferrex_bin());
+        let mut cmd = Command::new(opts.exe.unwrap_or_else(|| ferrex_bin().into()));
         for (name, _) in std::env::vars_os() {
             let is_ferrex = name.to_str().is_some_and(|n| n.starts_with("FERREX_"));
             if is_ferrex && name != "FERREX_LOG" {
@@ -497,6 +499,7 @@ pub struct ProxyClient {
     stderr: Arc<Mutex<Vec<u8>>>,
     stderr_drain: Option<JoinHandle<()>>,
     next_id: u64,
+    seen: Vec<Value>,
 }
 
 impl ProxyClient {
@@ -526,11 +529,22 @@ impl ProxyClient {
             stderr,
             stderr_drain: Some(stderr_drain),
             next_id: 1,
+            seen: Vec::new(),
         }
     }
 
     pub fn pid(&self) -> u32 {
         self.child.id().expect("proxy pid")
+    }
+
+    /// `true` while the proxy process has not exited.
+    pub fn is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// Every message `response_within` has read from stdout, in order.
+    pub fn seen(&self) -> &[Value] {
+        &self.seen
     }
 
     pub fn stderr_text(&self) -> String {
@@ -558,10 +572,16 @@ impl ProxyClient {
     }
 
     pub async fn request_within(&mut self, method: &str, params: Value, within: Duration) -> Value {
+        let id = self.send_request(method, &params).await;
+        self.response_within(id, within).await
+    }
+
+    /// Sends a request without waiting for its response; returns its id.
+    pub async fn send_request(&mut self, method: &str, params: &Value) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        self.send(request_line(id, method, &params)).await;
-        self.response_within(id, within).await
+        self.send(request_line(id, method, params)).await;
+        id
     }
 
     /// Reads lines until the response to `id` arrives.
@@ -578,6 +598,7 @@ impl ProxyClient {
                     )
                 });
             let msg: Value = serde_json::from_str(&line).expect("json-rpc line");
+            self.seen.push(msg.clone());
             if msg.get("id") == Some(&json!(id)) {
                 return msg;
             }
