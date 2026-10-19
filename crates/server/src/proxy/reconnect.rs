@@ -2,12 +2,13 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 use crate::daemon::handshake::RefusalKind;
 use crate::daemon::spawn::{AttemptError, Budgets, Connected, DaemonConn, RoundError, run_round};
-use crate::proxy::track::{Link, Outcome, Tracker, request_id, response_outcome};
+use crate::proxy::track::{KeptRequest, Link, Outcome, request_id, response_outcome};
 use crate::proxy::{
     SharedTracker, StdoutTx, connect, jsonrpc_error, lock, resolve_attempt, send_json,
 };
@@ -20,21 +21,28 @@ const MCP_HINT: &str = "run /mcp reconnect so Claude starts the new ferrex binar
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LossAction {
     WaitForRequest,
-    #[allow(dead_code, reason = "used by Task 13")]
-    ReconnectNow,
+    /// Startup is still under way and the client is waiting on its first request.
+    ReconnectNow(AfterHello),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReplayMode {
-    /// Re-sends the cached `initialize` and discards its response.
-    Drop,
-}
-
+/// What an attempt does on the new connection once the hello has succeeded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AfterHello {
+    /// Re-sends the cached `initialize` untracked and discards its response.
     ReplayDrop,
+    /// Re-sends the kept `initialize`, still in flight, and returns its response for the client.
+    ReplayForward,
+    /// Re-sends the kept first request; its response arrives through normal forwarding.
+    ResendKept,
     /// The caller flushes the queue straight after the hello.
     Nothing,
+}
+
+/// The re-sent inline first request whose response is still outstanding; its round stays open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResendPending {
+    pub id: Value,
+    pub attempts_used: u8,
 }
 
 /// What a reconnect round needs beyond the stdin side of the proxy.
@@ -85,21 +93,33 @@ fn needs_mcp_hint(
         || (any_child_exited_early && mtime_now != startup_mtime)
 }
 
-/// Answers every in-flight request with the restart error; the daemon will never answer them.
+/// Answers the in-flight requests the daemon will never answer with the restart error; before
+/// init the kept first request is spared, since it gets re-sent at once.
 pub fn on_daemon_loss(tracker: &SharedTracker, out: &StdoutTx) -> LossAction {
-    answer_in_flight(&mut lock(tracker), out, RESTART_MESSAGE);
-    LossAction::WaitForRequest
+    let mut tracker = lock(tracker);
+    let Some(kept) = tracker.kept_in_flight() else {
+        answer(tracker.take_in_flight(), out, RESTART_MESSAGE);
+        return LossAction::WaitForRequest;
+    };
+    let after = if kept.initialize {
+        AfterHello::ReplayForward
+    } else {
+        AfterHello::ResendKept
+    };
+    let keep = kept.id.clone();
+    answer(tracker.take_in_flight_except(&keep), out, RESTART_MESSAGE);
+    LossAction::ReconnectNow(after)
 }
 
 /// Answers every in-flight request, queued ones included, with `message`; the link goes down.
 pub fn fail_pending(tracker: &SharedTracker, out: &StdoutTx, message: &str) {
     let mut tracker = lock(tracker);
-    answer_in_flight(&mut tracker, out, message);
+    answer(tracker.take_in_flight(), out, message);
     tracker.set_link(Link::Down);
 }
 
-fn answer_in_flight(tracker: &mut Tracker, out: &StdoutTx, message: &str) {
-    for id in tracker.take_in_flight() {
+fn answer(ids: impl IntoIterator<Item = Value>, out: &StdoutTx, message: &str) {
+    for id in ids {
         send_json(out, jsonrpc_error(&id, RESTART_CODE, message));
     }
 }
@@ -123,7 +143,15 @@ pub async fn reconnect(
             let mut conn = connect(resolved, exe, argv, budgets).await?;
             let response = match after {
                 AfterHello::ReplayDrop => {
-                    replay(&mut conn, tracker, ReplayMode::Drop, budgets.replay).await?
+                    replay(&mut conn, tracker, budgets.replay).await?;
+                    None
+                }
+                AfterHello::ReplayForward => {
+                    Some(forward_initialize(&mut conn, tracker, budgets.replay).await?)
+                }
+                AfterHello::ResendKept => {
+                    write_to_daemon(&mut conn.writer, &kept(tracker)?.line).await?;
+                    None
                 }
                 AfterHello::Nothing => None,
             };
@@ -138,9 +166,8 @@ pub async fn reconnect(
 pub async fn replay(
     conn: &mut DaemonConn,
     tracker: &SharedTracker,
-    mode: ReplayMode,
     timeout: Duration,
-) -> Result<Option<Vec<u8>>, AttemptError> {
+) -> Result<(), AttemptError> {
     let (initialize, initialized) = {
         let mut tracker = lock(tracker);
         tracker.mark_replay_started();
@@ -153,54 +180,82 @@ pub async fn replay(
         initialize.ok_or_else(|| AttemptError::fatal("no cached initialize to replay"))?;
     let id = request_id(&initialize)
         .ok_or_else(|| AttemptError::fatal("cached initialize has no id"))?;
-    write_replayed(&mut conn.writer, &initialize).await?;
-    tokio::time::timeout(timeout, read_response(&mut conn.reader, &id))
-        .await
-        .map_err(|_| {
-            AttemptError::fatal(format!(
-                "daemon did not answer the replayed initialize within {timeout:?}"
-            ))
-        })??;
-    match mode {
-        ReplayMode::Drop => {}
+    write_to_daemon(&mut conn.writer, &initialize).await?;
+    let what = "replayed initialize";
+    let (_, outcome) = await_response(&mut conn.reader, &id, timeout, what).await?;
+    if outcome == Outcome::Error {
+        return Err(AttemptError::retryable(
+            "daemon answered the replayed initialize with an error",
+        ));
     }
     if let Some(initialized) = initialized {
-        write_replayed(&mut conn.writer, &initialized).await?;
+        write_to_daemon(&mut conn.writer, &initialized).await?;
     }
-    Ok(None)
+    Ok(())
 }
 
-async fn write_replayed(writer: &mut OwnedWriteHalf, line: &[u8]) -> Result<(), AttemptError> {
+/// Re-sends the kept `initialize`, whose id stays in flight, and returns its response line.
+async fn forward_initialize(
+    conn: &mut DaemonConn,
+    tracker: &SharedTracker,
+    timeout: Duration,
+) -> Result<Vec<u8>, AttemptError> {
+    let KeptRequest { id, line, .. } = kept(tracker)?;
+    write_to_daemon(&mut conn.writer, &line).await?;
+    let what = "re-sent initialize";
+    let (response, _) = await_response(&mut conn.reader, &id, timeout, what).await?;
+    Ok(response)
+}
+
+fn kept(tracker: &SharedTracker) -> Result<KeptRequest, AttemptError> {
+    lock(tracker)
+        .kept_first()
+        .cloned()
+        .ok_or_else(|| AttemptError::fatal("no kept first request to re-send"))
+}
+
+async fn write_to_daemon(writer: &mut OwnedWriteHalf, line: &[u8]) -> Result<(), AttemptError> {
     writer
         .write_all(line)
         .await
-        .map_err(|e| AttemptError::retryable(format!("replay write failed: {e}")))
+        .map_err(|e| AttemptError::retryable(format!("write to daemon failed: {e}")))
+}
+
+/// A timeout on the still-open connection ends the round; EOF is retryable.
+async fn await_response(
+    reader: &mut BufReader<OwnedReadHalf>,
+    id: &Value,
+    timeout: Duration,
+    what: &str,
+) -> Result<(Vec<u8>, Outcome), AttemptError> {
+    tokio::time::timeout(timeout, read_response(reader, id, what))
+        .await
+        .map_err(|_| {
+            AttemptError::fatal(format!(
+                "daemon did not answer the {what} within {timeout:?}"
+            ))
+        })?
 }
 
 /// Reads up to the response to `id`, skipping anything else the daemon sends first.
 async fn read_response(
     reader: &mut BufReader<OwnedReadHalf>,
-    id: &serde_json::Value,
-) -> Result<Vec<u8>, AttemptError> {
+    id: &Value,
+    what: &str,
+) -> Result<(Vec<u8>, Outcome), AttemptError> {
     loop {
         let mut line = Vec::new();
         let n = reader
             .read_until(b'\n', &mut line)
             .await
-            .map_err(|e| AttemptError::retryable(format!("replay read failed: {e}")))?;
+            .map_err(|e| AttemptError::retryable(format!("read from daemon failed: {e}")))?;
         if n == 0 || !line.ends_with(b"\n") {
-            return Err(AttemptError::retryable(
-                "daemon closed the connection during the initialize replay",
-            ));
+            return Err(AttemptError::retryable(format!(
+                "daemon closed the connection before answering the {what}"
+            )));
         }
-        match response_outcome(&line, id) {
-            Some(Outcome::Success) => return Ok(line),
-            Some(Outcome::Error) => {
-                return Err(AttemptError::retryable(
-                    "daemon answered the replayed initialize with an error",
-                ));
-            }
-            None => {}
+        if let Some(outcome) = response_outcome(&line, id) {
+            return Ok((line, outcome));
         }
     }
 }
@@ -253,41 +308,110 @@ mod tests {
         lines
     }
 
-    #[test]
-    fn on_daemon_loss_answers_and_clears_in_flight() {
+    fn restart_error(id: u64) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {"code": RESTART_CODE, "message": RESTART_MESSAGE},
+        })
+    }
+
+    const INITIALIZE: &[u8] = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n";
+    const INITIALIZED: &[u8] = b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n";
+    const INIT_RESULT: &[u8] = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n";
+    const INIT_ERROR: &[u8] =
+        b"{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":1,\"message\":\"x\"}}\n";
+
+    fn tracker_with(client: &[&[u8]], daemon: &[&[u8]]) -> SharedTracker {
         let tracker = SharedTracker::default();
-        lock(&tracker)
-            .on_client_line(b"{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\"}\n");
+        let mut t = lock(&tracker);
+        for line in client {
+            t.on_client_line(line);
+        }
+        for line in daemon {
+            t.on_daemon_line(line);
+        }
+        drop(t);
+        tracker
+    }
+
+    fn loss(tracker: &SharedTracker) -> (LossAction, Vec<serde_json::Value>) {
         let (out, mut rx) = mpsc::unbounded_channel();
-        assert_eq!(on_daemon_loss(&tracker, &out), LossAction::WaitForRequest);
+        let action = on_daemon_loss(tracker, &out);
+        (action, drain(&mut rx))
+    }
+
+    #[test]
+    fn loss_after_init_answers_everything() {
+        let tracker = tracker_with(
+            &[
+                INITIALIZE,
+                b"{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\"}\n",
+            ],
+            &[INIT_RESULT],
+        );
         assert_eq!(
-            drain(&mut rx),
-            vec![serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 5,
-                "error": {"code": RESTART_CODE, "message": RESTART_MESSAGE},
-            })]
+            loss(&tracker),
+            (LossAction::WaitForRequest, vec![restart_error(5)])
         );
         assert!(lock(&tracker).take_in_flight().is_empty());
     }
 
-    async fn replay_against(
+    #[test]
+    fn loss_with_initialize_in_flight_forwards_it_again() {
+        let ping = b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n";
+        let tracker = tracker_with(&[ping, INITIALIZE], &[]);
+        assert_eq!(
+            loss(&tracker),
+            (
+                LossAction::ReconnectNow(AfterHello::ReplayForward),
+                vec![restart_error(2)]
+            )
+        );
+        assert_eq!(lock(&tracker).take_in_flight(), vec![serde_json::json!(1)]);
+    }
+
+    #[test]
+    fn loss_with_inline_first_request_in_flight_resends_it() {
+        let tracker = tracker_with(
+            &[
+                b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\"}\n",
+                b"{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/list\"}\n",
+            ],
+            &[],
+        );
+        assert_eq!(
+            loss(&tracker),
+            (
+                LossAction::ReconnectNow(AfterHello::ResendKept),
+                vec![restart_error(4)]
+            )
+        );
+        assert!(lock(&tracker).is_in_flight(&serde_json::json!(3)));
+    }
+
+    #[test]
+    fn loss_before_init_without_kept_in_flight_waits() {
+        let ping = b"{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"ping\"}\n";
+        let tracker = tracker_with(&[INITIALIZE, ping], &[INIT_ERROR]);
+        assert_eq!(
+            loss(&tracker),
+            (LossAction::WaitForRequest, vec![restart_error(6)])
+        );
+    }
+
+    /// A connection whose peer reads one line, writes `script`, then collects the rest briefly.
+    fn scripted_peer(
         script: &'static [&'static [u8]],
-        timeout: Duration,
-    ) -> (Result<Option<Vec<u8>>, AttemptError>, Vec<u8>) {
-        let tracker = SharedTracker::default();
-        lock(&tracker)
-            .on_client_line(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n");
-        lock(&tracker)
-            .on_client_line(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n");
+    ) -> (DaemonConn, tokio::task::JoinHandle<Vec<u8>>) {
         let (ours, theirs) = UnixStream::pair().unwrap();
         let (read, writer) = ours.into_split();
-        let mut conn = DaemonConn {
+        let conn = DaemonConn {
             reader: BufReader::new(read),
             writer,
             key: "k".into(),
         };
-        let daemon = tokio::spawn(async move {
+        let peer = tokio::spawn(async move {
             let (read, mut write) = theirs.into_split();
             let mut reader = BufReader::new(read);
             let mut first = Vec::new();
@@ -303,9 +427,30 @@ mod tests {
             .await;
             [first, rest].concat()
         });
-        let result = replay(&mut conn, &tracker, ReplayMode::Drop, timeout).await;
+        (conn, peer)
+    }
+
+    async fn replay_against(
+        script: &'static [&'static [u8]],
+        timeout: Duration,
+    ) -> (Result<(), AttemptError>, Vec<u8>) {
+        let tracker = tracker_with(&[INITIALIZE, INITIALIZED], &[]);
+        let (mut conn, peer) = scripted_peer(script);
+        let result = replay(&mut conn, &tracker, timeout).await;
         drop(conn);
-        (result, daemon.await.unwrap())
+        (result, peer.await.unwrap())
+    }
+
+    async fn forward_against(
+        script: &'static [&'static [u8]],
+        timeout: Duration,
+    ) -> (Result<Vec<u8>, AttemptError>, Vec<u8>) {
+        let tracker = tracker_with(&[INITIALIZE, INITIALIZED], &[]);
+        let (mut conn, peer) = scripted_peer(script);
+        let result = forward_initialize(&mut conn, &tracker, timeout).await;
+        drop(conn);
+        assert!(lock(&tracker).is_in_flight(&serde_json::json!(1)));
+        (result, peer.await.unwrap())
     }
 
     #[tokio::test]
@@ -313,26 +458,18 @@ mod tests {
         let (result, received) = replay_against(
             &[
                 b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\"}\n",
-                b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n",
+                INIT_RESULT,
             ],
             Duration::from_secs(5),
         )
         .await;
-        assert_eq!(result.unwrap(), None);
-        assert_eq!(
-            received,
-            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n\
-              {\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n"
-        );
+        result.unwrap();
+        assert_eq!(received, [INITIALIZE, INITIALIZED].concat());
     }
 
     #[tokio::test]
     async fn replay_error_response_is_retryable() {
-        let (result, _) = replay_against(
-            &[b"{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":1,\"message\":\"x\"}}\n"],
-            Duration::from_secs(5),
-        )
-        .await;
+        let (result, _) = replay_against(&[INIT_ERROR], Duration::from_secs(5)).await;
         assert!(result.unwrap_err().retryable);
     }
 
@@ -343,28 +480,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replay_without_cached_initialize_fails_but_marks_started() {
-        let tracker = SharedTracker::default();
-        lock(&tracker).set_link(Link::Reconnecting);
-        let (ours, _theirs) = UnixStream::pair().unwrap();
+    async fn forward_returns_response_and_sends_nothing_else() {
+        for script in [&[INIT_RESULT], &[INIT_ERROR]] {
+            let (result, received) = forward_against(script, Duration::from_secs(5)).await;
+            assert_eq!(result.unwrap(), script[0]);
+            assert_eq!(received, INITIALIZE);
+        }
+    }
+
+    #[tokio::test]
+    async fn forward_eof_is_retryable_and_timeout_is_not() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        drop(theirs);
         let (read, writer) = ours.into_split();
         let mut conn = DaemonConn {
             reader: BufReader::new(read),
             writer,
             key: "k".into(),
         };
-        let err = replay(
-            &mut conn,
-            &tracker,
-            ReplayMode::Drop,
-            Duration::from_secs(1),
-        )
-        .await
-        .unwrap_err();
+        let tracker = tracker_with(&[INITIALIZE], &[]);
+        let eof = forward_initialize(&mut conn, &tracker, Duration::from_secs(5)).await;
+        assert!(eof.unwrap_err().retryable);
+        let (stalled, _) = forward_against(&[], Duration::from_millis(50)).await;
+        assert!(!stalled.unwrap_err().retryable);
+    }
+
+    #[tokio::test]
+    async fn replay_without_cached_initialize_is_fatal() {
+        let tracker = SharedTracker::default();
+        let (mut conn, _peer) = scripted_peer(&[]);
+        let err = replay(&mut conn, &tracker, Duration::from_secs(1))
+            .await
+            .unwrap_err();
         assert!(!err.retryable, "{err}");
-        let initialized = b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n";
+    }
+
+    #[tokio::test]
+    async fn replay_marks_started_even_when_it_fails() {
+        let tracker = tracker_with(&[INITIALIZE], &[INIT_RESULT]);
+        lock(&tracker).set_link(Link::Reconnecting);
+        assert_eq!(
+            lock(&tracker).on_client_line(INITIALIZED),
+            ClientLine::CacheOnly
+        );
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        drop(theirs);
+        let (read, writer) = ours.into_split();
+        let mut conn = DaemonConn {
+            reader: BufReader::new(read),
+            writer,
+            key: "k".into(),
+        };
+        assert!(
+            replay(&mut conn, &tracker, Duration::from_secs(1))
+                .await
+                .is_err()
+        );
         assert_ne!(
-            lock(&tracker).on_client_line(initialized),
+            lock(&tracker).on_client_line(INITIALIZED),
             ClientLine::CacheOnly
         );
     }
