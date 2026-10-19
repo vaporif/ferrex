@@ -73,6 +73,12 @@ pub enum Command {
     /// Print the shared-daemon key and run-dir paths as JSON.
     #[command(hide = true)]
     DaemonPaths,
+    /// Run the shared daemon for `key`; spawned by the proxy.
+    #[command(hide = true)]
+    Daemon {
+        #[arg(long)]
+        key: String,
+    },
 }
 
 #[derive(Subcommand)]

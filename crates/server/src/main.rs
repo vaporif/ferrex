@@ -64,6 +64,7 @@ fn main() -> eyre::Result<()> {
             std::process::exit(1);
         }
         Some(Command::DaemonPaths) => commands::daemon_paths(&cli::build_config(cli)?),
+        Some(Command::Daemon { key }) => daemon::run(cli::build_config(cli)?, &key),
         None => standalone::run(cli::build_config(cli)?),
     }
 }

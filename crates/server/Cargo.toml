@@ -34,6 +34,7 @@ portpicker = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process", "io-util", "test-util"] }
+uuid = { workspace = true }
 
 [lints]
 workspace = true
