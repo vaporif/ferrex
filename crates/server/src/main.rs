@@ -6,6 +6,8 @@ mod commands;
 mod daemon;
 mod hint;
 mod params;
+#[allow(dead_code)]
+mod proxy;
 mod server;
 mod standalone;
 
