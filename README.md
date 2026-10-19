@@ -221,7 +221,7 @@ The first session for a given database and config spawns one `ferrex` daemon. La
 - Its log is `~/.ferrex/run/ferrexd.log`. Set `FERREX_RUN_DIR` to move the run directory.
 - `--no-daemon` or `FERREX_NO_DAEMON=1` serves MCP in the process itself, as before. A `:memory:` database does the same.
 - The Qdrant sidecar keeps running after the last session ends. `ferrex nuke` stops it.
-- `ferrex audit reconcile --fix`, `ferrex backfill` and `ferrex nuke` refuse to run while a daemon is using the database. Close your sessions or wait for the daemon to go idle.
+- `ferrex audit reconcile --fix` and `ferrex backfill` refuse to run while a daemon is using the database. `ferrex nuke` on the default path (`~/.ferrex`) refuses while any daemon is running; with a custom `--db-path` it refuses only while a daemon uses that database. Close your sessions or wait for the daemon to go idle.
 
 ## Configuration
 
@@ -260,7 +260,7 @@ Thresholds, predicate synonym groups, staleness weights, cache sizes -- all conf
 ferrex                              # start MCP server (default)
 ferrex audit reconcile [--fix]      # detect/fix Qdrant<>SQLite mismatches
 ferrex backfill normalized-predicates [--dry-run]  # populate missing normalized predicates
-ferrex nuke [--force]               # delete all data and stop the qdrant sidecar
+ferrex nuke [--force]               # delete all data; stops the qdrant sidecar only on the default path (~/.ferrex)
 ```
 
 ## Design docs

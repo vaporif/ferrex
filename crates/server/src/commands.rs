@@ -266,11 +266,7 @@ pub fn nuke(config: &FerrexConfig, force: bool) -> eyre::Result<()> {
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
     let owns_sidecar = is_sidecar_dir(&ferrex_dir);
-    if owns_sidecar {
-        admin_guard::refuse_if_any_live()?;
-    } else {
-        admin_guard::refuse_if_live(config)?;
-    }
+    guard(config, owns_sidecar)?;
 
     let db_path = &config.db_path;
     let qdrant_data = ferrex_dir.join("qdrant-data");
@@ -288,6 +284,9 @@ pub fn nuke(config: &FerrexConfig, force: bool) -> eyre::Result<()> {
     }
     if qdrant_pid.exists() {
         println!("  Qdrant PID:   {}", qdrant_pid.display());
+    }
+    if qdrant_port.exists() {
+        println!("  Qdrant port:  {}", qdrant_port.display());
     }
 
     let has_anything =
@@ -307,6 +306,7 @@ pub fn nuke(config: &FerrexConfig, force: bool) -> eyre::Result<()> {
         }
     }
 
+    guard(config, owns_sidecar)?;
     if owns_sidecar {
         stop_sidecar(config, &ferrex_dir)?;
     }
@@ -327,6 +327,14 @@ pub fn nuke(config: &FerrexConfig, force: bool) -> eyre::Result<()> {
 
     println!("Done. All ferrex data has been removed.");
     Ok(())
+}
+
+fn guard(config: &FerrexConfig, owns_sidecar: bool) -> eyre::Result<()> {
+    if owns_sidecar {
+        admin_guard::refuse_if_any_live()
+    } else {
+        admin_guard::refuse_if_live(config)
+    }
 }
 
 /// Whether `dir` is `~/.ferrex`, the directory the shared qdrant sidecar lives in.
@@ -375,6 +383,10 @@ fn kill_and_wait(pid: u32) -> eyre::Result<()> {
         }
         if pid_alive(pid) {
             signal_gone(raw, Signal::KILL)?;
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while pid_alive(pid) && Instant::now() < deadline {
+                std::thread::sleep(STOP_POLL);
+            }
         }
     }
     Ok(())

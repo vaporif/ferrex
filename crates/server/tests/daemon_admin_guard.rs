@@ -187,6 +187,9 @@ async fn nuke_default_path_with_qdrant_url_still_stops_sidecar() {
     assert!(!pid_alive(qdrant_pid), "stdout: {}", stdout(&out));
     assert!(!dir.join("qdrant.pid").exists());
     assert!(!dir.join("qdrant.port").exists());
+    let listing = stdout(&out);
+    assert!(listing.contains("qdrant.pid"), "stdout: {listing}");
+    assert!(listing.contains("qdrant.port"), "stdout: {listing}");
 }
 
 #[tokio::test]

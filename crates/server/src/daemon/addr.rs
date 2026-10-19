@@ -152,7 +152,7 @@ impl PidFile {
             .ok()?;
         serde_json::from_slice(&bytes)
             .inspect_err(
-                |e| tracing::debug!(path = %path.display(), error = %e, "pid file unparseable"),
+                |e| tracing::debug!(path = %path.display(), error = %e, "pid file unparsable"),
             )
             .ok()
     }
@@ -369,7 +369,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn pid_file_unparseable_reads_none() {
+    fn pid_file_unparsable_reads_none() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("k.pid");
         fs::write(&path, "not json").unwrap();
@@ -430,7 +430,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn live_for_db_skips_unparseable_pid_file() {
+    fn live_for_db_skips_unparsable_pid_file() {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(tmp.path().join("x.pid"), "garbage").unwrap();
         let _l = live_daemon(tmp.path(), "bbbb", "/abs/x.db");
