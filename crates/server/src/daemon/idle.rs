@@ -37,7 +37,7 @@ impl IdleState {
 fn decrement(count: usize, name: &str) -> usize {
     count.checked_sub(1).unwrap_or_else(|| {
         debug_assert!(false, "{name} count went below zero");
-        tracing::error!(count = name, "connection count went below zero");
+        tracing::error!(counter = name, "connection count went below zero");
         0
     })
 }

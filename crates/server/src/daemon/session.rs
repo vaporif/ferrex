@@ -115,7 +115,7 @@ pub async fn serve_connection(stream: UnixStream, mut ctx: SessionCtx) {
     let (service, namespace) = match accept_hello(&line, &ctx, init).await {
         Ok(accepted) => accepted,
         Err(reply) => {
-            tracing::info!(kind = ?reply.kind, error = ?reply.error, "refused hello");
+            tracing::info!(kind = ?reply.kind, error = reply.error.as_deref().unwrap_or(""), "refused hello");
             send_reply(&mut writer, &reply).await;
             return;
         }

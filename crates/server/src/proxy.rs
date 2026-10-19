@@ -261,8 +261,7 @@ impl Proxy<'_> {
             }
             LossAction::ReconnectNow(_) if used >= MAX_ATTEMPTS => {
                 diag(&format!(
-                    "ferrex: could not reach the daemon: ferrex daemon connection lost \
-                     while the re-sent first request was pending, after {used} attempts"
+                    "ferrex daemon connection lost again while the re-sent first request was pending (after {used} attempts)"
                 ));
                 exit_via_writer(self.out, 1)
             }
