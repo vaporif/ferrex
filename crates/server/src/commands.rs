@@ -349,19 +349,19 @@ fn is_sidecar_dir(dir: &Path) -> bool {
 }
 
 const STOP_GRACE: Duration = Duration::from_secs(10);
+const KILL_GRACE: Duration = Duration::from_secs(1);
 const STOP_POLL: Duration = Duration::from_millis(100);
 
 fn stop_sidecar(config: &FerrexConfig, dir: &Path) -> eyre::Result<()> {
-    let Some(pid) = ferrex_store::read_pid(&dir.join("qdrant.pid")).filter(|&p| pid_alive(p))
-    else {
+    let pid_file = dir.join("qdrant.pid");
+    let Some(pid) = ferrex_store::read_pid(&pid_file).filter(|&p| pid_alive(p)) else {
         return Ok(());
     };
     if !is_qdrant(pid, &config.qdrant_bin) {
-        let pid_file = dir.join("qdrant.pid");
-        return Err(eyre::eyre!(
+        eyre::bail!(
             "qdrant pid {pid} (from {}) is alive but could not be confirmed as ferrex's sidecar; nothing was deleted. Stop that process or remove qdrant.pid, then retry.",
             pid_file.display()
-        ));
+        );
     }
     kill_and_wait(pid)?;
     println!("Stopped qdrant (pid {pid})");
@@ -372,20 +372,21 @@ fn kill_and_wait(pid: u32) -> eyre::Result<()> {
     let Some(raw) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
         return Ok(());
     };
-    if !signal_gone(raw, Signal::TERM)? {
-        let deadline = Instant::now() + STOP_GRACE;
-        while pid_alive(pid) && Instant::now() < deadline {
-            std::thread::sleep(STOP_POLL);
-        }
-        if pid_alive(pid) {
-            signal_gone(raw, Signal::KILL)?;
-            let deadline = Instant::now() + Duration::from_secs(1);
-            while pid_alive(pid) && Instant::now() < deadline {
-                std::thread::sleep(STOP_POLL);
-            }
-        }
+    if signal_gone(raw, Signal::TERM)? || wait_until_gone(pid, STOP_GRACE) {
+        return Ok(());
     }
+    signal_gone(raw, Signal::KILL)?;
+    wait_until_gone(pid, KILL_GRACE);
     Ok(())
+}
+
+/// Polls until `pid` is gone or `grace` runs out; `true` when it is gone.
+fn wait_until_gone(pid: u32, grace: Duration) -> bool {
+    let deadline = Instant::now() + grace;
+    while pid_alive(pid) && Instant::now() < deadline {
+        std::thread::sleep(STOP_POLL);
+    }
+    !pid_alive(pid)
 }
 
 /// Sends `sig`; `true` when the process no longer exists.

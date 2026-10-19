@@ -140,7 +140,7 @@ async fn read_hello_line(
     reader: &mut BufReader<impl tokio::io::AsyncRead + Unpin>,
 ) -> Option<String> {
     let mut line = String::new();
-    let mut limited = (&mut *reader).take(MAX_HELLO_BYTES);
+    let mut limited = reader.take(MAX_HELLO_BYTES);
     match tokio::time::timeout(HELLO_READ_TIMEOUT, limited.read_line(&mut line)).await {
         Err(_) => {
             tracing::debug!("no hello within {HELLO_READ_TIMEOUT:?}, closing connection");
