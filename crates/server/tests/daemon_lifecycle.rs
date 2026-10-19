@@ -20,6 +20,9 @@ use common::{
 
 const COLD_HELLO: Duration = Duration::from_secs(60);
 const BIND_WITHIN: Duration = Duration::from_secs(10);
+/// Mirrors the daemon's `SHUTDOWN_LOCK_WAIT`.
+const SHUTDOWN_LOCK_WAIT: Duration = Duration::from_secs(10);
+const SHUTDOWN_SLACK: Duration = Duration::from_secs(8);
 
 struct Daemon {
     child: Child,
@@ -293,7 +296,7 @@ async fn sigterm_with_lock_held_leaves_files() {
     let mut daemon = Daemon::start(&env, &[("FERREX_IDLE_TIMEOUT", "600")]).await;
     let _lock = hold_lock(&daemon.paths.lock_file);
     sigterm(&daemon.child);
-    let status = daemon.wait_exit(Duration::from_secs(12)).await;
+    let status = daemon.wait_exit(SHUTDOWN_LOCK_WAIT + SHUTDOWN_SLACK).await;
     assert!(status.success(), "{status}");
     assert!(daemon.paths.socket.exists());
     assert!(daemon.paths.pid_file.exists());

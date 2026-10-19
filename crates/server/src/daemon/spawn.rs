@@ -821,7 +821,9 @@ mod tests {
         let paths = temp_paths(tmp.path());
         std::fs::write(&paths.socket, "stale").unwrap();
         let (exe, argv) = sh("exit 1");
-        let err = connect_or_spawn(&paths, &exe, &argv, &short_budgets())
+        let mut budgets = short_budgets();
+        budgets.accept = Duration::from_secs(30);
+        let err = connect_or_spawn(&paths, &exe, &argv, &budgets)
             .await
             .unwrap_err();
         assert!(err.child_exited_early, "{err:?}");
