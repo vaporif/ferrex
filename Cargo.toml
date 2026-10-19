@@ -77,6 +77,7 @@ clap = { version = "4", features = ["derive", "env"] }
 
 # Filesystem
 dirs = "7"
+rustix = { version = "1", features = ["process"] }
 
 # Async utilities
 tokio-util = { version = "0.7", features = ["rt"] }
