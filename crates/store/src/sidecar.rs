@@ -1,10 +1,14 @@
+use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use rustix::io::Errno;
 use rustix::process::Pid;
+use tokio::runtime::Handle;
 
 use crate::StoreError;
 
@@ -17,13 +21,40 @@ const COMM_MATCH_LEN: usize = 15;
 const PID_FILE: &str = "qdrant.pid";
 const PORT_FILE: &str = "qdrant.port";
 const LOCK_FILE: &str = "qdrant.lock";
+const RESTART_LIMIT: usize = 3;
+const RESTART_WINDOW: Duration = Duration::from_secs(600);
+const REUSE_POLL: Duration = Duration::from_secs(2);
+
+/// What happens to a qdrant this handle spawned once the handle goes away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidecarPolicy {
+    /// Kill and reap the spawned qdrant on `shutdown` or drop.
+    KillOnDrop,
+    /// Never stop qdrant; a watcher thread reaps and restarts it while this process lives.
+    LeaveRunning,
+}
 
 #[derive(Debug)]
 pub struct QdrantSidecar {
     dir: PathBuf,
-    process: Option<Child>,
     port: u16,
-    cached_pid: Option<u32>,
+    process: Option<Child>,
+    pid: Arc<AtomicU32>,
+    #[cfg(test)]
+    watcher_stop: Arc<AtomicBool>,
+}
+
+#[derive(Debug)]
+struct StartCtx {
+    bin: String,
+    port: u16,
+    dir: PathBuf,
+}
+
+#[derive(Debug)]
+struct Started {
+    pid: u32,
+    child: Option<Child>,
 }
 
 enum Resolution {
@@ -36,84 +67,52 @@ impl QdrantSidecar {
         bin: &str,
         port: u16,
         base_dir: Option<PathBuf>,
+        policy: SidecarPolicy,
     ) -> Result<Self, StoreError> {
-        let dir = base_dir.unwrap_or_else(|| dirs_home().join(".ferrex"));
-        fs::create_dir_all(&dir)
-            .map_err(|e| StoreError::Sidecar(format!("failed to create ~/.ferrex: {e}")))?;
+        let ctx = StartCtx {
+            bin: bin.to_owned(),
+            port,
+            dir: base_dir.unwrap_or_else(|| dirs_home().join(".ferrex")),
+        };
+        let started = start_inner(&ctx).await?;
+        let pid = Arc::new(AtomicU32::new(started.pid));
+        let watcher_stop = Arc::new(AtomicBool::new(false));
+        let dir = ctx.dir.clone();
 
-        match resolve_existing(bin, port, &dir).await? {
-            Resolution::Reuse(pid) => {
-                tracing::info!(pid, "reusing existing Qdrant process");
-                health_check(port, None).await?;
-                Ok(Self {
-                    dir,
-                    process: None,
-                    port,
-                    cached_pid: Some(pid),
-                })
+        let process = match policy {
+            SidecarPolicy::KillOnDrop => started.child,
+            SidecarPolicy::LeaveRunning => {
+                let watcher = Watcher {
+                    handle: Handle::try_current()
+                        .map_err(|e| StoreError::Sidecar(format!("no tokio runtime: {e}")))?,
+                    ctx,
+                    pid: Arc::clone(&pid),
+                    stop: Arc::clone(&watcher_stop),
+                    budget: RestartBudget::default(),
+                };
+                std::thread::Builder::new()
+                    .name("qdrant-watcher".into())
+                    .spawn(move || watcher.run(started))
+                    .map_err(|e| {
+                        StoreError::Sidecar(format!("failed to start qdrant watcher: {e}"))
+                    })?;
+                None
             }
-            Resolution::Spawn(lock) => Self::spawn(bin, port, dir, lock).await,
-        }
-    }
+        };
 
-    async fn spawn(
-        bin: &str,
-        port: u16,
-        dir: PathBuf,
-        lock: SidecarLock,
-    ) -> Result<Self, StoreError> {
-        if port < MIN_PORT {
-            return Err(StoreError::Sidecar(format!(
-                "port must be >= {MIN_PORT} (got {port}), http_port is port - 1"
-            )));
-        }
-
-        let data_dir = dir.join("qdrant-data");
-        let snapshots_dir = dir.join("qdrant-snapshots");
-        let config_path = dir.join("qdrant-config.yaml");
-        fs::create_dir_all(&data_dir)
-            .map_err(|e| StoreError::Sidecar(format!("failed to create qdrant-data: {e}")))?;
-        let http_port = port - 1;
-        let config = format!(
-            "storage:\n  storage_path: {}\n  snapshots_path: {}\nservice:\n  grpc_port: {port}\n  http_port: {http_port}\n",
-            data_dir.display(),
-            snapshots_dir.display()
-        );
-        fs::write(&config_path, config)
-            .map_err(|e| StoreError::Sidecar(format!("failed to write qdrant config: {e}")))?;
-
-        tracing::info!(bin = bin, port = port, "starting Qdrant sidecar");
-        let mut child = Command::new(bin)
-            .arg("--config-path")
-            .arg(&config_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| StoreError::Sidecar(format!("failed to spawn qdrant: {e}")))?;
-
-        let pid = child.id();
-        if let Err(e) = write_pid_files(&dir, pid, port) {
-            drop(lock);
-            reap(&mut child, &dir);
-            return Err(e);
-        }
-        drop(lock);
-
-        if let Err(e) = health_check(port, Some(&mut child)).await {
-            reap(&mut child, &dir);
-            return Err(e);
-        }
         Ok(Self {
             dir,
-            process: Some(child),
             port,
-            cached_pid: Some(pid),
+            process,
+            pid,
+            #[cfg(test)]
+            watcher_stop,
         })
     }
 
     #[must_use]
-    pub const fn pid(&self) -> Option<u32> {
-        self.cached_pid
+    pub fn pid(&self) -> Option<u32> {
+        Some(self.pid.load(Ordering::Relaxed))
     }
 
     #[must_use]
@@ -121,17 +120,205 @@ impl QdrantSidecar {
         format!("http://localhost:{}", self.port)
     }
 
+    /// Kills and reaps qdrant if this handle owns it under `KillOnDrop`; otherwise does nothing.
     pub fn shutdown(&mut self) {
         if let Some(mut child) = self.process.take() {
             reap(&mut child, &self.dir);
             tracing::info!("Qdrant sidecar stopped");
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn stop_watcher(&self) {
+        self.watcher_stop.store(true, Ordering::Relaxed);
+    }
 }
 
 impl Drop for QdrantSidecar {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+async fn start_inner(ctx: &StartCtx) -> Result<Started, StoreError> {
+    fs::create_dir_all(&ctx.dir)
+        .map_err(|e| StoreError::Sidecar(format!("failed to create {}: {e}", ctx.dir.display())))?;
+
+    match resolve_existing(&ctx.bin, ctx.port, &ctx.dir).await? {
+        Resolution::Reuse(pid) => {
+            tracing::info!(pid, "reusing existing Qdrant process");
+            health_check(ctx.port, None).await?;
+            Ok(Started { pid, child: None })
+        }
+        Resolution::Spawn(lock) => spawn(ctx, lock).await,
+    }
+}
+
+async fn spawn(ctx: &StartCtx, lock: SidecarLock) -> Result<Started, StoreError> {
+    let StartCtx { bin, port, dir } = ctx;
+    let port = *port;
+    if port < MIN_PORT {
+        return Err(StoreError::Sidecar(format!(
+            "port must be >= {MIN_PORT} (got {port}), http_port is port - 1"
+        )));
+    }
+
+    let data_dir = dir.join("qdrant-data");
+    let snapshots_dir = dir.join("qdrant-snapshots");
+    let config_path = dir.join("qdrant-config.yaml");
+    fs::create_dir_all(&data_dir)
+        .map_err(|e| StoreError::Sidecar(format!("failed to create qdrant-data: {e}")))?;
+    let http_port = port - 1;
+    let config = format!(
+        "storage:\n  storage_path: {}\n  snapshots_path: {}\nservice:\n  grpc_port: {port}\n  http_port: {http_port}\n",
+        data_dir.display(),
+        snapshots_dir.display()
+    );
+    fs::write(&config_path, config)
+        .map_err(|e| StoreError::Sidecar(format!("failed to write qdrant config: {e}")))?;
+
+    tracing::info!(bin, port, "starting Qdrant sidecar");
+    let mut child = Command::new(bin)
+        .arg("--config-path")
+        .arg(&config_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| StoreError::Sidecar(format!("failed to spawn qdrant: {e}")))?;
+
+    let pid = child.id();
+    if let Err(e) = write_pid_files(dir, pid, port) {
+        drop(lock);
+        reap(&mut child, dir);
+        return Err(e);
+    }
+    drop(lock);
+
+    if let Err(e) = health_check(port, Some(&mut child)).await {
+        reap(&mut child, dir);
+        return Err(e);
+    }
+    Ok(Started {
+        pid,
+        child: Some(child),
+    })
+}
+
+#[derive(Debug, Default)]
+struct RestartBudget {
+    spent: VecDeque<Instant>,
+}
+
+impl RestartBudget {
+    fn available(&mut self, now: Instant) -> bool {
+        while self
+            .spent
+            .front()
+            .is_some_and(|&t| now.saturating_duration_since(t) > RESTART_WINDOW)
+        {
+            self.spent.pop_front();
+        }
+        self.spent.len() < RESTART_LIMIT
+    }
+
+    fn spend(&mut self, now: Instant) {
+        self.spent.push_back(now);
+    }
+}
+
+struct Watcher {
+    handle: Handle,
+    ctx: StartCtx,
+    pid: Arc<AtomicU32>,
+    stop: Arc<AtomicBool>,
+    budget: RestartBudget,
+}
+
+impl Watcher {
+    fn run(mut self, mut current: Started) {
+        while self.wait_for_exit(current) {
+            match self.restart() {
+                Some(next) => current = next,
+                None => return,
+            }
+        }
+    }
+
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+
+    /// Blocks until qdrant is gone; `false` if the watcher was stopped meanwhile.
+    fn wait_for_exit(&self, current: Started) -> bool {
+        let pid = current.pid;
+        if let Some(mut child) = current.child {
+            let status = child.wait();
+            if self.stopped() {
+                return false;
+            }
+            match status {
+                Ok(status) => tracing::warn!(pid, %status, "qdrant sidecar exited"),
+                Err(e) => tracing::warn!(pid, error = %e, "failed to wait on qdrant sidecar"),
+            }
+            return true;
+        }
+        loop {
+            std::thread::sleep(REUSE_POLL);
+            if self.stopped() {
+                return false;
+            }
+            if !pid_alive(pid) {
+                tracing::warn!(pid, "reused qdrant sidecar is gone");
+                return true;
+            }
+        }
+    }
+
+    /// Starts or reuses qdrant within the restart budget; `None` if the watcher was stopped.
+    fn restart(&mut self) -> Option<Started> {
+        let mut exhaustion_logged = false;
+        loop {
+            if self.stopped() {
+                return None;
+            }
+            let now = Instant::now();
+            if !self.budget.available(now) {
+                if !exhaustion_logged {
+                    tracing::warn!(
+                        limit = RESTART_LIMIT,
+                        window_secs = RESTART_WINDOW.as_secs(),
+                        "qdrant restart budget used up, waiting for it to free up"
+                    );
+                    exhaustion_logged = true;
+                }
+                std::thread::sleep(REUSE_POLL);
+                continue;
+            }
+            match self.handle.block_on(start_inner(&self.ctx)) {
+                Ok(started) => {
+                    if started.child.is_some() {
+                        self.budget.spend(now);
+                        tracing::warn!(
+                            pid = started.pid,
+                            port = self.ctx.port,
+                            "restarted qdrant sidecar"
+                        );
+                    } else {
+                        tracing::info!(
+                            pid = started.pid,
+                            "another process restarted qdrant, reusing it"
+                        );
+                    }
+                    self.pid.store(started.pid, Ordering::Relaxed);
+                    return Some(started);
+                }
+                Err(e) => {
+                    self.budget.spend(now);
+                    tracing::warn!(error = %e, "qdrant sidecar restart failed");
+                    std::thread::sleep(REUSE_POLL);
+                }
+            }
+        }
     }
 }
 
@@ -444,6 +631,8 @@ fn matches_qdrant_name(comm: &str, qdrant_bin: &str) -> bool {
 mod tests {
     use std::fs::File;
     use std::os::unix::fs::OpenOptionsExt;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Instant, SystemTime};
 
     use rustix::io::Errno;
@@ -510,11 +699,23 @@ mod tests {
         dir: &Path,
     ) -> Result<QdrantSidecar, StoreError> {
         let marker = format!("os error {}", Errno::TXTBSY.raw_os_error());
-        let mut result = QdrantSidecar::start(bin, port, Some(dir.to_path_buf())).await;
+        let mut result = QdrantSidecar::start(
+            bin,
+            port,
+            Some(dir.to_path_buf()),
+            SidecarPolicy::KillOnDrop,
+        )
+        .await;
         for _ in 0..2 {
             match &result {
                 Err(StoreError::Sidecar(msg)) if msg.contains(&marker) => {
-                    result = QdrantSidecar::start(bin, port, Some(dir.to_path_buf())).await;
+                    result = QdrantSidecar::start(
+                        bin,
+                        port,
+                        Some(dir.to_path_buf()),
+                        SidecarPolicy::KillOnDrop,
+                    )
+                    .await;
                 }
                 _ => break,
             }
@@ -533,11 +734,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().to_path_buf();
         assert!(
-            QdrantSidecar::start("qdrant", 1, Some(base.clone()))
+            QdrantSidecar::start("qdrant", 1, Some(base.clone()), SidecarPolicy::KillOnDrop)
                 .await
                 .is_err()
         );
-        let err = QdrantSidecar::start("qdrant", 1, Some(base))
+        let err = QdrantSidecar::start("qdrant", 1, Some(base), SidecarPolicy::KillOnDrop)
             .await
             .err()
             .unwrap()
@@ -612,9 +813,14 @@ mod tests {
     async fn test_sidecar_lifecycle() {
         let dir = tempfile::tempdir().unwrap();
         let port = free_port();
-        let mut sidecar = QdrantSidecar::start("qdrant", port, Some(dir.path().to_path_buf()))
-            .await
-            .unwrap();
+        let mut sidecar = QdrantSidecar::start(
+            "qdrant",
+            port,
+            Some(dir.path().to_path_buf()),
+            SidecarPolicy::KillOnDrop,
+        )
+        .await
+        .unwrap();
         assert!(sidecar.url().contains(&port.to_string()));
         sidecar.shutdown();
         assert!(!dir.path().join("qdrant.pid").exists());
@@ -626,9 +832,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().to_path_buf();
         let port_a = free_port();
-        let first = QdrantSidecar::start("qdrant", port_a, Some(base.clone()))
-            .await
-            .unwrap();
+        let first = QdrantSidecar::start(
+            "qdrant",
+            port_a,
+            Some(base.clone()),
+            SidecarPolicy::KillOnDrop,
+        )
+        .await
+        .unwrap();
         let pid = first.pid().unwrap();
         assert_eq!(
             read_port_file(&dir.path().join("qdrant.port")),
@@ -636,7 +847,7 @@ mod tests {
         );
         let port_b = free_port();
         let started = Instant::now();
-        let err = QdrantSidecar::start("qdrant", port_b, Some(base))
+        let err = QdrantSidecar::start("qdrant", port_b, Some(base), SidecarPolicy::KillOnDrop)
             .await
             .err()
             .unwrap()
@@ -652,11 +863,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().to_path_buf();
         let port = free_port();
-        let first = QdrantSidecar::start("qdrant", port, Some(base.clone()))
-            .await
-            .unwrap();
+        let first = QdrantSidecar::start(
+            "qdrant",
+            port,
+            Some(base.clone()),
+            SidecarPolicy::KillOnDrop,
+        )
+        .await
+        .unwrap();
         fs::remove_file(dir.path().join("qdrant.port")).unwrap();
-        let second = QdrantSidecar::start("qdrant", port, Some(base))
+        let second = QdrantSidecar::start("qdrant", port, Some(base), SidecarPolicy::KillOnDrop)
             .await
             .unwrap();
         assert_eq!(first.pid(), second.pid());
@@ -675,8 +891,13 @@ mod tests {
             .unwrap()
             .set_modified(SystemTime::now() - Duration::from_secs(60))
             .unwrap();
-        let result =
-            QdrantSidecar::start("qdrant", free_port(), Some(dir.path().to_path_buf())).await;
+        let result = QdrantSidecar::start(
+            "qdrant",
+            free_port(),
+            Some(dir.path().to_path_buf()),
+            SidecarPolicy::KillOnDrop,
+        )
+        .await;
         let _ = sleeper.kill();
         let _ = sleeper.wait();
         let sidecar = result.unwrap();
@@ -690,8 +911,13 @@ mod tests {
         let mut sleeper = Command::new("sleep").arg("60").spawn().unwrap();
         fs::write(dir.path().join("qdrant.pid"), sleeper.id().to_string()).unwrap();
         let started = Instant::now();
-        let result =
-            QdrantSidecar::start("qdrant", free_port(), Some(dir.path().to_path_buf())).await;
+        let result = QdrantSidecar::start(
+            "qdrant",
+            free_port(),
+            Some(dir.path().to_path_buf()),
+            SidecarPolicy::KillOnDrop,
+        )
+        .await;
         let elapsed = started.elapsed();
         let _ = sleeper.kill();
         let _ = sleeper.wait();
@@ -729,9 +955,14 @@ mod tests {
             let first = start_retrying_txtbsy(script.to_str().unwrap(), port, dir.path())
                 .await
                 .unwrap();
-            let second = QdrantSidecar::start("qdrant", port, Some(dir.path().to_path_buf()))
-                .await
-                .unwrap();
+            let second = QdrantSidecar::start(
+                "qdrant",
+                port,
+                Some(dir.path().to_path_buf()),
+                SidecarPolicy::KillOnDrop,
+            )
+            .await
+            .unwrap();
             assert_eq!(first.pid(), second.pid(), "{name}");
         }
     }
@@ -741,9 +972,14 @@ mod tests {
     async fn killondrop_shutdown_leaves_foreign_pid_file() {
         let dir = tempfile::tempdir().unwrap();
         let port = free_port();
-        let mut sidecar = QdrantSidecar::start("qdrant", port, Some(dir.path().to_path_buf()))
-            .await
-            .unwrap();
+        let mut sidecar = QdrantSidecar::start(
+            "qdrant",
+            port,
+            Some(dir.path().to_path_buf()),
+            SidecarPolicy::KillOnDrop,
+        )
+        .await
+        .unwrap();
         let mut sleeper = Command::new("sleep").arg("60").spawn().unwrap();
         let foreign = sleeper.id();
         fs::write(dir.path().join("qdrant.pid"), foreign.to_string()).unwrap();
@@ -762,12 +998,255 @@ mod tests {
     async fn bin_exits_while_real_qdrant_answers_fails() {
         let real = tempfile::tempdir().unwrap();
         let port = free_port();
-        let _qdrant = QdrantSidecar::start("qdrant", port, Some(real.path().to_path_buf()))
-            .await
-            .unwrap();
+        let _qdrant = QdrantSidecar::start(
+            "qdrant",
+            port,
+            Some(real.path().to_path_buf()),
+            SidecarPolicy::KillOnDrop,
+        )
+        .await
+        .unwrap();
         let fake = tempfile::tempdir().unwrap();
         let script = exit_script(fake.path());
         let result = start_retrying_txtbsy(script.to_str().unwrap(), port, fake.path()).await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn restart_budget_allows_three_per_window() {
+        let t0 = Instant::now();
+        let mut budget = RestartBudget::default();
+        for _ in 0..3 {
+            budget.spend(t0);
+        }
+        assert!(!budget.available(t0 + Duration::from_secs(1)));
+        assert!(budget.available(t0 + Duration::from_secs(601)));
+    }
+
+    #[test]
+    fn restart_budget_frees_oldest_first() {
+        let t0 = Instant::now();
+        let minutes = |m: u64| Duration::from_secs(m * 60);
+        let mut budget = RestartBudget::default();
+        budget.spend(t0);
+        budget.spend(t0 + minutes(5));
+        budget.spend(t0 + minutes(6));
+        let later = t0 + minutes(10) + Duration::from_secs(1);
+        assert!(budget.available(later));
+        budget.spend(later);
+        assert!(!budget.available(later));
+    }
+
+    const RESPAWN_TIMEOUT: Duration = Duration::from_secs(15);
+    const REAP_TIMEOUT: Duration = Duration::from_secs(2);
+
+    async fn eventually(timeout: Duration, mut check: impl AsyncFnMut() -> bool) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if check().await {
+                return true;
+            }
+            if Instant::now() > deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    fn fully_reaped(pid: u32) -> bool {
+        i32::try_from(pid)
+            .ok()
+            .and_then(Pid::from_raw)
+            .is_some_and(|p| rustix::process::test_kill_process(p) == Err(Errno::SRCH))
+    }
+
+    fn qdrant_processes_for(dir: &Path) -> usize {
+        let config = dir.join("qdrant-config.yaml");
+        let output = Command::new("pgrep")
+            .arg("-f")
+            .arg(config)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).lines().count()
+    }
+
+    // Stops watchers before killing, or a watcher would respawn qdrant.
+    struct LeaveRunningCleanup {
+        dir: PathBuf,
+        stops: Vec<Arc<AtomicBool>>,
+    }
+
+    impl LeaveRunningCleanup {
+        fn new(dir: &Path) -> Self {
+            Self {
+                dir: dir.to_path_buf(),
+                stops: Vec::new(),
+            }
+        }
+
+        fn track(&mut self, sidecar: &QdrantSidecar) {
+            self.stops.push(Arc::clone(&sidecar.watcher_stop));
+        }
+    }
+
+    impl Drop for LeaveRunningCleanup {
+        fn drop(&mut self) {
+            for stop in &self.stops {
+                stop.store(true, Ordering::Relaxed);
+            }
+            let Some(pid) = read_pid(&self.dir.join(PID_FILE)) else {
+                return;
+            };
+            if pid <= 1 || !is_qdrant(pid, "qdrant") {
+                eprintln!("cleanup: pid {pid} is not qdrant, leaving it");
+                return;
+            }
+            kill_pid(pid);
+            let deadline = Instant::now() + REAP_TIMEOUT;
+            while pid_alive(pid) {
+                if Instant::now() > deadline {
+                    eprintln!("cleanup: qdrant {pid} still alive after SIGKILL");
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+
+    async fn start_policy(port: u16, dir: &Path, policy: SidecarPolicy) -> QdrantSidecar {
+        QdrantSidecar::start("qdrant", port, Some(dir.to_path_buf()), policy)
+            .await
+            .unwrap()
+    }
+
+    fn names_new_live_pid(dir: &Path, old: u32) -> Option<u32> {
+        read_pid(&dir.join(PID_FILE)).filter(|&p| p != old && pid_alive(p))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires qdrant binary on PATH"]
+    async fn leave_running_keeps_qdrant_on_drop_and_shutdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cleanup = LeaveRunningCleanup::new(dir.path());
+        let mut sidecar = start_policy(free_port(), dir.path(), SidecarPolicy::LeaveRunning).await;
+        cleanup.track(&sidecar);
+        let pid = sidecar.pid().unwrap();
+        sidecar.stop_watcher();
+        sidecar.shutdown();
+        drop(sidecar);
+        assert!(pid_alive(pid));
+        assert!(dir.path().join(PID_FILE).exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires qdrant binary on PATH"]
+    async fn kill_on_drop_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = start_policy(free_port(), dir.path(), SidecarPolicy::KillOnDrop).await;
+        let pid = sidecar.pid().unwrap();
+        drop(sidecar);
+        assert!(eventually(REAP_TIMEOUT, async || !pid_alive(pid)).await);
+        assert!(!dir.path().join(PID_FILE).exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires qdrant binary on PATH"]
+    async fn killed_qdrant_restarted_by_owner_on_same_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cleanup = LeaveRunningCleanup::new(dir.path());
+        let port = free_port();
+        let sidecar = start_policy(port, dir.path(), SidecarPolicy::LeaveRunning).await;
+        cleanup.track(&sidecar);
+        let old = sidecar.pid().unwrap();
+        kill_pid(old);
+        let restarted = eventually(RESPAWN_TIMEOUT, async || {
+            names_new_live_pid(dir.path(), old).is_some() && probe_qdrant(port).await
+        })
+        .await;
+        assert!(restarted);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires qdrant binary on PATH"]
+    async fn reuser_respawns_after_owner_gone_and_takes_ownership() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cleanup = LeaveRunningCleanup::new(dir.path());
+        let port = free_port();
+        let owner = start_policy(port, dir.path(), SidecarPolicy::LeaveRunning).await;
+        cleanup.track(&owner);
+        let reuser = start_policy(port, dir.path(), SidecarPolicy::LeaveRunning).await;
+        cleanup.track(&reuser);
+        let old = owner.pid().unwrap();
+        assert_eq!(reuser.pid(), Some(old));
+
+        owner.stop_watcher();
+        drop(owner);
+        kill_pid(old);
+
+        let respawned = eventually(RESPAWN_TIMEOUT, async || {
+            names_new_live_pid(dir.path(), old).is_some_and(|p| reuser.pid() == Some(p))
+        })
+        .await;
+        assert!(respawned);
+
+        let new = reuser.pid().unwrap();
+        reuser.stop_watcher();
+        kill_pid(new);
+        assert!(eventually(REAP_TIMEOUT, async || fully_reaped(new)).await);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires qdrant binary on PATH"]
+    async fn two_reusers_single_respawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cleanup = LeaveRunningCleanup::new(dir.path());
+        let port = free_port();
+        let owner = start_policy(port, dir.path(), SidecarPolicy::LeaveRunning).await;
+        cleanup.track(&owner);
+        let b = start_policy(port, dir.path(), SidecarPolicy::LeaveRunning).await;
+        cleanup.track(&b);
+        let c = start_policy(port, dir.path(), SidecarPolicy::LeaveRunning).await;
+        cleanup.track(&c);
+        let old = owner.pid().unwrap();
+
+        owner.stop_watcher();
+        drop(owner);
+        kill_pid(old);
+
+        let converged = eventually(RESPAWN_TIMEOUT, async || {
+            names_new_live_pid(dir.path(), old)
+                .is_some_and(|p| b.pid() == Some(p) && c.pid() == Some(p))
+        })
+        .await;
+        assert!(converged);
+        let new = b.pid().unwrap();
+        assert_eq!(qdrant_processes_for(dir.path()), 1);
+
+        let probe = start_policy(port, dir.path(), SidecarPolicy::KillOnDrop).await;
+        assert_eq!(probe.pid(), Some(new));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires qdrant binary on PATH"]
+    async fn zombie_under_killondrop_owner_respawned_by_reuser() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cleanup = LeaveRunningCleanup::new(dir.path());
+        let port = free_port();
+        let owner = start_policy(port, dir.path(), SidecarPolicy::KillOnDrop).await;
+        let reuser = start_policy(port, dir.path(), SidecarPolicy::LeaveRunning).await;
+        cleanup.track(&reuser);
+        let old = owner.pid().unwrap();
+
+        kill_pid(old);
+
+        let respawned = eventually(RESPAWN_TIMEOUT, async || {
+            names_new_live_pid(dir.path(), old).is_some_and(|p| reuser.pid() == Some(p))
+        })
+        .await;
+        assert!(respawned);
+        assert!(
+            !fully_reaped(old),
+            "KillOnDrop owner should not have reaped yet"
+        );
     }
 }
