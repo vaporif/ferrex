@@ -104,7 +104,6 @@ pub struct Resolved {
 #[derive(Debug)]
 pub struct Connected<T> {
     pub value: T,
-    #[allow(dead_code, reason = "used by Task 13")]
     pub attempts_used: u8,
 }
 

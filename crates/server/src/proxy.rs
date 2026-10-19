@@ -21,11 +21,12 @@ use crate::cli::{Cli, build_config};
 use crate::daemon::addr::{DaemonPaths, current_exe_canonical};
 use crate::daemon::handshake::Hello;
 use crate::daemon::spawn::{
-    AttemptError, Budgets, DaemonConn, Resolved, RoundError, connect_or_spawn, run_round,
-    send_hello,
+    AttemptError, Budgets, Connected, DaemonConn, MAX_ATTEMPTS, Resolved, RoundError,
+    connect_or_spawn, run_round, send_hello,
 };
 use crate::proxy::reconnect::{
-    AfterHello, LossAction, ReconnectCtx, exe_mtime, fail_pending, on_daemon_loss, reconnect,
+    AfterHello, LossAction, ReconnectCtx, ResendPending, exe_mtime, fail_pending, on_daemon_loss,
+    reconnect,
 };
 use crate::proxy::track::{ClientLine, Link, Tracker};
 
@@ -59,7 +60,11 @@ pub enum ConnState {
         key: String,
     },
     Disconnected,
-    Reconnecting,
+    /// A round is due; `used` counts the attempts a re-send pending at the loss already took.
+    Reconnecting {
+        after: AfterHello,
+        used: u8,
+    },
 }
 
 /// Proxies the client's stdio to the shared daemon, spawning it if needed; never returns once
@@ -111,6 +116,7 @@ async fn proxy(
         queue,
         out,
         initialised_at_loss: false,
+        pending: None,
     }
     .run(conn)
     .await
@@ -158,6 +164,7 @@ struct Proxy<'a> {
     queue: VecDeque<Vec<u8>>,
     out: &'a StdoutTx,
     initialised_at_loss: bool,
+    pending: Option<ResendPending>,
 }
 
 impl Proxy<'_> {
@@ -177,7 +184,7 @@ impl Proxy<'_> {
                     self.on_loss(reader, &key).await
                 }
                 ConnState::Disconnected => self.await_request().await,
-                ConnState::Reconnecting => self.reconnect_round().await,
+                ConnState::Reconnecting { after, used } => self.reconnect_round(after, used).await,
             };
         }
     }
@@ -233,20 +240,37 @@ impl Proxy<'_> {
         reader.abort();
         // Once it has stopped it can't forward a response whose id gets the restart error.
         let _ = reader.await;
-        diag(&format!(
-            "ferrex: daemon connection lost (key {key}); reconnecting on the next request"
-        ));
         self.queue.clear();
-        {
+        let used = {
             let mut tracker = lock(&self.ctx.tracker);
             tracker.set_link(Link::Down);
             self.initialised_at_loss = tracker.initialised();
-        }
+            // Over once the kept id was answered or the session became initialised.
+            self.pending
+                .take()
+                .filter(|p| tracker.kept_in_flight().is_some_and(|k| k.id == p.id))
+                .map_or(0, |p| p.attempts_used)
+        };
         match on_daemon_loss(&self.ctx.tracker, self.out) {
-            LossAction::WaitForRequest => ConnState::Disconnected,
-            LossAction::ReconnectNow => {
+            LossAction::WaitForRequest => {
+                diag(&format!(
+                    "ferrex: daemon connection lost (key {key}); reconnecting on the next request"
+                ));
+                ConnState::Disconnected
+            }
+            LossAction::ReconnectNow(_) if used >= MAX_ATTEMPTS => {
+                diag(&format!(
+                    "ferrex: could not reach the daemon: ferrex daemon connection lost \
+                     while the re-sent first request was pending, after {used} attempts"
+                ));
+                exit_via_writer(self.out, 1)
+            }
+            LossAction::ReconnectNow(after) => {
+                diag(&format!(
+                    "ferrex: daemon connection lost (key {key}) during startup; reconnecting now"
+                ));
                 lock(&self.ctx.tracker).set_link(Link::Reconnecting);
-                ConnState::Reconnecting
+                ConnState::Reconnecting { after, used }
             }
         }
     }
@@ -260,39 +284,43 @@ impl Proxy<'_> {
             let mut tracker = lock(&self.ctx.tracker);
             if let ClientLine::Request { .. } = tracker.on_client_line(&line) {
                 tracker.set_link(Link::Reconnecting);
+                let after = if tracker.replays_handshake() {
+                    AfterHello::ReplayDrop
+                } else {
+                    AfterHello::Nothing
+                };
                 drop(tracker);
                 self.queue.push_back(line);
-                return ConnState::Reconnecting;
+                return ConnState::Reconnecting { after, used: 0 };
             }
         }
     }
 
-    async fn reconnect_round(&mut self) -> ConnState {
-        let after = self.after_hello();
-        let round = reconnect(&self.ctx, after, 0);
+    async fn reconnect_round(&mut self, after: AfterHello, used: u8) -> ConnState {
+        let round = reconnect(&self.ctx, after, used);
         let tracker = &self.ctx.tracker;
         match wait_with_stdin(round, &mut self.stdin, tracker, &mut self.queue).await {
             None => exit_via_writer(self.out, 0),
             Some(Err(e)) => self.round_failed(&e),
-            Some(Ok(connected)) => {
-                let (conn, response) = connected.value;
+            Some(Ok(Connected {
+                value: (conn, response),
+                attempts_used,
+            })) => {
                 self.announce_key(&conn.key);
                 if let Some(line) = response {
                     lock(&self.ctx.tracker).on_daemon_line(&line);
                     send_line(self.out, line);
                 }
+                if after == AfterHello::ResendKept {
+                    self.pending = lock(&self.ctx.tracker)
+                        .kept_first()
+                        .map(|kept| ResendPending {
+                            id: kept.id.clone(),
+                            attempts_used,
+                        });
+                }
                 self.connected(conn)
             }
-        }
-    }
-
-    /// An inline-lifecycle session has no `initialize` to replay; its queue starts the session.
-    fn after_hello(&self) -> AfterHello {
-        let has_initialize = lock(&self.ctx.tracker).cached_initialize().is_some();
-        if self.initialised_at_loss && has_initialize {
-            AfterHello::ReplayDrop
-        } else {
-            AfterHello::Nothing
         }
     }
 

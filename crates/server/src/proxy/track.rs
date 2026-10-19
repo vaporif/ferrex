@@ -16,7 +16,7 @@ pub enum ClientLine {
     Notification {
         method: String,
     },
-    /// A `notifications/initialized` the replay will send; never queued.
+    /// A `notifications/initialized` the handshake replay will send; never queued.
     CacheOnly,
     Untracked,
 }
@@ -40,6 +40,7 @@ pub enum Outcome {
 pub struct KeptRequest {
     pub id: Value,
     pub line: Vec<u8>,
+    pub initialize: bool,
 }
 
 /// Follows the JSON-RPC traffic just enough to reconnect a client mid-session.
@@ -137,7 +138,10 @@ impl Tracker {
         let Some(id) = id else {
             if method == INITIALIZED {
                 self.initialized = Some(line.to_vec());
-                if self.link == Link::Reconnecting && !self.replay_started {
+                if self.link == Link::Reconnecting
+                    && self.replays_handshake()
+                    && !self.replay_started
+                {
                     return ClientLine::CacheOnly;
                 }
             }
@@ -153,6 +157,7 @@ impl Tracker {
                 self.kept_first = Some(KeptRequest {
                     id: id.clone(),
                     line: line.to_vec(),
+                    initialize: method == INITIALIZE,
                 });
             }
         }
@@ -188,6 +193,13 @@ impl Tracker {
         self.initialised
     }
 
+    /// A reconnect replays the handshake only for an initialised session that sent `initialize`;
+    /// any other session's next requests start the new daemon's session themselves.
+    #[must_use]
+    pub const fn replays_handshake(&self) -> bool {
+        self.initialised && self.initialize.is_some()
+    }
+
     /// Entering any link state starts it with no replay under way.
     pub const fn set_link(&mut self, link: Link) {
         self.link = link;
@@ -203,7 +215,6 @@ impl Tracker {
         self.in_flight.drain().map(|(_, (id, _))| id).collect()
     }
 
-    #[allow(dead_code, reason = "used by Task 13")]
     pub fn take_in_flight_except(&mut self, keep: &Value) -> Vec<Value> {
         let keep = id_key(keep);
         self.in_flight
@@ -212,7 +223,6 @@ impl Tracker {
             .collect()
     }
 
-    #[allow(dead_code, reason = "used by Task 13")]
     #[must_use]
     pub fn is_in_flight(&self, id: &Value) -> bool {
         self.in_flight.contains_key(&id_key(id))
@@ -228,10 +238,17 @@ impl Tracker {
         self.initialized.as_deref()
     }
 
-    #[allow(dead_code, reason = "used by Task 13")]
     #[must_use]
     pub const fn kept_first(&self) -> Option<&KeptRequest> {
         self.kept_first.as_ref()
+    }
+
+    /// The kept first request while the daemon still owes its response.
+    #[must_use]
+    pub fn kept_in_flight(&self) -> Option<&KeptRequest> {
+        self.kept_first
+            .as_ref()
+            .filter(|kept| self.is_in_flight(&kept.id))
     }
 }
 
@@ -380,7 +397,8 @@ mod tests {
             t.kept_first(),
             Some(&KeptRequest {
                 id: json!(3),
-                line: call
+                line: call,
+                initialize: false,
             })
         );
         t.on_daemon_line(&result(&json!(3)));
@@ -442,9 +460,16 @@ mod tests {
         assert_eq!(t.cached_initialize(), Some(&init[..]));
     }
 
+    fn initialised_by_initialize() -> Tracker {
+        let mut t = Tracker::default();
+        t.on_client_line(&request(&json!(1), "initialize"));
+        t.on_daemon_line(&result(&json!(1)));
+        t
+    }
+
     #[test]
     fn initialized_cache_only_while_reconnecting_before_replay() {
-        let mut t = Tracker::default();
+        let mut t = initialised_by_initialize();
         let initialized = notification("notifications/initialized");
         t.set_link(Link::Reconnecting);
         assert_eq!(t.on_client_line(&initialized), ClientLine::CacheOnly);
@@ -480,7 +505,7 @@ mod tests {
 
     #[test]
     fn set_link_clears_replay_started() {
-        let mut t = Tracker::default();
+        let mut t = initialised_by_initialize();
         t.set_link(Link::Reconnecting);
         t.mark_replay_started();
         t.set_link(Link::Reconnecting);
@@ -488,6 +513,40 @@ mod tests {
             t.on_client_line(&notification("notifications/initialized")),
             ClientLine::CacheOnly
         );
+    }
+
+    #[test]
+    fn initialized_queued_while_reconnecting_without_handshake_replay() {
+        let initialized = notification("notifications/initialized");
+        let mut pre_init = Tracker::default();
+        pre_init.on_client_line(&request(&json!(1), "initialize"));
+        let mut inline = Tracker::default();
+        inline.on_client_line(&request(&json!(1), "tools/call"));
+        inline.on_daemon_line(&result(&json!(1)));
+        for mut t in [pre_init, inline] {
+            assert!(!t.replays_handshake());
+            t.set_link(Link::Reconnecting);
+            assert!(matches!(
+                t.on_client_line(&initialized),
+                ClientLine::Notification { .. }
+            ));
+            assert_eq!(t.cached_initialized(), Some(&initialized[..]));
+        }
+    }
+
+    #[test]
+    fn kept_in_flight_until_answered() {
+        let mut t = Tracker::default();
+        t.on_client_line(&request(&json!(1), "ping"));
+        t.on_client_line(&request(&json!(2), "initialize"));
+        let kept = t.kept_in_flight().expect("initialize is kept");
+        assert_eq!((&kept.id, kept.initialize), (&json!(2), true));
+        t.on_daemon_line(&error(&json!(2)));
+        assert!(t.kept_in_flight().is_none());
+        t.on_client_line(&request(&json!(3), "tools/call"));
+        assert!(t.take_in_flight_except(&json!(3)).contains(&json!(1)));
+        let kept = t.kept_in_flight().expect("tools/call is kept");
+        assert_eq!((&kept.id, kept.initialize), (&json!(3), false));
     }
 
     #[test]

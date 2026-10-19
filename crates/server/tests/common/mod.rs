@@ -371,6 +371,11 @@ pub enum FakeBehaviour {
     CloseOnRequest(usize),
     NeverAnswer,
     DelayMs(u64),
+    /// Never answers the first request and echoes later ones; closes without answering when
+    /// the k-th request (1-based) arrives if `close_on = Some(k)`.
+    HoldFirst {
+        close_on: Option<usize>,
+    },
 }
 
 /// A scripted stand-in for the daemon: connection n follows `script[n]`, the last entry repeats.
@@ -471,8 +476,15 @@ async fn fake_conn(
         };
         requests += 1;
         match behaviour {
-            FakeBehaviour::CloseOnRequest(k) if requests >= k => return,
-            FakeBehaviour::Echo | FakeBehaviour::CloseOnRequest(_) => {}
+            FakeBehaviour::CloseOnRequest(k) | FakeBehaviour::HoldFirst { close_on: Some(k) }
+                if requests >= k =>
+            {
+                return;
+            }
+            FakeBehaviour::HoldFirst { .. } if requests == 1 => continue,
+            FakeBehaviour::Echo
+            | FakeBehaviour::CloseOnRequest(_)
+            | FakeBehaviour::HoldFirst { .. } => {}
             FakeBehaviour::NeverAnswer => continue,
             FakeBehaviour::DelayMs(ms) => tokio::time::sleep(Duration::from_millis(ms)).await,
         }

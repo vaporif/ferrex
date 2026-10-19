@@ -18,7 +18,7 @@ const LIST_CHANGED: &str = "notifications/tools/list_changed";
 const WITHIN: Duration = Duration::from_secs(15);
 const POLL: Duration = Duration::from_millis(50);
 
-use FakeBehaviour::{CloseOnRequest, Echo, NeverAnswer};
+use FakeBehaviour::{CloseOnRequest, Echo, HoldFirst, NeverAnswer};
 use FakeConn::{CloseBeforeReply, DelayHello, Refuse, Serve};
 
 fn env_opts(vars: &[(&str, &str)]) -> CmdOpts {
@@ -95,6 +95,32 @@ fn count_method(messages: &[Value], method: &str) -> usize {
 
 fn count_lines(lines: &[String], needle: &str) -> usize {
     lines.iter().filter(|l| l.contains(needle)).count()
+}
+
+/// `tools/call` params carrying complete `_meta`, so rmcp picks the inline lifecycle.
+fn inline_params() -> Value {
+    json!({
+        "name": "recall",
+        "_meta": {
+            "protocolVersion": "2026-07-28",
+            "clientInfo": {"name": "test", "version": "0.1.0"},
+            "clientCapabilities": {}
+        }
+    })
+}
+
+/// Waits until connection `idx` of `fake` has received at least `n` lines.
+async fn wait_received(fake: &FakeDaemon, idx: usize, n: usize) {
+    wait_until(
+        &format!("connection {idx} receives {n} lines"),
+        WITHIN,
+        || {
+            fake.received()
+                .get(idx)
+                .is_some_and(|lines| lines.len() >= n)
+        },
+    )
+    .await;
 }
 
 async fn wait_until(what: &str, within: Duration, mut done: impl FnMut() -> bool) {
@@ -356,14 +382,7 @@ async fn stdin_eof_while_disconnected_exits_zero() {
 async fn inline_lifecycle_reconnects_without_replay() {
     let (env, fake) = with_fake(vec![Serve(CloseOnRequest(2)), Serve(Echo)]).await;
     let mut proxy = ProxyClient::spawn(&env, CmdOpts::default());
-    let meta = json!({
-        "name": "recall",
-        "_meta": {
-            "protocolVersion": "2026-07-28",
-            "clientInfo": {"name": "test", "version": "0.1.0"},
-            "clientCapabilities": {}
-        }
-    });
+    let meta = inline_params();
     assert_echo(
         &proxy.request("tools/call", meta.clone()).await,
         "tools/call",
@@ -464,4 +483,207 @@ async fn real_daemon_kill9_next_request_succeeds() {
         .filter(|m| m["result"]["serverInfo"].is_object())
         .count();
     assert_eq!(init_responses, 1, "{:?}", proxy.seen());
+}
+
+#[tokio::test]
+async fn pre_init_key_change_sends_no_list_changed() {
+    let env = TestEnv::without_sidecar();
+    let first = env.paths().await;
+    let old = FakeDaemon::start(&first.socket, vec![Serve(NeverAnswer)]);
+    let mut proxy = ProxyClient::spawn(&env, CmdOpts::default());
+    let id = proxy.send_request("initialize", &initialize_params()).await;
+    wait_received(&old, 0, 1).await;
+    let second = change_key(&env, &first).await;
+    let new = FakeDaemon::start(&second.socket, vec![Serve(Echo)]);
+    drop(old);
+    assert_echo(&proxy.response_within(id, WITHIN).await, "initialize");
+    assert_eq!(proxy.seen().len(), 1, "{:?}", proxy.seen());
+    assert_echo(&proxy.request("tools/list", json!({})).await, "tools/list");
+    assert_eq!(
+        count_method(proxy.seen(), LIST_CHANGED),
+        0,
+        "{:?}",
+        proxy.seen()
+    );
+    assert_eq!(new.received()[0][0], initialize_line());
+}
+
+#[tokio::test]
+async fn ping_in_flight_before_init_gets_restart_error() {
+    let (env, fake) = with_fake(vec![Serve(CloseOnRequest(1)), Serve(Echo)]).await;
+    let mut proxy = ProxyClient::spawn(&env, CmdOpts::default());
+    assert_restart_error(&proxy.request("ping", json!({})).await);
+    let init = proxy.request("initialize", initialize_params()).await;
+    assert_echo(&init, "initialize");
+    let second = &fake.received()[1];
+    assert_eq!(count_lines(second, "\"initialize\""), 1, "{second:?}");
+}
+
+#[tokio::test]
+async fn initialized_during_pre_init_reconnect_reaches_daemon() {
+    let (env, fake) = with_fake(vec![Serve(CloseOnRequest(1)), DelayHello(500, Echo)]).await;
+    let mut proxy = ProxyClient::spawn(&env, CmdOpts::default());
+    assert_restart_error(&proxy.request("ping", json!({})).await);
+    let id = proxy.send_request("initialize", &initialize_params()).await;
+    proxy.notify("notifications/initialized", json!({})).await;
+    assert_echo(&proxy.response_within(id, WITHIN).await, "initialize");
+    wait_received(&fake, 1, 2).await;
+    assert_eq!(
+        fake.received()[1],
+        vec![
+            request_line(id, "initialize", &initialize_params()),
+            initialized_line(&json!({})),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn stalled_forwarded_initialize_ends_round_after_one_attempt() {
+    let (env, fake) = with_fake(vec![Serve(CloseOnRequest(1)), Serve(NeverAnswer)]).await;
+    let opts = env_opts(&[("FERREX_TEST_PROXY_TIMEOUT_MS", "500")]);
+    let mut proxy = ProxyClient::spawn(&env, opts);
+    proxy.send_request("initialize", &initialize_params()).await;
+    let status = expect_exit(&mut proxy, WITHIN).await;
+    assert!(!status.success(), "{status}");
+    assert_eq!(fake.connections(), 2);
+}
+
+#[tokio::test]
+async fn close_before_initialize_response_is_retried() {
+    let (env, fake) = with_fake(vec![Serve(CloseOnRequest(1)), Serve(Echo)]).await;
+    let mut proxy = ProxyClient::spawn(&env, CmdOpts::default());
+    let id = proxy.send_request("initialize", &initialize_params()).await;
+    assert_echo(&proxy.response_within(id, WITHIN).await, "initialize");
+    assert_echo(&proxy.request("tools/list", json!({})).await, "tools/list");
+    let answers = proxy.seen().iter().filter(|m| m["id"] == json!(id)).count();
+    assert_eq!(answers, 1, "{:?}", proxy.seen());
+    assert_eq!(fake.received()[1][0], initialize_line());
+    assert_eq!(count_lines(&fake.received()[1], "\"initialize\""), 1);
+}
+
+#[tokio::test]
+async fn pre_init_failed_round_exits_nonzero() {
+    let (env, fake) = with_fake(vec![Serve(CloseOnRequest(1))]).await;
+    let mut proxy = ProxyClient::spawn(&env, CmdOpts::default());
+    proxy.send_request("initialize", &initialize_params()).await;
+    let status = expect_exit(&mut proxy, WITHIN).await;
+    assert!(!status.success(), "{status}");
+    assert_eq!(fake.connections(), 4);
+    for lines in fake.received() {
+        assert_eq!(lines, vec![initialize_line()]);
+    }
+}
+
+#[tokio::test]
+async fn stdin_eof_while_reconnect_pending_exits_zero() {
+    let (env, fake) = with_fake(vec![Serve(CloseOnRequest(1)), DelayHello(2000, Echo)]).await;
+    let mut proxy = ProxyClient::spawn(&env, CmdOpts::default());
+    proxy.send_request("initialize", &initialize_params()).await;
+    wait_until("the proxy reconnects at once", WITHIN, || {
+        fake.connections() == 2
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let closed = Instant::now();
+    proxy.close_stdin();
+    let status = expect_exit(&mut proxy, WITHIN).await;
+    assert!(status.success(), "{status}");
+    assert!(
+        closed.elapsed() < Duration::from_millis(1500),
+        "{:?}",
+        closed.elapsed()
+    );
+    assert_eq!(proxy.read_line_timeout(Duration::from_secs(1)).await, None);
+}
+
+#[tokio::test]
+async fn inline_first_request_resent_after_close() {
+    let (env, fake) = with_fake(vec![Serve(CloseOnRequest(1)), Serve(Echo)]).await;
+    let mut proxy = ProxyClient::spawn(&env, CmdOpts::default());
+    let id = proxy.send_request("tools/call", &inline_params()).await;
+    assert_echo(&proxy.response_within(id, WITHIN).await, "tools/call");
+    let kept = request_line(id, "tools/call", &inline_params());
+    assert_eq!(fake.received(), vec![vec![kept.clone()], vec![kept]]);
+}
+
+#[tokio::test]
+async fn inline_pending_resend_lets_later_lines_through() {
+    let (env, fake) = with_fake(vec![
+        Serve(CloseOnRequest(1)),
+        Serve(HoldFirst { close_on: None }),
+    ])
+    .await;
+    let mut proxy = ProxyClient::spawn(&env, CmdOpts::default());
+    let kept = proxy.send_request("tools/call", &inline_params()).await;
+    wait_received(&fake, 1, 1).await;
+    let list = proxy.send_request("tools/list", &json!({})).await;
+    assert_echo(&proxy.response_within(list, WITHIN).await, "tools/list");
+    let cancelled = json!({"requestId": kept});
+    proxy
+        .notify("notifications/cancelled", cancelled.clone())
+        .await;
+    wait_received(&fake, 1, 3).await;
+    assert_eq!(
+        fake.received()[1],
+        vec![
+            request_line(kept, "tools/call", &inline_params()),
+            request_line(list, "tools/list", &json!({})),
+            json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": cancelled})
+                .to_string(),
+        ]
+    );
+    let kept_answers = proxy
+        .seen()
+        .iter()
+        .filter(|m| m["id"] == json!(kept))
+        .count();
+    assert_eq!(kept_answers, 0, "{:?}", proxy.seen());
+}
+
+#[tokio::test]
+async fn inline_repeated_loss_resends_alone_then_exits() {
+    let (env, fake) = with_fake(vec![
+        Serve(CloseOnRequest(1)),
+        Serve(HoldFirst { close_on: Some(2) }),
+    ])
+    .await;
+    let mut proxy = ProxyClient::spawn(&env, CmdOpts::default());
+    let kept = proxy.send_request("tools/call", &inline_params()).await;
+    let kept_line = request_line(kept, "tools/call", &inline_params());
+    for conn in 1..=3 {
+        wait_received(&fake, conn, 1).await;
+        assert_eq!(fake.received()[conn], vec![kept_line.clone()]);
+        let id = proxy.send_request("tools/list", &json!({})).await;
+        assert_restart_error(&proxy.response_within(id, WITHIN).await);
+    }
+    let status = expect_exit(&mut proxy, WITHIN).await;
+    assert!(!status.success(), "{status}");
+    assert_eq!(fake.connections(), 4);
+    assert!(
+        proxy
+            .stderr_text()
+            .contains("ferrex daemon connection lost")
+    );
+}
+
+#[tokio::test]
+async fn inline_later_success_initialises() {
+    let (env, fake) = with_fake(vec![
+        Serve(CloseOnRequest(1)),
+        Serve(HoldFirst { close_on: Some(3) }),
+        Serve(Echo),
+    ])
+    .await;
+    let mut proxy = ProxyClient::spawn(&env, CmdOpts::default());
+    let kept = proxy.send_request("tools/call", &inline_params()).await;
+    wait_received(&fake, 1, 1).await;
+    assert_echo(&proxy.request("tools/list", json!({})).await, "tools/list");
+    let lost = proxy.send_request("tools/list", &json!({})).await;
+    for resp in proxy.responses_within(&[kept, lost], WITHIN).await {
+        assert_restart_error(&resp);
+    }
+    assert_echo(&proxy.request("ping", json!({})).await, "ping");
+    assert!(proxy.is_running());
+    assert_eq!(fake.connections(), 3);
+    assert_eq!(count_lines(&fake.received()[2], "tools/call"), 0);
 }
