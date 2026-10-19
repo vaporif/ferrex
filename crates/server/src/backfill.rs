@@ -5,6 +5,9 @@ pub fn run_normalized_predicates(
     namespace: Option<String>,
     dry_run: bool,
 ) -> eyre::Result<()> {
+    if !dry_run {
+        crate::admin_guard::refuse_if_live(&config)?;
+    }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?

@@ -6,6 +6,9 @@ pub fn run_reconcile(
     sample: Option<usize>,
     format: &str,
 ) -> eyre::Result<()> {
+    if fix {
+        crate::admin_guard::refuse_if_live(&config)?;
+    }
     if sample.is_some() {
         tracing::warn!("--sample is not yet implemented, running full audit");
     }

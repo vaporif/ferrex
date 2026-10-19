@@ -1,6 +1,7 @@
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -155,6 +156,37 @@ impl PidFile {
             )
             .ok()
     }
+}
+
+#[must_use]
+pub fn live_for_db(run_dir: &Path, db_path: &Path) -> Option<u32> {
+    live_daemons(run_dir)
+        .find(|(pid_file, _)| pid_file.db_path == db_path)
+        .map(|(pid_file, _)| pid_file.pid)
+}
+
+#[must_use]
+#[allow(dead_code, reason = "used by Task 14")]
+pub fn any_live(run_dir: &Path) -> Option<u32> {
+    live_daemons(run_dir)
+        .next()
+        .map(|(pid_file, _)| pid_file.pid)
+}
+
+/// Best-effort: PID files that are unreadable, name a dead process, or have no listening socket are skipped.
+fn live_daemons(run_dir: &Path) -> impl Iterator<Item = (PidFile, PathBuf)> {
+    std::fs::read_dir(run_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "pid"))
+        .filter_map(|path| {
+            let pid_file = PidFile::read(&path)?;
+            let socket = path.with_extension("sock");
+            (ferrex_store::pid_alive(pid_file.pid) && UnixStream::connect(&socket).is_ok())
+                .then_some((pid_file, socket))
+        })
 }
 
 #[cfg(test)]
@@ -355,5 +387,65 @@ pub(super) mod tests {
         ensure_run_dir(&dir).unwrap();
         let mode = fs::metadata(&dir).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700);
+    }
+
+    fn live_daemon(dir: &Path, stem: &str, db: &str) -> std::os::unix::net::UnixListener {
+        let listener =
+            std::os::unix::net::UnixListener::bind(dir.join(format!("{stem}.sock"))).unwrap();
+        PidFile {
+            pid: std::process::id(),
+            db_path: PathBuf::from(db),
+        }
+        .write(&dir.join(format!("{stem}.pid")))
+        .unwrap();
+        listener
+    }
+
+    #[test]
+    fn live_for_db_finds_same_db_any_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _l = live_daemon(tmp.path(), "aaaa", "/abs/x.db");
+        assert_eq!(
+            live_for_db(tmp.path(), Path::new("/abs/x.db")),
+            Some(std::process::id())
+        );
+    }
+
+    #[test]
+    fn live_for_db_ignores_other_db() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _l = live_daemon(tmp.path(), "aaaa", "/abs/x.db");
+        assert_eq!(live_for_db(tmp.path(), Path::new("/abs/y.db")), None);
+    }
+
+    #[test]
+    fn live_for_db_ignores_stale_pid_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        PidFile {
+            pid: std::process::id(),
+            db_path: PathBuf::from("/abs/x.db"),
+        }
+        .write(&tmp.path().join("aaaa.pid"))
+        .unwrap();
+        assert_eq!(live_for_db(tmp.path(), Path::new("/abs/x.db")), None);
+    }
+
+    #[test]
+    fn live_for_db_skips_unparseable_pid_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("x.pid"), "garbage").unwrap();
+        let _l = live_daemon(tmp.path(), "bbbb", "/abs/x.db");
+        assert_eq!(
+            live_for_db(tmp.path(), Path::new("/abs/x.db")),
+            Some(std::process::id())
+        );
+    }
+
+    #[test]
+    fn any_live_finds_daemon_on_other_db() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(any_live(tmp.path()), None);
+        let _l = live_daemon(tmp.path(), "aaaa", "/abs/other.db");
+        assert_eq!(any_live(tmp.path()), Some(std::process::id()));
     }
 }
