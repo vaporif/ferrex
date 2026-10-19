@@ -1,3 +1,4 @@
+mod admin_guard;
 mod audit;
 mod backfill;
 mod cli;
