@@ -5,7 +5,10 @@ use ferrex_core::{
     StoreRequest, TaxonomyRequest, TimelineRequest,
 };
 use rmcp::{
-    ErrorData, ServerHandler, handler::server::wrapper::Parameters, tool, tool_handler, tool_router,
+    ErrorData, ServerHandler,
+    handler::server::wrapper::Parameters,
+    model::{Implementation, ServerCapabilities, ServerConfig},
+    tool, tool_handler, tool_router,
 };
 
 use crate::hint;
@@ -115,7 +118,9 @@ impl FerrexServer {
             source: p.source,
             context: p.context,
             entities: p.entities,
-            namespace: p.namespace,
+            namespace: p
+                .namespace
+                .or_else(|| Some(self.defaults.namespace.clone())),
             supersedes: p.supersedes,
         };
 
@@ -186,7 +191,9 @@ impl FerrexServer {
             query: p.query,
             types,
             entities: p.entities,
-            namespace: p.namespace,
+            namespace: p
+                .namespace
+                .or_else(|| Some(self.defaults.namespace.clone())),
             limit: p.limit,
             include_stale: p.include_stale,
             include_invalidated: p.include_invalidated,
@@ -279,7 +286,9 @@ impl FerrexServer {
 
         let req = TimelineRequest {
             entity: p.entity,
-            namespace: p.namespace,
+            namespace: p
+                .namespace
+                .or_else(|| Some(self.defaults.namespace.clone())),
             limit: p.limit,
             types,
             include_invalidated: p.include_invalidated,
@@ -299,6 +308,7 @@ impl FerrexServer {
         let req = TaxonomyRequest {
             namespace: p.namespace,
             limit: p.limit,
+            default_namespace: Some(self.defaults.namespace.clone()),
         };
         let resp = self.service.taxonomy(req).await.map_err(map_error)?;
         Ok(serde_json::to_string_pretty(&resp).unwrap_or_default())
@@ -306,4 +316,14 @@ impl FerrexServer {
 }
 
 #[tool_handler(router = self.tool_router)]
-impl ServerHandler for FerrexServer {}
+impl ServerHandler for FerrexServer {
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_tool_list_changed()
+                .build(),
+        )
+        .with_server_info(Implementation::new("ferrex", env!("CARGO_PKG_VERSION")))
+    }
+}

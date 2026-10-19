@@ -1002,3 +1002,16 @@ async fn test_concurrent_requests() {
 
     h.shutdown().await;
 }
+
+#[tokio::test]
+async fn initialize_advertises_list_changed_and_ferrex_server_info() {
+    let mut h = McpTestHarness::new_raw().await;
+    let resp = h.initialize().await;
+
+    let result = &resp["result"];
+    assert_eq!(result["capabilities"]["tools"]["listChanged"], true);
+    assert_eq!(result["serverInfo"]["name"], "ferrex");
+    assert_eq!(result["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
+
+    h.shutdown().await;
+}

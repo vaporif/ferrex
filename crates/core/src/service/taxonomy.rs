@@ -15,6 +15,7 @@ impl MemoryService {
         let scope_given = req.namespace.is_some();
         let namespace = req
             .namespace
+            .or(req.default_namespace)
             .unwrap_or_else(|| self.config.namespace.clone());
         tracing::Span::current().record("namespace", namespace.as_str());
 
