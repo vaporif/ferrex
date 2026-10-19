@@ -8,7 +8,7 @@ mod vector;
 
 pub use error::StoreError;
 pub use journal::{CompletedOp, PendingOp, PendingOpKind};
-pub use metadata::{MetadataStore, SqliteStore};
+pub use metadata::{MetadataStore, SqliteStore, is_memory_path};
 pub use qdrant_client::{Payload, qdrant::Filter};
 pub use sidecar::QdrantSidecar;
 pub use vector::{BatchPoint, ScoredPayload, VectorStore};

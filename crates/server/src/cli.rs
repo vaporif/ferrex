@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use ferrex_core::{FerrexConfig, ModelTier, RerankerTier};
@@ -112,6 +112,22 @@ pub enum BackfillCommand {
 
 const SHIPPED_BASELINE: &str = include_str!("../config/ferrex.toml");
 
+fn absolutize(path: &Path) -> eyre::Result<PathBuf> {
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => std::env::current_dir()?,
+    };
+    std::fs::create_dir_all(&parent)
+        .map_err(|e| eyre::eyre!("create {}: {e}", parent.display()))?;
+    let parent = parent
+        .canonicalize()
+        .map_err(|e| eyre::eyre!("resolve {}: {e}", parent.display()))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| eyre::eyre!("path has no file name: {}", path.display()))?;
+    Ok(parent.join(name))
+}
+
 pub fn build_config(cli: Cli) -> eyre::Result<FerrexConfig> {
     let default_dir = || {
         dirs::home_dir()
@@ -126,8 +142,14 @@ pub fn build_config(cli: Cli) -> eyre::Result<FerrexConfig> {
         .config_path
         .clone()
         .unwrap_or_else(|| default_dir().join("ferrex.toml"));
+    let db_path = if ferrex_store::is_memory_path(&db_path) {
+        db_path
+    } else {
+        absolutize(&db_path)?
+    };
     let loaded = ferrex_core::load_or_init(&config_path, SHIPPED_BASELINE)
         .map_err(|e| eyre::eyre!("config load: {e}"))?;
+    let config_path = absolutize(&config_path)?;
     Ok(FerrexConfig {
         qdrant_url: cli.qdrant_url,
         qdrant_bin: cli.qdrant_bin,
@@ -145,4 +167,59 @@ pub fn build_config(cli: Cli) -> eyre::Result<FerrexConfig> {
         reader_pool_size: loaded.reader_pool_size,
         cache: loaded.cache,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_for(args: &[&str]) -> eyre::Result<FerrexConfig> {
+        let mut argv = vec!["ferrex"];
+        argv.extend_from_slice(args);
+        build_config(Cli::try_parse_from(argv)?)
+    }
+
+    #[test]
+    fn build_config_absolutizes_relative_db_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let config = config_for(&["--config-path", "c.toml", "--db-path", "sub/x.db"]).unwrap();
+        let expected = tmp.path().canonicalize().unwrap().join("sub/x.db");
+        assert_eq!(config.db_path, expected);
+        assert!(tmp.path().join("sub").is_dir());
+    }
+
+    #[test]
+    fn build_config_same_key_path_for_different_spellings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("c.toml");
+        let cfg = cfg.to_str().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        std::fs::create_dir(tmp.path().join("a")).unwrap();
+        let dotted = config_for(&["--config-path", cfg, "--db-path", "./a/../b/x.db"]).unwrap();
+        let abs = tmp.path().join("b/x.db");
+        let plain =
+            config_for(&["--config-path", cfg, "--db-path", abs.to_str().unwrap()]).unwrap();
+        assert_eq!(dotted.db_path, plain.db_path);
+    }
+
+    #[test]
+    fn build_config_keeps_memory_db_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let config = config_for(&["--config-path", "c.toml", "--db-path", ":memory:"]).unwrap();
+        assert_eq!(config.db_path, Path::new(":memory:"));
+        assert!(!tmp.path().join(":memory:").exists());
+    }
+
+    #[test]
+    fn build_config_absolutizes_config_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let config =
+            config_for(&["--config-path", "c/ferrex.toml", "--db-path", ":memory:"]).unwrap();
+        let path = config.config_path.unwrap();
+        assert!(path.is_absolute());
+        assert!(path.is_file());
+    }
 }
