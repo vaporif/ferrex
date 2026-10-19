@@ -166,7 +166,6 @@ pub fn live_for_db(run_dir: &Path, db_path: &Path) -> Option<u32> {
 }
 
 #[must_use]
-#[allow(dead_code, reason = "used by Task 14")]
 pub fn any_live(run_dir: &Path) -> Option<u32> {
     live_daemons(run_dir)
         .next()

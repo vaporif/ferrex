@@ -15,7 +15,6 @@ pub fn refuse_if_live(config: &FerrexConfig) -> eyre::Result<()> {
     )
 }
 
-#[allow(dead_code, reason = "used by Task 14")]
 pub fn refuse_if_any_live() -> eyre::Result<()> {
     refuse(
         addr::any_live(&addr::run_dir()),
