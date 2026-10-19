@@ -258,6 +258,13 @@ async fn invalid_namespace_gets_session_refusal_others_fine() {
     .await;
     assert!(conn.is_none());
     assert_eq!(reply.kind.as_deref(), Some("session"), "{reply:?}");
+    assert!(
+        reply
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("invalid namespace")),
+        "{reply:?}"
+    );
     assert!(!good.tool_names().await.is_empty());
 }
 
