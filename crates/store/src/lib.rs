@@ -10,7 +10,7 @@ pub use error::StoreError;
 pub use journal::{CompletedOp, PendingOp, PendingOpKind};
 pub use metadata::{MetadataStore, SqliteStore};
 pub use qdrant_client::{Payload, qdrant::Filter};
-pub use sidecar::QdrantSidecar;
+pub use sidecar::{QdrantSidecar, is_qdrant, pid_alive, probe_qdrant, read_pid, read_port_file};
 pub use vector::{BatchPoint, ScoredPayload, VectorStore};
 
 pub struct QdrantField;
