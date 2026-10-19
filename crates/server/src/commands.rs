@@ -2,8 +2,9 @@ use ferrex_core::{FerrexConfig, MemoryService};
 
 pub fn diagnose(config: FerrexConfig) -> eyre::Result<()> {
     runtime()?.block_on(async move {
+        let namespace = config.namespace.clone();
         let service = MemoryService::from_config(config).await?;
-        let report = service.diagnostics().await?;
+        let report = service.diagnostics(&namespace).await?;
 
         println!("ferrex v{} | {}", report.version, report.embedding_model);
         println!();

@@ -71,7 +71,7 @@ impl MemoryService {
         };
 
         let diagnostics = if req.diagnostics.unwrap_or(false) {
-            Some(self.diagnostics().await?)
+            Some(self.diagnostics(&req.namespace).await?)
         } else {
             None
         };
@@ -182,8 +182,7 @@ impl MemoryService {
         })
     }
 
-    pub async fn diagnostics(&self) -> Result<DiagnosticsReport, CoreError> {
-        let namespace = &self.config.namespace;
+    pub async fn diagnostics(&self, namespace: &str) -> Result<DiagnosticsReport, CoreError> {
         let memory_count = self.metadata_store.memory_count().await?;
         let entity_count = self.metadata_store.entity_count(namespace).await?;
         let sqlite_size = self.metadata_store.storage_size_bytes().await?;
@@ -207,7 +206,7 @@ impl MemoryService {
             embedding_model: self.config.model_tier.model_name().to_string(),
             qdrant_url,
             qdrant_pid,
-            collection: namespace.clone(),
+            collection: namespace.to_owned(),
             sqlite_path: self.config.db_path.display().to_string(),
             sqlite_size_bytes: sqlite_size,
             memory_count,

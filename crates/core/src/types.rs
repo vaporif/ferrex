@@ -185,6 +185,8 @@ pub struct TimelineResponse {
 pub struct TaxonomyRequest {
     pub namespace: Option<String>,
     pub limit: Option<usize>,
+    /// Fallback scope when `namespace` is `None`; the namespace list is still returned.
+    pub default_namespace: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
