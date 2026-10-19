@@ -1,18 +1,42 @@
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 use ferrex_core::FerrexConfig;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::time::Instant;
 
 #[cfg(target_os = "macos")]
 pub const MAX_SUN_PATH: usize = 103;
 #[cfg(not(target_os = "macos"))]
 pub const MAX_SUN_PATH: usize = 107;
+
+const LOCK_POLL: Duration = Duration::from_millis(50);
+
+/// Opens `path` and polls for an exclusive flock until `deadline`; `Ok(None)` on timeout.
+pub async fn try_lock_until(path: &Path, deadline: Instant) -> io::Result<Option<File>> {
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(Some(file)),
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(e)) => return Err(e),
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        tokio::time::sleep(LOCK_POLL).await;
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct DaemonPaths {

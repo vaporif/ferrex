@@ -5,7 +5,7 @@ mod idle;
 mod session;
 pub mod spawn;
 
-use std::fs::{File, Metadata, OpenOptions, TryLockError};
+use std::fs::{File, Metadata};
 use std::io;
 use std::os::fd::AsFd;
 use std::os::unix::fs::MetadataExt;
@@ -21,7 +21,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
-use crate::daemon::addr::{DaemonPaths, PidFile, current_exe_canonical, ensure_run_dir};
+use crate::daemon::addr::{
+    DaemonPaths, PidFile, current_exe_canonical, ensure_run_dir, try_lock_until,
+};
 use crate::daemon::env::{env_duration, test_hook_millis};
 use crate::daemon::idle::{ConnEvent, IdleState};
 use crate::daemon::session::{CollectionMemo, InitView, SessionCtx, serve_connection};
@@ -32,7 +34,6 @@ const IDLE_TIMEOUT_DEFAULT_SECS: u64 = 600;
 const INIT_FAIL_GRACE: Duration = Duration::from_secs(60);
 const SHUTDOWN_LOCK_WAIT: Duration = Duration::from_secs(10);
 const SERVICE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
-const LOCK_POLL: Duration = Duration::from_millis(50);
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 
 type InitResult = Result<MemoryService, String>;
@@ -449,28 +450,11 @@ async fn sleep_until_opt(deadline: Option<Instant>) {
 }
 
 async fn acquire_lock_within(path: &Path, budget: Duration) -> Option<File> {
-    let file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(path)
-        .inspect_err(|e| tracing::warn!(path = %path.display(), error = %e, "open spawn lock"))
-        .ok()?;
-    let deadline = Instant::now() + budget;
-    loop {
-        match file.try_lock() {
-            Ok(()) => return Some(file),
-            Err(TryLockError::WouldBlock) => {}
-            Err(TryLockError::Error(e)) => {
-                tracing::warn!(path = %path.display(), error = %e, "lock spawn lock");
-                return None;
-            }
-        }
-        if Instant::now() >= deadline {
-            return None;
-        }
-        tokio::time::sleep(LOCK_POLL).await;
-    }
+    try_lock_until(path, Instant::now() + budget)
+        .await
+        .inspect_err(|e| tracing::warn!(path = %path.display(), error = %e, "lock spawn lock"))
+        .ok()
+        .flatten()
 }
 
 fn release_lock(lock: &File) {

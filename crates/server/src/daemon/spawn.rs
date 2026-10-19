@@ -1,6 +1,6 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::fs::{File, OpenOptions, TryLockError};
+use std::fs::{File, OpenOptions};
 use std::future::Future;
 use std::io;
 use std::path::Path;
@@ -14,13 +14,12 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::process::{Child, Command};
 use tokio::time::Instant;
 
-use crate::daemon::addr::{DaemonPaths, ensure_run_dir};
+use crate::daemon::addr::{DaemonPaths, ensure_run_dir, try_lock_until};
 use crate::daemon::handshake::{Hello, HelloReply, RefusalKind};
 
 pub const MAX_ATTEMPTS: u8 = 3;
 pub const BACKOFF: [Duration; 2] = [Duration::from_millis(500), Duration::from_secs(1)];
 
-const LOCK_POLL: Duration = Duration::from_millis(50);
 const ACCEPT_POLL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone)]
@@ -198,32 +197,15 @@ pub async fn connect_or_spawn(
 }
 
 async fn acquire_lock(path: &Path, budget: Duration) -> Result<File, AttemptError> {
-    let file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(path)
-        .map_err(|e| AttemptError::retryable(format!("open {}: {e}", path.display())))?;
-    let deadline = Instant::now() + budget;
-    loop {
-        match file.try_lock() {
-            Ok(()) => return Ok(file),
-            Err(TryLockError::WouldBlock) => {}
-            Err(TryLockError::Error(e)) => {
-                return Err(AttemptError::retryable(format!(
-                    "lock {}: {e}",
-                    path.display()
-                )));
-            }
-        }
-        if Instant::now() >= deadline {
-            return Err(AttemptError::fatal(format!(
+    try_lock_until(path, Instant::now() + budget)
+        .await
+        .map_err(|e| AttemptError::retryable(format!("lock {}: {e}", path.display())))?
+        .ok_or_else(|| {
+            AttemptError::fatal(format!(
                 "timed out waiting for spawn lock {}",
                 path.display()
-            )));
-        }
-        tokio::time::sleep(LOCK_POLL).await;
-    }
+            ))
+        })
 }
 
 fn remove_stale_socket(socket: &Path) -> Result<(), AttemptError> {
