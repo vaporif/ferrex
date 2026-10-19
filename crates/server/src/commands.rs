@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use ferrex_core::{FerrexConfig, MemoryService};
-use ferrex_store::{is_qdrant, pid_alive, probe_qdrant};
+use ferrex_store::{is_qdrant, pid_alive};
 use rustix::io::Errno;
 use rustix::process::{Pid, Signal};
 
@@ -357,15 +357,10 @@ fn stop_sidecar(config: &FerrexConfig, dir: &Path) -> eyre::Result<()> {
         return Ok(());
     };
     if !is_qdrant(pid, &config.qdrant_bin) {
-        let port = ferrex_store::read_port_file(&dir.join("qdrant.port"))
-            .filter(|(recorded, _)| *recorded == pid)
-            .map_or(config.qdrant_port, |(_, port)| port);
-        if !runtime()?.block_on(probe_qdrant(port)) {
-            println!(
-                "Qdrant kill skipped: pid {pid} is not a qdrant process and nothing answers on port {port}."
-            );
-            return Ok(());
-        }
+        println!(
+            "Qdrant (pid {pid}) was not stopped because it could not be confirmed as ferrex's sidecar. Stop it manually."
+        );
+        return Ok(());
     }
     kill_and_wait(pid)?;
     println!("Stopped qdrant (pid {pid})");

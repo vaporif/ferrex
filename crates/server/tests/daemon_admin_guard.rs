@@ -209,9 +209,47 @@ async fn nuke_skips_kill_when_pid_is_not_qdrant() {
     let _ = sleeper.wait();
 
     assert_ok(&out);
-    assert!(stdout(&out).contains("skipped"), "stdout: {}", stdout(&out));
+    assert!(
+        stdout(&out).contains("was not stopped"),
+        "stdout: {}",
+        stdout(&out)
+    );
     assert!(alive);
     assert!(!dir.join("qdrant.pid").exists());
+}
+
+#[tokio::test]
+async fn nuke_does_not_signal_non_qdrant_pid_even_when_port_answers() {
+    let env = TestEnv::without_sidecar();
+    let (_sidecar, qdrant_pid) = start_sidecar(&env).await;
+    let dir = sidecar_dir(&env);
+    let mut sleeper = std::process::Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .unwrap();
+    fs::write(dir.join("qdrant.pid"), sleeper.id().to_string()).unwrap();
+    fs::write(
+        dir.join("qdrant.port"),
+        format!("{} {}", sleeper.id(), env.qdrant_port),
+    )
+    .unwrap();
+
+    let out = nuke(&env, &dir.join("ferrex.db")).await;
+    let sleeper_alive = pid_alive(sleeper.id());
+    let qdrant_alive = pid_alive(qdrant_pid);
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+
+    assert_ok(&out);
+    let text = stdout(&out);
+    assert!(
+        text.contains(&format!("Qdrant (pid {}) was not stopped", sleeper.id())),
+        "stdout: {text}"
+    );
+    assert!(sleeper_alive);
+    assert!(qdrant_alive);
+    assert!(!dir.join("qdrant.pid").exists());
+    assert!(!dir.join("qdrant.port").exists());
 }
 
 #[tokio::test]
@@ -226,7 +264,7 @@ async fn nuke_with_dead_qdrant_pid_deletes_files() {
     let out = nuke(&env, &dir.join("ferrex.db")).await;
     assert_ok(&out);
     assert!(
-        !stdout(&out).contains("skipped"),
+        !stdout(&out).contains("was not stopped"),
         "stdout: {}",
         stdout(&out)
     );
