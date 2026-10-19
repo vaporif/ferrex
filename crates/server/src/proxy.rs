@@ -297,7 +297,9 @@ fn exit_via_writer(out: &StdoutTx, code: i32) -> ! {
     if out.send(Out::Exit(code)).is_ok() {
         std::thread::sleep(EXIT_FALLBACK);
     }
-    flush_and_exit(code)
+    // Not flushing stdout: a writer blocked on a full pipe holds its lock, so that would hang.
+    let _ = io::stderr().flush();
+    std::process::exit(code)
 }
 
 fn flush_and_exit(code: i32) -> ! {

@@ -410,6 +410,7 @@ async fn fake_accept_loop(
     let mut conns = JoinSet::new();
     loop {
         let Ok((stream, _)) = listener.accept().await else {
+            tokio::time::sleep(Duration::from_millis(10)).await;
             continue;
         };
         let idx = {

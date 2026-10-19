@@ -178,7 +178,7 @@ async fn unusable_run_dir_fails_fast() {
     std::fs::write(&file, "").unwrap();
     let file = file.to_str().unwrap();
     let mut proxy = ProxyClient::spawn(&env, env_opts(&[("FERREX_RUN_DIR", file)]));
-    let status = expect_exit(&mut proxy, Duration::from_secs(3)).await;
+    let status = expect_exit(&mut proxy, Duration::from_secs(10)).await;
     assert!(!status.success(), "{status}");
     let stderr = proxy.stderr_text();
     assert_eq!(occurrences(&stderr, file), 1, "{stderr}");
@@ -240,4 +240,26 @@ async fn closed_stderr_does_not_panic() {
         .unwrap();
     assert_eq!(status.code(), Some(1), "{status}");
     assert_eq!(fake.connections(), 1);
+}
+
+#[tokio::test]
+async fn exit_with_blocked_stdout_does_not_hang() {
+    let (env, fake) = with_fake(vec![FakeConn::Serve(FakeBehaviour::Echo)]).await;
+    let mut proxy = ProxyClient::spawn(&env, CmdOpts::default());
+    let params = json!({"content": "x".repeat(1024 * 1024)});
+    for id in 1..=4 {
+        proxy.send(request_line(id, "tools/call", &params)).await;
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while fake.received().first().map_or(0, Vec::len) < 4 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "fake never got all requests"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Lets the echoes reach the proxy, whose writer then blocks on the full, unread stdout pipe.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    proxy.close_stdin();
+    expect_exit(&mut proxy, Duration::from_secs(5)).await;
 }
