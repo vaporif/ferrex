@@ -70,6 +70,9 @@ pub enum Command {
         #[arg(long)]
         from: PathBuf,
     },
+    /// Print the shared-daemon key and run-dir paths as JSON.
+    #[command(hide = true)]
+    DaemonPaths,
 }
 
 #[derive(Subcommand)]
