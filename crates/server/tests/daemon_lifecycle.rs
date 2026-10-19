@@ -3,6 +3,7 @@ mod common;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::process::ExitStatus;
 use std::time::Duration;
 
 use ferrex_store::{MetadataStore, SqliteStore};
@@ -23,7 +24,7 @@ const BIND_WITHIN: Duration = Duration::from_secs(10);
 struct Daemon {
     child: Child,
     paths: PathsJson,
-    _guard: DaemonGuard,
+    guard: DaemonGuard,
 }
 
 impl Daemon {
@@ -35,7 +36,7 @@ impl Daemon {
         Self {
             child,
             paths,
-            _guard: guard,
+            guard,
         }
     }
 
@@ -46,6 +47,12 @@ impl Daemon {
         let mut conn = conn.expect("ok hello yields a session");
         conn.initialize().await;
         conn
+    }
+
+    async fn wait_exit(&mut self, within: Duration) -> ExitStatus {
+        let status = wait_exit(&mut self.child, within).await;
+        self.guard.disarm();
+        status
     }
 
     fn alive(&mut self) -> bool {
@@ -146,7 +153,8 @@ async fn init_failure_refuses_then_exits() {
     assert_eq!(reply.kind.as_deref(), Some("init"), "{reply:?}");
     let error = reply.error.unwrap_or_default();
     assert!(error.contains("embedding model mismatch"), "{error}");
-    wait_exit(&mut daemon.child, Duration::from_secs(5)).await;
+    let status = daemon.wait_exit(Duration::from_secs(5)).await;
+    assert!(status.success(), "{status}");
 }
 
 #[tokio::test]
@@ -154,8 +162,9 @@ async fn bogus_key_exits_before_binding() {
     let env = TestEnv::without_sidecar();
     let paths = env.paths().await;
     let mut child = spawn_daemon(&env, "bogus", &[]);
-    let _guard = DaemonGuard::for_child(&child);
+    let mut guard = DaemonGuard::for_child(&child);
     let status = wait_exit(&mut child, Duration::from_secs(10)).await;
+    guard.disarm();
     assert!(!status.success());
     assert!(!paths.socket.exists());
 }
@@ -164,7 +173,7 @@ async fn bogus_key_exits_before_binding() {
 async fn idle_exit_with_no_connections() {
     let env = TestEnv::new().await;
     let mut daemon = Daemon::start(&env, &[("FERREX_IDLE_TIMEOUT", "2")]).await;
-    let status = wait_exit(&mut daemon.child, Duration::from_secs(60)).await;
+    let status = daemon.wait_exit(Duration::from_secs(60)).await;
     assert!(status.success(), "{status}");
     assert!(!daemon.paths.socket.exists());
     assert!(!daemon.paths.pid_file.exists());
@@ -231,7 +240,7 @@ async fn bad_or_silent_hello_does_not_block_idle_exit() {
 
     let budget = Duration::from_secs(2 + 10 + 8);
     let remaining = budget.saturating_sub(t0.elapsed());
-    let status = wait_exit(&mut daemon.child, remaining).await;
+    let status = daemon.wait_exit(remaining).await;
     assert!(status.success(), "{status}");
 }
 
@@ -260,8 +269,9 @@ async fn second_daemon_for_live_key_exits_zero() {
     let pid_before = std::fs::read(&daemon.paths.pid_file).expect("read pid file");
 
     let mut second = spawn_daemon(&env, &daemon.paths.key, &[("FERREX_IDLE_TIMEOUT", "600")]);
-    let _second_guard = DaemonGuard::for_child(&second);
+    let mut second_guard = DaemonGuard::for_child(&second);
     let status = wait_exit(&mut second, Duration::from_secs(30)).await;
+    second_guard.disarm();
     assert!(status.success(), "{status}");
     assert_eq!(inode(&daemon.paths.socket), ino);
     assert_eq!(
@@ -276,7 +286,7 @@ async fn sigterm_with_lock_held_leaves_files() {
     let mut daemon = Daemon::start(&env, &[("FERREX_IDLE_TIMEOUT", "600")]).await;
     let _lock = hold_lock(&daemon.paths.lock_file);
     sigterm(&daemon.child);
-    let status = wait_exit(&mut daemon.child, Duration::from_secs(12)).await;
+    let status = daemon.wait_exit(Duration::from_secs(12)).await;
     assert!(status.success(), "{status}");
     assert!(daemon.paths.socket.exists());
     assert!(daemon.paths.pid_file.exists());
@@ -335,7 +345,7 @@ async fn idle_exit_rearms_after_lock_released() {
         "daemon exited while the spawn lock was held"
     );
     drop(lock);
-    let status = wait_exit(&mut daemon.child, Duration::from_secs(2 + 10 + 8)).await;
+    let status = daemon.wait_exit(Duration::from_secs(2 + 10 + 8)).await;
     assert!(status.success(), "{status}");
     assert!(!daemon.paths.socket.exists());
     assert!(!daemon.paths.pid_file.exists());
@@ -372,7 +382,7 @@ async fn shutdown_never_deletes_foreign_files() {
     let foreign = json!({"pid": 1, "db_path": env.db_path}).to_string();
     std::fs::write(&daemon.paths.pid_file, &foreign).expect("replace pid file");
     sigterm(&daemon.child);
-    let status = wait_exit(&mut daemon.child, Duration::from_secs(12)).await;
+    let status = daemon.wait_exit(Duration::from_secs(12)).await;
     assert!(status.success(), "{status}");
     assert_eq!(
         std::fs::read_to_string(&daemon.paths.pid_file).expect("pid file kept"),
@@ -389,7 +399,7 @@ async fn shutdown_never_deletes_foreign_socket() {
         std::os::unix::net::UnixListener::bind(&daemon.paths.socket).expect("bind foreign");
     let ino = inode(&daemon.paths.socket);
     sigterm(&daemon.child);
-    let status = wait_exit(&mut daemon.child, Duration::from_secs(12)).await;
+    let status = daemon.wait_exit(Duration::from_secs(12)).await;
     assert!(status.success(), "{status}");
     assert_eq!(inode(&daemon.paths.socket), ino);
 }

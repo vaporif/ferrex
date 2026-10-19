@@ -177,6 +177,11 @@ impl DaemonGuard {
     pub const fn pid(&self) -> Option<u32> {
         self.pid
     }
+
+    /// Forgets the PID once the process has been reaped, so `Drop` can't hit a recycled PID.
+    pub const fn disarm(&mut self) {
+        self.pid = None;
+    }
 }
 
 impl Drop for DaemonGuard {
