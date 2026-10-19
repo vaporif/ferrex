@@ -57,6 +57,10 @@ impl FerrexServer {
         tracing::info!(namespace = %server.defaults.namespace, "session started");
         server
     }
+
+    fn namespace_or_default(&self, requested: Option<String>) -> Option<String> {
+        requested.or_else(|| Some(self.defaults.namespace.clone()))
+    }
 }
 
 fn map_error(e: CoreError) -> ErrorData {
@@ -118,9 +122,7 @@ impl FerrexServer {
             source: p.source,
             context: p.context,
             entities: p.entities,
-            namespace: p
-                .namespace
-                .or_else(|| Some(self.defaults.namespace.clone())),
+            namespace: self.namespace_or_default(p.namespace),
             supersedes: p.supersedes,
         };
 
@@ -191,9 +193,7 @@ impl FerrexServer {
             query: p.query,
             types,
             entities: p.entities,
-            namespace: p
-                .namespace
-                .or_else(|| Some(self.defaults.namespace.clone())),
+            namespace: self.namespace_or_default(p.namespace),
             limit: p.limit,
             include_stale: p.include_stale,
             include_invalidated: p.include_invalidated,
@@ -286,9 +286,7 @@ impl FerrexServer {
 
         let req = TimelineRequest {
             entity: p.entity,
-            namespace: p
-                .namespace
-                .or_else(|| Some(self.defaults.namespace.clone())),
+            namespace: self.namespace_or_default(p.namespace),
             limit: p.limit,
             types,
             include_invalidated: p.include_invalidated,

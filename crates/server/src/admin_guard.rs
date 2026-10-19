@@ -4,7 +4,6 @@ use ferrex_core::FerrexConfig;
 
 use crate::daemon::addr;
 
-/// Refuses when a live daemon already serves `config.db_path`.
 pub fn refuse_if_live(config: &FerrexConfig) -> eyre::Result<()> {
     if ferrex_store::is_memory_path(&config.db_path) {
         return Ok(());

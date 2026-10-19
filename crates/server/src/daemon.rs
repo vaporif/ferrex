@@ -5,7 +5,7 @@ mod idle;
 mod session;
 pub mod spawn;
 
-use std::fs::{File, Metadata, OpenOptions, TryLockError};
+use std::fs::{File, Metadata};
 use std::io;
 use std::os::fd::AsFd;
 use std::os::unix::fs::MetadataExt;
@@ -13,15 +13,17 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use eyre::WrapErr;
 use ferrex_core::{FerrexConfig, MemoryService, SidecarPolicy};
-use ferrex_store::QdrantSidecar;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
-use crate::daemon::addr::{DaemonPaths, PidFile, current_exe_canonical, ensure_run_dir};
+use crate::daemon::addr::{
+    DaemonPaths, PidFile, current_exe_canonical, ensure_run_dir, try_lock_until,
+};
 use crate::daemon::env::{env_duration, test_hook_millis};
 use crate::daemon::idle::{ConnEvent, IdleState};
 use crate::daemon::session::{CollectionMemo, InitView, SessionCtx, serve_connection};
@@ -32,7 +34,6 @@ const IDLE_TIMEOUT_DEFAULT_SECS: u64 = 600;
 const INIT_FAIL_GRACE: Duration = Duration::from_secs(60);
 const SHUTDOWN_LOCK_WAIT: Duration = Duration::from_secs(10);
 const SERVICE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
-const LOCK_POLL: Duration = Duration::from_millis(50);
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 
 type InitResult = Result<MemoryService, String>;
@@ -50,6 +51,8 @@ pub fn run(mut config: FerrexConfig, key: &str) -> eyre::Result<()> {
             paths.key
         );
     }
+    // The key ignores namespace and every session sends its own. Pinning it keeps the daemon
+    // independent of whichever proxy spawned it.
     config.namespace = "default".into();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -140,7 +143,6 @@ struct Daemon {
     idle: IdleState,
     idle_timeout: Duration,
     idle_deadline: Option<Instant>,
-    sidecar: Option<QdrantSidecar>,
     sessions: JoinSet<()>,
     events_tx: mpsc::UnboundedSender<ConnEvent>,
     events_rx: mpsc::UnboundedReceiver<ConnEvent>,
@@ -159,22 +161,17 @@ impl Daemon {
         if let Some(delay) = test_hook_millis("FERREX_TEST_DAEMON_BIND_DELAY_MS") {
             tokio::time::sleep(delay).await;
         }
-        let listener = bind_listener(&paths.socket).await;
-        let socket_id = match std::fs::symlink_metadata(&paths.socket) {
-            Ok(meta) => SocketId::from(&meta),
-            Err(e) => {
-                tracing::error!(socket = %paths.socket.display(), error = %e, "stat bound socket");
-                std::process::exit(1);
-            }
-        };
+        let listener = bind_listener(&paths.socket).await?;
+        let socket_id = std::fs::symlink_metadata(&paths.socket)
+            .map(|meta| SocketId::from(&meta))
+            .wrap_err_with(|| format!("stat bound socket {}", paths.socket.display()))?;
         let pid_file = PidFile {
             pid: std::process::id(),
             db_path: config.db_path.clone(),
         };
         if let Err(e) = pid_file.write(&paths.pid_file) {
-            tracing::error!(path = %paths.pid_file.display(), error = %e, "write pid file");
             remove_socket_if_ours(&paths.socket, socket_id);
-            std::process::exit(1);
+            return Err(e).wrap_err_with(|| format!("write pid file {}", paths.pid_file.display()));
         }
         tracing::info!(key = %paths.key, socket = %paths.socket.display(), "daemon listening");
 
@@ -199,7 +196,6 @@ impl Daemon {
             idle: IdleState::default(),
             idle_timeout: env_duration("FERREX_IDLE_TIMEOUT", IDLE_TIMEOUT_DEFAULT_SECS, None),
             idle_deadline: None,
-            sidecar: None,
             sessions: JoinSet::new(),
             events_tx,
             events_rx,
@@ -280,9 +276,7 @@ impl Daemon {
     fn on_init_result(&mut self, result: Result<InitResult, oneshot::error::RecvError>) {
         match result {
             Ok(Ok(service)) => {
-                let (service, sidecar) = service.into_parts();
                 let service = Arc::new(service);
-                self.sidecar = sidecar;
                 self.init = InitState::Ready(Arc::clone(&service));
                 self.init_view.send_replace(InitView::Ready(service));
                 self.idle.init_ok = true;
@@ -302,7 +296,8 @@ impl Daemon {
         self.grace_deadline = Some(Instant::now() + grace);
     }
 
-    /// Spec "Shutdown" steps 1 and 2; `None` means keep serving.
+    /// Takes the spawn lock; for an idle exit, re-checks for late connections.
+    /// `None` means keep serving.
     async fn begin_shutdown(&mut self, trigger: Trigger) -> Option<Commit> {
         let lock = acquire_lock_within(&self.paths.lock_file, SHUTDOWN_LOCK_WAIT).await;
         if trigger != Trigger::Idle {
@@ -370,7 +365,8 @@ impl Daemon {
         }
     }
 
-    /// Spec "Shutdown" steps 3 to 5.
+    /// Removes socket and pid file if we hold the lock, then stops sessions and the service,
+    /// which owns the sidecar.
     async fn finish(mut self, commit: Commit) {
         drop(self.listener);
         if let Some(lock) = commit.lock {
@@ -391,28 +387,21 @@ impl Daemon {
             InitState::Failed(error) => tracing::info!(%error, "exiting after failed init"),
             InitState::Pending(_) => {}
         }
-        if let Some(sidecar) = self.sidecar.as_mut() {
-            sidecar.shutdown();
-        }
         tracing::info!("daemon stopped");
     }
 }
 
-async fn bind_listener(socket: &Path) -> UnixListener {
+async fn bind_listener(socket: &Path) -> eyre::Result<UnixListener> {
     match UnixListener::bind(socket) {
-        Ok(listener) => listener,
+        Ok(listener) => Ok(listener),
         Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
             if UnixStream::connect(socket).await.is_ok() {
                 tracing::info!(socket = %socket.display(), "another daemon won the bind race");
                 std::process::exit(0);
             }
-            tracing::error!(socket = %socket.display(), "stale or busy socket, not unlinking");
-            std::process::exit(1);
+            eyre::bail!("stale or busy socket {}, not unlinking", socket.display())
         }
-        Err(e) => {
-            tracing::error!(socket = %socket.display(), error = %e, "bind failed");
-            std::process::exit(1);
-        }
+        Err(e) => Err(e).wrap_err_with(|| format!("bind {}", socket.display())),
     }
 }
 
@@ -449,28 +438,11 @@ async fn sleep_until_opt(deadline: Option<Instant>) {
 }
 
 async fn acquire_lock_within(path: &Path, budget: Duration) -> Option<File> {
-    let file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(path)
-        .inspect_err(|e| tracing::warn!(path = %path.display(), error = %e, "open spawn lock"))
-        .ok()?;
-    let deadline = Instant::now() + budget;
-    loop {
-        match file.try_lock() {
-            Ok(()) => return Some(file),
-            Err(TryLockError::WouldBlock) => {}
-            Err(TryLockError::Error(e)) => {
-                tracing::warn!(path = %path.display(), error = %e, "lock spawn lock");
-                return None;
-            }
-        }
-        if Instant::now() >= deadline {
-            return None;
-        }
-        tokio::time::sleep(LOCK_POLL).await;
-    }
+    try_lock_until(path, Instant::now() + budget)
+        .await
+        .inspect_err(|e| tracing::warn!(path = %path.display(), error = %e, "lock spawn lock"))
+        .ok()
+        .flatten()
 }
 
 fn release_lock(lock: &File) {

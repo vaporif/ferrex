@@ -80,16 +80,11 @@ fn main() -> eyre::Result<()> {
 
 fn run_proxy(config: ferrex_core::FerrexConfig) -> ! {
     let argv: Vec<_> = std::env::args_os().skip(1).collect();
-    let code = match proxy::run(config, &argv) {
-        Ok(()) => 0,
-        Err(e) => {
-            let _ = writeln!(std::io::stderr(), "ferrex: {e:?}");
-            1
-        }
-    };
+    let Err(e) = proxy::run(config, &argv);
+    let _ = writeln!(std::io::stderr(), "ferrex: {e:?}");
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
-    std::process::exit(code)
+    std::process::exit(1)
 }
 
 fn init_tracing() {

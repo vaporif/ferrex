@@ -33,7 +33,7 @@ tracing-subscriber = { workspace = true }
 portpicker = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process", "io-util", "test-util"] }
+tokio = { workspace = true, features = ["test-util"] }
 uuid = { workspace = true }
 
 [lints]

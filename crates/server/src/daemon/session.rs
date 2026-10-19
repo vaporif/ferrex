@@ -115,7 +115,7 @@ pub async fn serve_connection(stream: UnixStream, mut ctx: SessionCtx) {
     let (service, namespace) = match accept_hello(&line, &ctx, init).await {
         Ok(accepted) => accepted,
         Err(reply) => {
-            tracing::info!(kind = ?reply.kind, error = ?reply.error, "refused hello");
+            tracing::info!(kind = ?reply.kind, error = reply.error.as_deref().unwrap_or(""), "refused hello");
             send_reply(&mut writer, &reply).await;
             return;
         }
@@ -140,7 +140,7 @@ async fn read_hello_line(
     reader: &mut BufReader<impl tokio::io::AsyncRead + Unpin>,
 ) -> Option<String> {
     let mut line = String::new();
-    let mut limited = (&mut *reader).take(MAX_HELLO_BYTES);
+    let mut limited = reader.take(MAX_HELLO_BYTES);
     match tokio::time::timeout(HELLO_READ_TIMEOUT, limited.read_line(&mut line)).await {
         Err(_) => {
             tracing::debug!("no hello within {HELLO_READ_TIMEOUT:?}, closing connection");

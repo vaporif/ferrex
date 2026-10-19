@@ -49,7 +49,6 @@ impl Hello {
         encode_line(self)
     }
 
-    /// Parses a hello line, refusing with `Protocol` if it is malformed or a different version.
     pub fn decode(line: &str) -> Result<Self, HelloReply> {
         let protocol = |msg: String| HelloReply::refuse(RefusalKind::Protocol, msg);
         let value: serde_json::Value = serde_json::from_str(line.trim())
@@ -66,7 +65,6 @@ impl Hello {
         serde_json::from_value(value).map_err(|e| protocol(format!("malformed hello: {e}")))
     }
 
-    /// Refuses with `Key` when the hello was meant for a different daemon key.
     pub fn check(&self, key: &str) -> Result<(), HelloReply> {
         if self.key == key {
             Ok(())

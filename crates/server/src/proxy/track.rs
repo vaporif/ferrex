@@ -9,13 +9,8 @@ const INITIALIZED: &str = "notifications/initialized";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientLine {
-    Request {
-        id: Value,
-        method: String,
-    },
-    Notification {
-        method: String,
-    },
+    Request,
+    Notification,
     /// A `notifications/initialized` the handshake replay will send; never queued.
     CacheOnly,
     Untracked,
@@ -43,7 +38,7 @@ pub struct KeptRequest {
     pub initialize: bool,
 }
 
-/// Follows the JSON-RPC traffic just enough to reconnect a client mid-session.
+/// Follows the JSON-RPC traffic needed to reconnect a client mid-session.
 #[derive(Debug, Default)]
 pub struct Tracker {
     in_flight: HashMap<String, (Value, String)>,
@@ -88,7 +83,6 @@ fn id_key(id: &Value) -> String {
     id.to_string()
 }
 
-/// The id of a JSON-RPC request line.
 pub fn request_id(line: &[u8]) -> Option<Value> {
     match Envelope::parse(line)? {
         Envelope {
@@ -145,10 +139,8 @@ impl Tracker {
                     return ClientLine::CacheOnly;
                 }
             }
-            return ClientLine::Notification { method };
+            return ClientLine::Notification;
         };
-        self.in_flight
-            .insert(id_key(&id), (id.clone(), method.clone()));
         if !self.initialised {
             if method == INITIALIZE {
                 self.initialize = Some(line.to_vec());
@@ -161,7 +153,8 @@ impl Tracker {
                 });
             }
         }
-        ClientLine::Request { id, method }
+        self.in_flight.insert(id_key(&id), (id, method));
+        ClientLine::Request
     }
 
     pub fn on_daemon_line(&mut self, line: &[u8]) {
@@ -243,7 +236,6 @@ impl Tracker {
         self.kept_first.as_ref()
     }
 
-    /// The kept first request while the daemon still owes its response.
     #[must_use]
     pub fn kept_in_flight(&self) -> Option<&KeptRequest> {
         self.kept_first
@@ -285,10 +277,7 @@ mod tests {
         let mut t = Tracker::default();
         assert_eq!(
             t.on_client_line(&request(&json!(7), "tools/list")),
-            ClientLine::Request {
-                id: json!(7),
-                method: "tools/list".into()
-            }
+            ClientLine::Request
         );
         assert!(t.is_in_flight(&json!(7)));
         t.on_daemon_line(&result(&json!(7)));
@@ -301,9 +290,7 @@ mod tests {
         let mut t = Tracker::default();
         assert_eq!(
             t.on_client_line(&notification("notifications/cancelled")),
-            ClientLine::Notification {
-                method: "notifications/cancelled".into()
-            }
+            ClientLine::Notification
         );
         assert!(t.take_in_flight().is_empty());
     }
@@ -475,12 +462,7 @@ mod tests {
         assert_eq!(t.on_client_line(&initialized), ClientLine::CacheOnly);
         assert_eq!(t.cached_initialized(), Some(&initialized[..]));
         t.mark_replay_started();
-        assert_eq!(
-            t.on_client_line(&initialized),
-            ClientLine::Notification {
-                method: "notifications/initialized".into()
-            }
-        );
+        assert_eq!(t.on_client_line(&initialized), ClientLine::Notification);
     }
 
     #[test]
@@ -489,17 +471,12 @@ mod tests {
         let initialized = notification("notifications/initialized");
         for link in [Link::Up, Link::Down] {
             t.set_link(link);
-            assert!(matches!(
-                t.on_client_line(&initialized),
-                ClientLine::Notification { .. }
-            ));
+            assert_eq!(t.on_client_line(&initialized), ClientLine::Notification);
         }
         t.set_link(Link::Reconnecting);
         assert_eq!(
             t.on_client_line(&notification("notifications/cancelled")),
-            ClientLine::Notification {
-                method: "notifications/cancelled".into()
-            }
+            ClientLine::Notification
         );
     }
 
@@ -526,10 +503,7 @@ mod tests {
         for mut t in [pre_init, inline] {
             assert!(!t.replays_handshake());
             t.set_link(Link::Reconnecting);
-            assert!(matches!(
-                t.on_client_line(&initialized),
-                ClientLine::Notification { .. }
-            ));
+            assert_eq!(t.on_client_line(&initialized), ClientLine::Notification);
             assert_eq!(t.cached_initialized(), Some(&initialized[..]));
         }
     }

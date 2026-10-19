@@ -38,7 +38,7 @@ pub fn run(config: FerrexConfig) -> eyre::Result<()> {
             }
 
             service.shutdown().await;
-            if let Some(ref mut sc) = sidecar {
+            if let Some(sc) = sidecar.as_mut() {
                 sc.shutdown();
             }
             Ok(())

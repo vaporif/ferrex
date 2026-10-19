@@ -1,18 +1,42 @@
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 use ferrex_core::FerrexConfig;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::time::Instant;
 
 #[cfg(target_os = "macos")]
 pub const MAX_SUN_PATH: usize = 103;
 #[cfg(not(target_os = "macos"))]
 pub const MAX_SUN_PATH: usize = 107;
+
+const LOCK_POLL: Duration = Duration::from_millis(50);
+
+/// Opens `path` and polls for an exclusive flock until `deadline`; `Ok(None)` on timeout.
+pub async fn try_lock_until(path: &Path, deadline: Instant) -> io::Result<Option<File>> {
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(Some(file)),
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(e)) => return Err(e),
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        tokio::time::sleep(LOCK_POLL).await;
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct DaemonPaths {
@@ -168,19 +192,17 @@ impl PidFile {
 #[must_use]
 pub fn live_for_db(run_dir: &Path, db_path: &Path) -> Option<u32> {
     live_daemons(run_dir)
-        .find(|(pid_file, _)| pid_file.db_path == db_path)
-        .map(|(pid_file, _)| pid_file.pid)
+        .find(|pid_file| pid_file.db_path == db_path)
+        .map(|pid_file| pid_file.pid)
 }
 
 #[must_use]
 pub fn any_live(run_dir: &Path) -> Option<u32> {
-    live_daemons(run_dir)
-        .next()
-        .map(|(pid_file, _)| pid_file.pid)
+    live_daemons(run_dir).next().map(|pid_file| pid_file.pid)
 }
 
 /// Best-effort: PID files that are unreadable, name a dead process, or have no listening socket are skipped.
-fn live_daemons(run_dir: &Path) -> impl Iterator<Item = (PidFile, PathBuf)> {
+fn live_daemons(run_dir: &Path) -> impl Iterator<Item = PidFile> {
     std::fs::read_dir(run_dir)
         .into_iter()
         .flatten()
@@ -189,9 +211,9 @@ fn live_daemons(run_dir: &Path) -> impl Iterator<Item = (PidFile, PathBuf)> {
         .filter(|path| path.extension().is_some_and(|ext| ext == "pid"))
         .filter_map(|path| {
             let pid_file = PidFile::read(&path)?;
-            let socket = path.with_extension("sock");
-            (ferrex_store::pid_alive(pid_file.pid) && UnixStream::connect(&socket).is_ok())
-                .then_some((pid_file, socket))
+            (ferrex_store::pid_alive(pid_file.pid)
+                && UnixStream::connect(path.with_extension("sock")).is_ok())
+            .then_some(pid_file)
         })
 }
 
