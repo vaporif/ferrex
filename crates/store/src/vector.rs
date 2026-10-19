@@ -39,6 +39,7 @@ impl VectorStore {
     pub fn new(url: &str, dimension: usize) -> Result<Self, StoreError> {
         let client = Qdrant::from_url(url)
             .timeout(QDRANT_CLIENT_TIMEOUT)
+            .skip_compatibility_check()
             .build()
             .map_err(|e| StoreError::Qdrant(e.to_string()))?;
         Ok(Self { client, dimension })
