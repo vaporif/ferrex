@@ -32,18 +32,27 @@ fn parse_datetime(s: &str, field: &str) -> Result<chrono::DateTime<chrono::Utc>,
         .map_err(|e| ErrorData::invalid_params(format!("invalid {field}: {e}"), None))
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionDefaults {
+    pub namespace: String,
+}
+
 #[derive(Clone)]
 pub struct FerrexServer {
     service: Arc<MemoryService>,
+    defaults: SessionDefaults,
     tool_router: rmcp::handler::server::router::tool::ToolRouter<Self>,
 }
 
 impl FerrexServer {
-    pub fn new(service: Arc<MemoryService>) -> Self {
-        Self {
+    pub fn with_session(service: Arc<MemoryService>, defaults: SessionDefaults) -> Self {
+        let server = Self {
             service,
+            defaults,
             tool_router: Self::tool_router(),
-        }
+        };
+        tracing::info!(namespace = %server.defaults.namespace, "session started");
+        server
     }
 }
 

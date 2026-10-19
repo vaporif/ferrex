@@ -7,18 +7,18 @@ mod daemon;
 mod hint;
 mod params;
 mod server;
+mod standalone;
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use clap::Parser;
-use ferrex_core::MemoryService;
-use rmcp::{ServiceExt, transport::stdio};
 
 use cli::{AuditCommand, BackfillCommand, Command, JournalCommand};
 
 fn main() -> eyre::Result<()> {
     color_eyre::install()?;
+    ferrex_core::ensure_cache_dir();
     let mut cli = cli::Cli::parse();
 
     init_tracing();
@@ -63,63 +63,8 @@ fn main() -> eyre::Result<()> {
             eprintln!("ferrex restore is not yet implemented");
             std::process::exit(1);
         }
-        None => run_server(cli::build_config(cli)?),
+        None => standalone::run(cli::build_config(cli)?),
     }
-}
-
-fn run_server(config: ferrex_core::FerrexConfig) -> eyre::Result<()> {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(async {
-            let service = MemoryService::from_config(config).await?;
-            let (service, mut sidecar) = service.into_parts();
-            eprintln!("ferrex ready");
-            let service = Arc::new(service);
-            let srv = server::FerrexServer::new(Arc::clone(&service));
-            let (stdin, stdout) = stdio();
-            let running = srv
-                .serve((stdin, stdout))
-                .await
-                .map_err(|e| eyre::eyre!("MCP server error: {e}"))?;
-
-            #[cfg(unix)]
-            {
-                let mut sigterm =
-                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                        .expect("failed to install SIGTERM handler");
-
-                tokio::select! {
-                    result = running.waiting() => {
-                        result.map_err(|e| eyre::eyre!("MCP server error: {e}"))?;
-                    }
-                    _ = tokio::signal::ctrl_c() => {
-                        tracing::info!("received SIGINT, shutting down");
-                    }
-                    _ = sigterm.recv() => {
-                        tracing::info!("received SIGTERM, shutting down");
-                    }
-                }
-            }
-
-            #[cfg(not(unix))]
-            {
-                tokio::select! {
-                    result = running.waiting() => {
-                        result.map_err(|e| eyre::eyre!("MCP server error: {e}"))?;
-                    }
-                    _ = tokio::signal::ctrl_c() => {
-                        tracing::info!("received SIGINT, shutting down");
-                    }
-                }
-            }
-
-            service.shutdown().await;
-            if let Some(ref mut sc) = sidecar {
-                sc.shutdown();
-            }
-            Ok(())
-        })
 }
 
 fn init_tracing() {
@@ -164,6 +109,7 @@ fn init_tracing() {
             tracing_subscriber::fmt()
                 .with_env_filter(env_filter)
                 .with_writer(std::io::stderr)
+                .with_ansi(std::io::stderr().is_terminal())
                 .init();
         }
     }
