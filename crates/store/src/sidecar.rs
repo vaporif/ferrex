@@ -111,8 +111,8 @@ impl QdrantSidecar {
     }
 
     #[must_use]
-    pub fn pid(&self) -> Option<u32> {
-        Some(self.pid.load(Ordering::Relaxed))
+    pub fn pid(&self) -> u32 {
+        self.pid.load(Ordering::Relaxed)
     }
 
     #[must_use]
@@ -435,7 +435,7 @@ fn build_client(port: u16) -> Result<qdrant_client::Qdrant, StoreError> {
 }
 
 /// One-shot check that something answers qdrant's health endpoint on `port`.
-pub async fn probe_qdrant(port: u16) -> bool {
+async fn probe_qdrant(port: u16) -> bool {
     match build_client(port) {
         Ok(client) => client.health_check().await.is_ok(),
         Err(_) => false,
@@ -543,8 +543,7 @@ pub fn read_pid(path: &Path) -> Option<u32> {
 }
 
 /// Reads a `<pid> <port>` file; `None` if missing or malformed.
-#[must_use]
-pub fn read_port_file(path: &Path) -> Option<(u32, u16)> {
+fn read_port_file(path: &Path) -> Option<(u32, u16)> {
     let content = fs::read_to_string(path).ok()?;
     let (pid, port) = content.trim().split_once(' ')?;
     Some((pid.parse().ok()?, port.trim().parse().ok()?))
@@ -841,7 +840,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let pid = first.pid().unwrap();
+        let pid = first.pid();
         assert_eq!(
             read_port_file(&dir.path().join("qdrant.port")),
             Some((pid, port_a))
@@ -902,7 +901,7 @@ mod tests {
         let _ = sleeper.kill();
         let _ = sleeper.wait();
         let sidecar = result.unwrap();
-        assert_ne!(sidecar.pid(), Some(sleeper.id()));
+        assert_ne!(sidecar.pid(), sleeper.id());
     }
 
     #[tokio::test]
@@ -924,7 +923,7 @@ mod tests {
         let _ = sleeper.wait();
         let sidecar = result.unwrap();
         assert!(elapsed >= Duration::from_secs(25), "{elapsed:?}");
-        assert_ne!(sidecar.pid(), Some(sleeper.id()));
+        assert_ne!(sidecar.pid(), sleeper.id());
     }
 
     struct KillInner(PathBuf);
@@ -1131,7 +1130,7 @@ mod tests {
         let mut cleanup = LeaveRunningCleanup::new(dir.path());
         let mut sidecar = start_policy(free_port(), dir.path(), SidecarPolicy::LeaveRunning).await;
         cleanup.track(&sidecar);
-        let pid = sidecar.pid().unwrap();
+        let pid = sidecar.pid();
         sidecar.stop_watcher();
         sidecar.shutdown();
         drop(sidecar);
@@ -1144,7 +1143,7 @@ mod tests {
     async fn kill_on_drop_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         let sidecar = start_policy(free_port(), dir.path(), SidecarPolicy::KillOnDrop).await;
-        let pid = sidecar.pid().unwrap();
+        let pid = sidecar.pid();
         drop(sidecar);
         assert!(eventually(REAP_TIMEOUT, async || !pid_alive(pid)).await);
         assert!(!dir.path().join(PID_FILE).exists());
@@ -1158,7 +1157,7 @@ mod tests {
         let port = free_port();
         let sidecar = start_policy(port, dir.path(), SidecarPolicy::LeaveRunning).await;
         cleanup.track(&sidecar);
-        let old = sidecar.pid().unwrap();
+        let old = sidecar.pid();
         kill_pid(old);
         let restarted = eventually(RESPAWN_TIMEOUT, async || {
             names_new_live_pid(dir.path(), old).is_some() && probe_qdrant(port).await
@@ -1177,20 +1176,20 @@ mod tests {
         cleanup.track(&owner);
         let reuser = start_policy(port, dir.path(), SidecarPolicy::LeaveRunning).await;
         cleanup.track(&reuser);
-        let old = owner.pid().unwrap();
-        assert_eq!(reuser.pid(), Some(old));
+        let old = owner.pid();
+        assert_eq!(reuser.pid(), old);
 
         owner.stop_watcher();
         drop(owner);
         kill_pid(old);
 
         let respawned = eventually(RESPAWN_TIMEOUT, async || {
-            names_new_live_pid(dir.path(), old).is_some_and(|p| reuser.pid() == Some(p))
+            names_new_live_pid(dir.path(), old).is_some_and(|p| reuser.pid() == p)
         })
         .await;
         assert!(respawned);
 
-        let new = reuser.pid().unwrap();
+        let new = reuser.pid();
         reuser.stop_watcher();
         kill_pid(new);
         assert!(eventually(REAP_TIMEOUT, async || fully_reaped(new)).await);
@@ -1208,23 +1207,22 @@ mod tests {
         cleanup.track(&b);
         let c = start_policy(port, dir.path(), SidecarPolicy::LeaveRunning).await;
         cleanup.track(&c);
-        let old = owner.pid().unwrap();
+        let old = owner.pid();
 
         owner.stop_watcher();
         drop(owner);
         kill_pid(old);
 
         let converged = eventually(RESPAWN_TIMEOUT, async || {
-            names_new_live_pid(dir.path(), old)
-                .is_some_and(|p| b.pid() == Some(p) && c.pid() == Some(p))
+            names_new_live_pid(dir.path(), old).is_some_and(|p| b.pid() == p && c.pid() == p)
         })
         .await;
         assert!(converged);
-        let new = b.pid().unwrap();
+        let new = b.pid();
         assert_eq!(qdrant_processes_for(dir.path()), 1);
 
         let probe = start_policy(port, dir.path(), SidecarPolicy::KillOnDrop).await;
-        assert_eq!(probe.pid(), Some(new));
+        assert_eq!(probe.pid(), new);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1236,12 +1234,12 @@ mod tests {
         let owner = start_policy(port, dir.path(), SidecarPolicy::KillOnDrop).await;
         let reuser = start_policy(port, dir.path(), SidecarPolicy::LeaveRunning).await;
         cleanup.track(&reuser);
-        let old = owner.pid().unwrap();
+        let old = owner.pid();
 
         kill_pid(old);
 
         let respawned = eventually(RESPAWN_TIMEOUT, async || {
-            names_new_live_pid(dir.path(), old).is_some_and(|p| reuser.pid() == Some(p))
+            names_new_live_pid(dir.path(), old).is_some_and(|p| reuser.pid() == p)
         })
         .await;
         assert!(respawned);

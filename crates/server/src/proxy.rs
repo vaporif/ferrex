@@ -2,6 +2,7 @@ mod reconnect;
 mod track;
 
 use std::collections::VecDeque;
+use std::convert::Infallible;
 use std::ffi::OsString;
 use std::future::Future;
 use std::io::{self, BufRead, Write};
@@ -69,7 +70,7 @@ pub enum ConnState {
 
 /// Proxies the client's stdio to the shared daemon, spawning it if needed; never returns once
 /// stdio is set up.
-pub fn run(config: FerrexConfig, argv: &[OsString]) -> eyre::Result<()> {
+pub fn run(config: FerrexConfig, argv: &[OsString]) -> eyre::Result<Infallible> {
     let exe = current_exe_canonical()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -282,7 +283,7 @@ impl Proxy<'_> {
                 exit_via_writer(self.out, 0)
             };
             let mut tracker = lock(&self.ctx.tracker);
-            if let ClientLine::Request { .. } = tracker.on_client_line(&line) {
+            if tracker.on_client_line(&line) == ClientLine::Request {
                 tracker.set_link(Link::Reconnecting);
                 let after = if tracker.replays_handshake() {
                     AfterHello::ReplayDrop

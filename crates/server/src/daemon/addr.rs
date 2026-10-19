@@ -192,19 +192,17 @@ impl PidFile {
 #[must_use]
 pub fn live_for_db(run_dir: &Path, db_path: &Path) -> Option<u32> {
     live_daemons(run_dir)
-        .find(|(pid_file, _)| pid_file.db_path == db_path)
-        .map(|(pid_file, _)| pid_file.pid)
+        .find(|pid_file| pid_file.db_path == db_path)
+        .map(|pid_file| pid_file.pid)
 }
 
 #[must_use]
 pub fn any_live(run_dir: &Path) -> Option<u32> {
-    live_daemons(run_dir)
-        .next()
-        .map(|(pid_file, _)| pid_file.pid)
+    live_daemons(run_dir).next().map(|pid_file| pid_file.pid)
 }
 
 /// Best-effort: PID files that are unreadable, name a dead process, or have no listening socket are skipped.
-fn live_daemons(run_dir: &Path) -> impl Iterator<Item = (PidFile, PathBuf)> {
+fn live_daemons(run_dir: &Path) -> impl Iterator<Item = PidFile> {
     std::fs::read_dir(run_dir)
         .into_iter()
         .flatten()
@@ -213,9 +211,9 @@ fn live_daemons(run_dir: &Path) -> impl Iterator<Item = (PidFile, PathBuf)> {
         .filter(|path| path.extension().is_some_and(|ext| ext == "pid"))
         .filter_map(|path| {
             let pid_file = PidFile::read(&path)?;
-            let socket = path.with_extension("sock");
-            (ferrex_store::pid_alive(pid_file.pid) && UnixStream::connect(&socket).is_ok())
-                .then_some((pid_file, socket))
+            (ferrex_store::pid_alive(pid_file.pid)
+                && UnixStream::connect(path.with_extension("sock")).is_ok())
+            .then_some(pid_file)
         })
 }
 

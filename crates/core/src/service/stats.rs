@@ -199,7 +199,7 @@ impl MemoryService {
             .clone()
             .unwrap_or_else(|| format!("localhost:{} (sidecar)", self.config.qdrant_port));
 
-        let qdrant_pid = self.sidecar.as_ref().and_then(QdrantSidecar::pid);
+        let qdrant_pid = self.sidecar.as_ref().map(QdrantSidecar::pid);
 
         Ok(DiagnosticsReport {
             version: env!("CARGO_PKG_VERSION").to_string(),

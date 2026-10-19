@@ -133,7 +133,7 @@ async fn start_sidecar(env: &TestEnv) -> (QdrantSidecar, u32) {
     )
     .await
     .expect("start sidecar");
-    let pid = sidecar.pid().expect("sidecar pid");
+    let pid = sidecar.pid();
     (sidecar, pid)
 }
 
