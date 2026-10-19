@@ -9,9 +9,31 @@ const INITIALIZED: &str = "notifications/initialized";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientLine {
-    Request { id: Value, method: String },
-    Notification { method: String },
+    Request {
+        id: Value,
+        method: String,
+    },
+    Notification {
+        method: String,
+    },
+    /// A `notifications/initialized` the replay will send; never queued.
+    CacheOnly,
     Untracked,
+}
+
+/// The daemon connection as the main loop sees it; decides how client lines are handled.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Link {
+    #[default]
+    Up,
+    Down,
+    Reconnecting,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Success,
+    Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +50,8 @@ pub struct Tracker {
     initialize: Option<Vec<u8>>,
     initialized: Option<Vec<u8>>,
     kept_first: Option<KeptRequest>,
+    link: Link,
+    replay_started: bool,
 }
 
 /// Only the members the tracker reads; `IgnoredAny` skips multi-MB params and results unparsed.
@@ -63,6 +87,39 @@ fn id_key(id: &Value) -> String {
     id.to_string()
 }
 
+/// The id of a JSON-RPC request line.
+pub fn request_id(line: &[u8]) -> Option<Value> {
+    match Envelope::parse(line)? {
+        Envelope {
+            id,
+            method: Some(_),
+            ..
+        } => id,
+        _ => None,
+    }
+}
+
+/// How `line` answers request `id`; `None` if it is any other line.
+pub fn response_outcome(line: &[u8], id: &Value) -> Option<Outcome> {
+    let Envelope {
+        id: Some(got),
+        method: None,
+        result,
+        error,
+    } = Envelope::parse(line)?
+    else {
+        return None;
+    };
+    if id_key(&got) != id_key(id) {
+        return None;
+    }
+    match (result, error) {
+        (_, Some(_)) => Some(Outcome::Error),
+        (Some(_), None) => Some(Outcome::Success),
+        (None, None) => None,
+    }
+}
+
 fn counts_for_lifecycle(method: &str) -> bool {
     !matches!(method, "ping" | "server/discover")
 }
@@ -80,6 +137,9 @@ impl Tracker {
         let Some(id) = id else {
             if method == INITIALIZED {
                 self.initialized = Some(line.to_vec());
+                if self.link == Link::Reconnecting && !self.replay_started {
+                    return ClientLine::CacheOnly;
+                }
             }
             return ClientLine::Notification { method };
         };
@@ -123,13 +183,22 @@ impl Tracker {
         }
     }
 
-    #[allow(dead_code, reason = "used by Task 11")]
     #[must_use]
     pub const fn initialised(&self) -> bool {
         self.initialised
     }
 
-    #[allow(dead_code, reason = "used by Task 11")]
+    /// Entering any link state starts it with no replay under way.
+    pub const fn set_link(&mut self, link: Link) {
+        self.link = link;
+        self.replay_started = false;
+    }
+
+    /// From here on a `notifications/initialized` is queued: the replay has read the cache.
+    pub const fn mark_replay_started(&mut self) {
+        self.replay_started = true;
+    }
+
     pub fn take_in_flight(&mut self) -> Vec<Value> {
         self.in_flight.drain().map(|(_, (id, _))| id).collect()
     }
@@ -149,13 +218,11 @@ impl Tracker {
         self.in_flight.contains_key(&id_key(id))
     }
 
-    #[allow(dead_code, reason = "used by Task 11")]
     #[must_use]
     pub fn cached_initialize(&self) -> Option<&[u8]> {
         self.initialize.as_deref()
     }
 
-    #[allow(dead_code, reason = "used by Task 11")]
     #[must_use]
     pub fn cached_initialized(&self) -> Option<&[u8]> {
         self.initialized.as_deref()
@@ -373,6 +440,94 @@ mod tests {
         t.on_client_line(&initialized);
         assert_eq!(t.cached_initialized(), Some(&initialized[..]));
         assert_eq!(t.cached_initialize(), Some(&init[..]));
+    }
+
+    #[test]
+    fn initialized_cache_only_while_reconnecting_before_replay() {
+        let mut t = Tracker::default();
+        let initialized = notification("notifications/initialized");
+        t.set_link(Link::Reconnecting);
+        assert_eq!(t.on_client_line(&initialized), ClientLine::CacheOnly);
+        assert_eq!(t.cached_initialized(), Some(&initialized[..]));
+        t.mark_replay_started();
+        assert_eq!(
+            t.on_client_line(&initialized),
+            ClientLine::Notification {
+                method: "notifications/initialized".into()
+            }
+        );
+    }
+
+    #[test]
+    fn initialized_not_cache_only_when_up_or_down() {
+        let mut t = Tracker::default();
+        let initialized = notification("notifications/initialized");
+        for link in [Link::Up, Link::Down] {
+            t.set_link(link);
+            assert!(matches!(
+                t.on_client_line(&initialized),
+                ClientLine::Notification { .. }
+            ));
+        }
+        t.set_link(Link::Reconnecting);
+        assert_eq!(
+            t.on_client_line(&notification("notifications/cancelled")),
+            ClientLine::Notification {
+                method: "notifications/cancelled".into()
+            }
+        );
+    }
+
+    #[test]
+    fn set_link_clears_replay_started() {
+        let mut t = Tracker::default();
+        t.set_link(Link::Reconnecting);
+        t.mark_replay_started();
+        t.set_link(Link::Reconnecting);
+        assert_eq!(
+            t.on_client_line(&notification("notifications/initialized")),
+            ClientLine::CacheOnly
+        );
+    }
+
+    #[test]
+    fn request_while_reconnecting_is_tracked() {
+        let mut t = Tracker::default();
+        t.set_link(Link::Reconnecting);
+        t.on_client_line(&request(&json!(4), "tools/list"));
+        assert!(t.is_in_flight(&json!(4)));
+    }
+
+    #[test]
+    fn request_id_reads_requests_only() {
+        assert_eq!(
+            request_id(&request(&json!("x"), "initialize")),
+            Some(json!("x"))
+        );
+        assert_eq!(request_id(&notification("notifications/initialized")), None);
+        assert_eq!(request_id(&result(&json!(1))), None);
+        assert_eq!(request_id(b"garbage\n"), None);
+    }
+
+    #[test]
+    fn response_outcome_matches_id_and_kind() {
+        assert_eq!(
+            response_outcome(&result(&json!(1)), &json!(1)),
+            Some(Outcome::Success)
+        );
+        assert_eq!(
+            response_outcome(&error(&json!(1)), &json!(1)),
+            Some(Outcome::Error)
+        );
+        assert_eq!(response_outcome(&result(&json!("1")), &json!(1)), None);
+        assert_eq!(
+            response_outcome(&request(&json!(1), "ping"), &json!(1)),
+            None
+        );
+        assert_eq!(
+            response_outcome(&notification("notifications/message"), &json!(1)),
+            None
+        );
     }
 
     #[test]

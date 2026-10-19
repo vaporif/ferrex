@@ -1,3 +1,4 @@
+mod reconnect;
 mod track;
 
 use std::collections::VecDeque;
@@ -14,19 +15,25 @@ use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 
 use crate::cli::{Cli, build_config};
 use crate::daemon::addr::{DaemonPaths, current_exe_canonical};
 use crate::daemon::handshake::Hello;
 use crate::daemon::spawn::{
-    AttemptError, Budgets, DaemonConn, Resolved, connect_or_spawn, run_round, send_hello,
+    AttemptError, Budgets, DaemonConn, Resolved, RoundError, connect_or_spawn, run_round,
+    send_hello,
 };
-use crate::proxy::track::Tracker;
+use crate::proxy::reconnect::{
+    AfterHello, LossAction, ReconnectCtx, exe_mtime, fail_pending, on_daemon_loss, reconnect,
+};
+use crate::proxy::track::{ClientLine, Link, Tracker};
 
 pub type SharedTracker = Arc<Mutex<Tracker>>;
 
 const STDIN_CHANNEL: usize = 64;
 const EXIT_FALLBACK: Duration = Duration::from_secs(1);
+const LIST_CHANGED: &str = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}";
 
 #[derive(Debug)]
 pub enum StdinEvent {
@@ -42,6 +49,18 @@ enum Out {
 }
 
 type StdoutTx = mpsc::UnboundedSender<Out>;
+
+#[derive(Debug)]
+pub enum ConnState {
+    Connected {
+        writer: OwnedWriteHalf,
+        lost: oneshot::Receiver<()>,
+        reader: JoinHandle<()>,
+        key: String,
+    },
+    Disconnected,
+    Reconnecting,
+}
 
 /// Proxies the client's stdio to the shared daemon, spawning it if needed; never returns once
 /// stdio is set up.
@@ -62,13 +81,13 @@ async fn proxy(
     mut stdin: mpsc::Receiver<StdinEvent>,
     out: &StdoutTx,
 ) -> ! {
+    let startup_mtime = exe_mtime(exe);
     let tracker = SharedTracker::default();
     let mut queue = VecDeque::new();
     let budgets = Budgets::from_env();
-    let budgets = &budgets;
     let mut initial = Some(config);
     let resolve = || resolve_attempt(initial.take(), argv, exe);
-    let attempt = move |resolved| connect(resolved, exe, argv, budgets);
+    let attempt = |resolved| connect(resolved, exe, argv, &budgets);
     let round = run_round(resolve, attempt, 0);
     let conn = match wait_with_stdin(round, &mut stdin, &tracker, &mut queue).await {
         None => exit_via_writer(out, 0),
@@ -78,13 +97,23 @@ async fn proxy(
         }
         Some(Ok(connected)) => connected.value,
     };
-    match forward(conn, &mut stdin, &tracker, queue, out).await {
-        Ended::StdinEof => exit_via_writer(out, 0),
-        Ended::DaemonLost => {
-            diag("ferrex daemon connection lost");
-            exit_via_writer(out, 1)
-        }
+    let ctx = ReconnectCtx {
+        exe: exe.to_owned(),
+        argv: argv.to_vec(),
+        budgets,
+        startup_mtime,
+        last_key: conn.key.clone(),
+        tracker,
+    };
+    Proxy {
+        ctx,
+        stdin,
+        queue,
+        out,
+        initialised_at_loss: false,
     }
+    .run(conn)
+    .await
 }
 
 /// The first attempt reuses the config `main` built; later ones rebuild it from `argv`.
@@ -122,58 +151,185 @@ async fn connect(
     .await
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Ended {
-    StdinEof,
-    DaemonLost,
+/// The forwarding loop after start-up: owns stdin, the queue and the daemon connection state.
+struct Proxy<'a> {
+    ctx: ReconnectCtx,
+    stdin: mpsc::Receiver<StdinEvent>,
+    queue: VecDeque<Vec<u8>>,
+    out: &'a StdoutTx,
+    initialised_at_loss: bool,
 }
 
-async fn forward(
-    conn: DaemonConn,
-    stdin: &mut mpsc::Receiver<StdinEvent>,
-    tracker: &SharedTracker,
-    queue: VecDeque<Vec<u8>>,
-    out: &StdoutTx,
-) -> Ended {
-    let DaemonConn {
-        reader, mut writer, ..
-    } = conn;
-    let (lost_tx, mut lost) = oneshot::channel();
-    let pump = tokio::spawn(pump_daemon(
-        reader,
-        out.clone(),
-        Arc::clone(tracker),
-        lost_tx,
-    ));
-    let ended = 'forward: {
-        for line in queue {
-            if write_line(&mut writer, &line).await.is_err() {
-                break 'forward Ended::DaemonLost;
-            }
+impl Proxy<'_> {
+    async fn run(mut self, conn: DaemonConn) -> ! {
+        let mut state = self.connected(conn);
+        loop {
+            state = match state {
+                ConnState::Connected {
+                    mut writer,
+                    mut lost,
+                    reader,
+                    key,
+                } => {
+                    if self.flush_queue(&mut writer).await.is_ok() {
+                        self.forward(&mut writer, &mut lost).await;
+                    }
+                    self.on_loss(reader, &key).await
+                }
+                ConnState::Disconnected => self.await_request().await,
+                ConnState::Reconnecting => self.reconnect_round().await,
+            };
         }
+    }
+
+    fn connected(&self, conn: DaemonConn) -> ConnState {
+        let DaemonConn {
+            reader,
+            writer,
+            key,
+        } = conn;
+        lock(&self.ctx.tracker).set_link(Link::Up);
+        let (lost_tx, lost) = oneshot::channel();
+        let reader = tokio::spawn(pump_daemon(
+            reader,
+            self.out.clone(),
+            Arc::clone(&self.ctx.tracker),
+            lost_tx,
+        ));
+        ConnState::Connected {
+            writer,
+            lost,
+            reader,
+            key,
+        }
+    }
+
+    async fn flush_queue(&mut self, writer: &mut OwnedWriteHalf) -> io::Result<()> {
+        while let Some(line) = self.queue.pop_front() {
+            write_line(writer, &line).await?;
+        }
+        Ok(())
+    }
+
+    /// Forwards client lines until the daemon is lost: reader EOF or a failed write.
+    async fn forward(&mut self, writer: &mut OwnedWriteHalf, lost: &mut oneshot::Receiver<()>) {
         loop {
             tokio::select! {
-                event = stdin.recv() => match event {
+                event = self.stdin.recv() => match event {
                     Some(StdinEvent::Line(line)) => {
-                        lock(tracker).on_client_line(&line);
-                        if write_line(&mut writer, &line).await.is_err() {
-                            break 'forward Ended::DaemonLost;
+                        lock(&self.ctx.tracker).on_client_line(&line);
+                        if write_line(writer, &line).await.is_err() {
+                            return;
                         }
                     }
-                    Some(StdinEvent::Eof) | None => break 'forward Ended::StdinEof,
+                    Some(StdinEvent::Eof) | None => exit_via_writer(self.out, 0),
                 },
-                _ = &mut lost => break 'forward Ended::DaemonLost,
+                _ = &mut *lost => return,
             }
         }
-    };
-    pump.abort();
-    ended
+    }
+
+    async fn on_loss(&mut self, reader: JoinHandle<()>, key: &str) -> ConnState {
+        reader.abort();
+        // Once it has stopped it can't forward a response whose id gets the restart error.
+        let _ = reader.await;
+        diag(&format!(
+            "ferrex: daemon connection lost (key {key}); reconnecting on the next request"
+        ));
+        self.queue.clear();
+        {
+            let mut tracker = lock(&self.ctx.tracker);
+            tracker.set_link(Link::Down);
+            self.initialised_at_loss = tracker.initialised();
+        }
+        match on_daemon_loss(&self.ctx.tracker, self.out) {
+            LossAction::WaitForRequest => ConnState::Disconnected,
+            LossAction::ReconnectNow => {
+                lock(&self.ctx.tracker).set_link(Link::Reconnecting);
+                ConnState::Reconnecting
+            }
+        }
+    }
+
+    /// Drops lines until the client's next request, which starts the reconnect.
+    async fn await_request(&mut self) -> ConnState {
+        loop {
+            let Some(StdinEvent::Line(line)) = self.stdin.recv().await else {
+                exit_via_writer(self.out, 0)
+            };
+            let mut tracker = lock(&self.ctx.tracker);
+            if let ClientLine::Request { .. } = tracker.on_client_line(&line) {
+                tracker.set_link(Link::Reconnecting);
+                drop(tracker);
+                self.queue.push_back(line);
+                return ConnState::Reconnecting;
+            }
+        }
+    }
+
+    async fn reconnect_round(&mut self) -> ConnState {
+        let after = self.after_hello();
+        let round = reconnect(&self.ctx, after, 0);
+        let tracker = &self.ctx.tracker;
+        match wait_with_stdin(round, &mut self.stdin, tracker, &mut self.queue).await {
+            None => exit_via_writer(self.out, 0),
+            Some(Err(e)) => self.round_failed(&e),
+            Some(Ok(connected)) => {
+                let (conn, response) = connected.value;
+                self.announce_key(&conn.key);
+                if let Some(line) = response {
+                    lock(&self.ctx.tracker).on_daemon_line(&line);
+                    send_line(self.out, line);
+                }
+                self.connected(conn)
+            }
+        }
+    }
+
+    /// An inline-lifecycle session has no `initialize` to replay; its queue starts the session.
+    fn after_hello(&self) -> AfterHello {
+        let has_initialize = lock(&self.ctx.tracker).cached_initialize().is_some();
+        if self.initialised_at_loss && has_initialize {
+            AfterHello::ReplayDrop
+        } else {
+            AfterHello::Nothing
+        }
+    }
+
+    fn announce_key(&mut self, key: &str) {
+        if self.initialised_at_loss && key != self.ctx.last_key {
+            send_json(self.out, LIST_CHANGED.to_owned());
+        }
+        key.clone_into(&mut self.ctx.last_key);
+    }
+
+    fn round_failed(&mut self, e: &RoundError) -> ConnState {
+        if !lock(&self.ctx.tracker).initialised() {
+            diag(&format!("ferrex: could not reach the daemon: {}", e.last));
+            exit_via_writer(self.out, 1)
+        }
+        fail_pending(&self.ctx.tracker, self.out, &self.ctx.failure_message(e));
+        self.queue.clear();
+        ConnState::Disconnected
+    }
 }
 
 async fn write_line(writer: &mut OwnedWriteHalf, line: &[u8]) -> io::Result<()> {
     writer.write_all(line).await.inspect_err(|e| {
         tracing::debug!(error = %e, "write to daemon failed");
     })
+}
+
+/// Queues a synthetic JSON-RPC line, adding its newline.
+fn send_json(out: &StdoutTx, line: String) {
+    let mut line = line.into_bytes();
+    line.push(b'\n');
+    send_line(out, line);
+}
+
+/// The writer thread only stops by exiting the process, so a send error needs no handling.
+fn send_line(out: &StdoutTx, line: Vec<u8>) {
+    let _ = out.send(Out::Line(line));
 }
 
 /// Copies whole daemon lines to stdout until the socket closes, then reports the loss.
@@ -217,8 +373,9 @@ pub async fn wait_with_stdin<F: Future>(
             output = &mut fut => return Some(output),
             event = rx.recv() => match event {
                 Some(StdinEvent::Line(line)) => {
-                    lock(tracker).on_client_line(&line);
-                    queue.push_back(line);
+                    if lock(tracker).on_client_line(&line) != ClientLine::CacheOnly {
+                        queue.push_back(line);
+                    }
                 }
                 Some(StdinEvent::Eof) | None => return None,
             },
@@ -313,7 +470,6 @@ fn diag(message: &str) {
     let _ = writeln!(io::stderr(), "{message}");
 }
 
-#[allow(dead_code, reason = "used by Task 11")]
 #[must_use]
 pub fn jsonrpc_error(id: &Value, code: i64, message: &str) -> String {
     serde_json::json!({
