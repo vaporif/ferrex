@@ -10,7 +10,7 @@ pub fn env_duration(name: &str, default_secs: u64, cap_secs: Option<u64>) -> Dur
     Duration::from_secs(secs)
 }
 
-/// Reads a test-only millisecond hook; `None` when unset or unparseable.
+/// Reads a test-only millisecond hook; `None` when unset or unparsable.
 pub fn test_hook_millis(name: &str) -> Option<Duration> {
     let raw = std::env::var(name).ok()?;
     raw.trim()
@@ -57,7 +57,7 @@ mod tests {
     }
 
     #[test]
-    fn unparseable_falls_back_with_warning_naming_value() {
+    fn unparsable_falls_back_with_warning_naming_value() {
         let (secs, warning) = parse_secs(Some("abc"), 600, None);
         assert_eq!(secs, 600);
         assert!(warning.is_some_and(|w| w.contains("abc")));

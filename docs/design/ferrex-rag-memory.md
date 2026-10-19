@@ -109,7 +109,7 @@ ferrex's position: **Rust-native + Qdrant (sidecar or external) + hybrid search 
 
 ferrex communicates with Qdrant via gRPC using `qdrant-client`. Two modes:
 
-1. **Sidecar (default)** — ferrex manages a local Qdrant subprocess. Starts on launch, stops on shutdown. Invisible to the user. Data stored at `~/.ferrex/qdrant-data/`.
+1. **Sidecar (default)** — ferrex manages a local Qdrant subprocess. Starts on launch. Daemons leave it running when they exit; only `--no-daemon` sessions and CLI commands stop a Qdrant they spawned, and `ferrex nuke` stops it for good. Invisible to the user. Data stored at `~/.ferrex/qdrant-data/`.
 2. **External (`--qdrant-url <url>`)** — ferrex connects to a user-provided Qdrant instance. No sidecar process, no local data directory. Use this for team deployments, existing infrastructure, or when you prefer to manage Qdrant yourself. Fail-fast: one connection attempt with 3-second timeout. On failure: `"error: cannot connect to Qdrant at {url} — is it running?"` and exit. No retry — the user manages the instance.
 
 When `--qdrant-url` is set, sidecar management is skipped entirely. The same `qdrant-client` code handles both modes — the only difference is the connection target.

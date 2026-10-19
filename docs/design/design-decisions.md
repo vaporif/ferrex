@@ -86,6 +86,7 @@ All lookups check aliases first. This is the full pipeline — not deferred.
 4. If no PID file → start Qdrant, write PID file
 5. Connect with retry + backoff (up to 5s)
 6. On ferrex exit → if we started Qdrant (not reused), send SIGTERM
+   - Note (2026-10-18): shared daemons skip this step and leave Qdrant running; `ferrex nuke` stops it. See `docs/specs/2026-10-14-shared-daemon-design.md`.
 7. Data directory: `~/.ferrex/qdrant-data/` (deterministic, per-user)
 
 **External mode (`--qdrant-url <url>`):**
