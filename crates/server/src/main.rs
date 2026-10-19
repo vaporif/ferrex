@@ -2,6 +2,8 @@ mod audit;
 mod backfill;
 mod cli;
 mod commands;
+#[allow(dead_code)]
+mod daemon;
 mod hint;
 mod params;
 mod server;
