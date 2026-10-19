@@ -611,6 +611,29 @@ impl ProxyClient {
         resp
     }
 
+    /// Reads lines until a response to each of `ids` has arrived in any order; returns them in `ids` order.
+    pub async fn responses_within(&mut self, ids: &[u64], within: Duration) -> Vec<Value> {
+        let deadline = Instant::now() + within;
+        let mut found: Vec<Option<Value>> = vec![None; ids.len()];
+        while found.iter().any(Option::is_none) {
+            let line = self
+                .read_line_timeout(deadline.saturating_duration_since(Instant::now()))
+                .await
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no responses to all of {ids:?} within {within:?}; stderr:\n{}",
+                        self.stderr_text()
+                    )
+                });
+            let msg: Value = serde_json::from_str(&line).expect("json-rpc line");
+            self.seen.push(msg.clone());
+            if let Some(slot) = ids.iter().position(|id| msg.get("id") == Some(&json!(id))) {
+                found[slot] = Some(msg);
+            }
+        }
+        found.into_iter().flatten().collect()
+    }
+
     /// `None` on timeout or EOF.
     pub async fn read_line_timeout(&mut self, within: Duration) -> Option<String> {
         let mut line = String::new();

@@ -281,9 +281,8 @@ async fn requests_during_failed_round_each_get_one_error() {
                 .await,
         );
     }
-    for id in &ids {
-        let (code, _) = error_of(&proxy.response_within(*id, WITHIN).await);
-        assert_eq!(code, RESTART_CODE);
+    for resp in proxy.responses_within(&ids, WITHIN).await {
+        assert_eq!(error_of(&resp).0, RESTART_CODE, "{resp}");
     }
     assert_echo(&proxy.request("ping", json!({})).await, "ping");
     for id in &ids {
