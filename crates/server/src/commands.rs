@@ -313,3 +313,20 @@ fn runtime() -> eyre::Result<tokio::runtime::Runtime> {
         .build()
         .map_err(Into::into)
 }
+
+pub fn daemon_paths(config: &FerrexConfig) -> eyre::Result<()> {
+    let exe = crate::daemon::addr::current_exe_canonical()?;
+    let paths = crate::daemon::addr::DaemonPaths::for_config(config, &exe)?;
+    crate::daemon::addr::ensure_run_dir(&paths.run_dir)?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "key": paths.key,
+            "socket": paths.socket,
+            "pid_file": paths.pid_file,
+            "lock_file": paths.lock_file,
+            "run_dir": paths.run_dir,
+        })
+    );
+    Ok(())
+}

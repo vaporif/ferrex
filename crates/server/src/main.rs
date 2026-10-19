@@ -63,6 +63,7 @@ fn main() -> eyre::Result<()> {
             eprintln!("ferrex restore is not yet implemented");
             std::process::exit(1);
         }
+        Some(Command::DaemonPaths) => commands::daemon_paths(&cli::build_config(cli)?),
         None => standalone::run(cli::build_config(cli)?),
     }
 }
