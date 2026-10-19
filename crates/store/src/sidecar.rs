@@ -759,8 +759,9 @@ mod tests {
 
     #[test]
     fn pid_alive_false_for_unreaped_zombie() {
-        if cfg!(target_os = "macos") && !Path::new("/bin/ps").exists() {
-            eprintln!("skipping: /bin/ps missing");
+        // The darwin nix sandbox ships /bin/ps but denies running it.
+        if process_state(std::process::id()).is_none() {
+            eprintln!("skipping: process state unreadable");
             return;
         }
         let mut child = Command::new("/bin/sh")
