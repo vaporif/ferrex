@@ -220,7 +220,7 @@ The first session for a given database and config spawns one `ferrex` daemon. La
 - The daemon exits after `FERREX_IDLE_TIMEOUT` seconds with no sessions (default 600).
 - Its log is `~/.ferrex/run/ferrexd.log`. Set `FERREX_RUN_DIR` to move the run directory.
 - `--no-daemon` or `FERREX_NO_DAEMON=1` serves MCP in the process itself, as before. A `:memory:` database does the same.
-- The Qdrant sidecar keeps running after the last session ends. `ferrex nuke` stops it, but only when the recorded PID is confirmed to be a qdrant process; otherwise it prints the PID and leaves it for you to stop.
+- The Qdrant sidecar keeps running after the last session ends. `ferrex nuke` stops it, but only when the recorded PID is confirmed to be a qdrant process; otherwise it fails without deleting anything, naming the PID and `qdrant.pid`, so you can stop that process or remove the file and retry.
 - `ferrex audit reconcile --fix` and `ferrex backfill` (without `--dry-run`) refuse to run while a daemon is using the database. `ferrex nuke` on the default path (`~/.ferrex`) refuses while any daemon is running; with a custom `--db-path` it refuses only while a daemon uses that database. Close your sessions or wait for the daemon to go idle.
 
 ## Configuration

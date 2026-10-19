@@ -357,10 +357,11 @@ fn stop_sidecar(config: &FerrexConfig, dir: &Path) -> eyre::Result<()> {
         return Ok(());
     };
     if !is_qdrant(pid, &config.qdrant_bin) {
-        println!(
-            "Qdrant (pid {pid}) was not stopped because it could not be confirmed as ferrex's sidecar. Stop it manually."
-        );
-        return Ok(());
+        let pid_file = dir.join("qdrant.pid");
+        return Err(eyre::eyre!(
+            "qdrant pid {pid} (from {}) is alive but could not be confirmed as ferrex's sidecar; nothing was deleted. Stop that process or remove qdrant.pid, then retry.",
+            pid_file.display()
+        ));
     }
     kill_and_wait(pid)?;
     println!("Stopped qdrant (pid {pid})");

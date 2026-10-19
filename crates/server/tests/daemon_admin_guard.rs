@@ -197,25 +197,28 @@ async fn nuke_skips_kill_when_pid_is_not_qdrant() {
     let env = TestEnv::without_sidecar();
     let dir = sidecar_dir(&env);
     fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("ferrex.db");
+    fs::write(&db, b"db").unwrap();
     let mut sleeper = std::process::Command::new("sleep")
         .arg("60")
         .spawn()
         .unwrap();
     fs::write(dir.join("qdrant.pid"), sleeper.id().to_string()).unwrap();
 
-    let out = nuke(&env, &dir.join("ferrex.db")).await;
+    let out = nuke(&env, &db).await;
     let alive = pid_alive(sleeper.id());
     let _ = sleeper.kill();
     let _ = sleeper.wait();
 
-    assert_ok(&out);
+    assert!(!out.status.success(), "stdout: {}", stdout(&out));
+    let err = stderr(&out);
     assert!(
-        stdout(&out).contains("was not stopped"),
-        "stdout: {}",
-        stdout(&out)
+        err.contains(&format!("qdrant pid {}", sleeper.id())) && err.contains("qdrant.pid"),
+        "stderr: {err}"
     );
     assert!(alive);
-    assert!(!dir.join("qdrant.pid").exists());
+    assert!(dir.join("qdrant.pid").exists());
+    assert!(db.exists());
 }
 
 #[tokio::test]
@@ -223,6 +226,8 @@ async fn nuke_does_not_signal_non_qdrant_pid_even_when_port_answers() {
     let env = TestEnv::without_sidecar();
     let (_sidecar, qdrant_pid) = start_sidecar(&env).await;
     let dir = sidecar_dir(&env);
+    let db = dir.join("ferrex.db");
+    fs::write(&db, b"db").unwrap();
     let mut sleeper = std::process::Command::new("sleep")
         .arg("60")
         .spawn()
@@ -234,22 +239,23 @@ async fn nuke_does_not_signal_non_qdrant_pid_even_when_port_answers() {
     )
     .unwrap();
 
-    let out = nuke(&env, &dir.join("ferrex.db")).await;
+    let out = nuke(&env, &db).await;
     let sleeper_alive = pid_alive(sleeper.id());
     let qdrant_alive = pid_alive(qdrant_pid);
     let _ = sleeper.kill();
     let _ = sleeper.wait();
 
-    assert_ok(&out);
-    let text = stdout(&out);
+    assert!(!out.status.success(), "stdout: {}", stdout(&out));
+    let err = stderr(&out);
     assert!(
-        text.contains(&format!("Qdrant (pid {}) was not stopped", sleeper.id())),
-        "stdout: {text}"
+        err.contains(&format!("qdrant pid {}", sleeper.id())) && err.contains("qdrant.pid"),
+        "stderr: {err}"
     );
     assert!(sleeper_alive);
     assert!(qdrant_alive);
-    assert!(!dir.join("qdrant.pid").exists());
-    assert!(!dir.join("qdrant.port").exists());
+    assert!(dir.join("qdrant.pid").exists());
+    assert!(dir.join("qdrant.port").exists());
+    assert!(db.exists());
 }
 
 #[tokio::test]
