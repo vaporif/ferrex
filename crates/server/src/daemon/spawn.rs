@@ -445,6 +445,7 @@ mod tests {
     use tokio::time::Instant;
 
     use super::*;
+    use crate::daemon::addr::PidFile;
     use crate::daemon::addr::tests::base_config;
     use crate::daemon::handshake::{Hello, RefusalKind};
 
@@ -810,6 +811,27 @@ mod tests {
             .unwrap_err();
         assert!(err.child_exited_early, "{err:?}");
         assert!(!paths.socket.exists());
+    }
+
+    #[tokio::test]
+    async fn connect_or_spawn_keeps_refusing_socket_of_live_daemon() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = temp_paths(tmp.path());
+        // The socket file outlives its listener, so connect gets ECONNREFUSED: the same error a
+        // macOS listener with a full backlog gives.
+        drop(std::os::unix::net::UnixListener::bind(&paths.socket).unwrap());
+        let _alive = PidFile {
+            pid: std::process::id(),
+            db_path: PathBuf::from("/abs/x.db"),
+        }
+        .write_locked(&paths.pid_file)
+        .unwrap();
+        let (exe, argv) = sh("exit 1");
+        let err = connect_or_spawn(&paths, &exe, &argv, &short_budgets())
+            .await
+            .unwrap_err();
+        assert!(err.retryable && !err.child_exited_early, "{err:?}");
+        assert!(paths.socket.exists());
     }
 
     #[tokio::test]

@@ -28,7 +28,7 @@ assert_is_empty = "allow"
 unused_async_trait_impl = "allow"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 authors = ["Dmytro Onypko <vaporif@proton.me>"]
@@ -86,7 +86,7 @@ rustix = { version = "1", features = ["process"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 
 # Cache
-lru = "0.16"
+lru = "0.19"
 rustc-hash = "2"
 
 # Config

@@ -317,4 +317,18 @@ mod tests {
         assert!(path.is_absolute());
         assert!(path.is_file());
     }
+
+    #[test]
+    fn invalid_namespace_is_rejected_at_parse_time() {
+        for bad in ["bad/name", "", "a b"] {
+            let err = Cli::try_parse_from(["ferrex", "--namespace", bad])
+                .err()
+                .unwrap_or_else(|| panic!("{bad:?} parsed"));
+            assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation, "{err}");
+        }
+        for good in ["default", "proj_1-x"] {
+            let cli = Cli::try_parse_from(["ferrex", "--namespace", good]).unwrap();
+            assert_eq!(cli.namespace, good);
+        }
+    }
 }

@@ -11,6 +11,7 @@ use ferrex_store::{MemoryType, QdrantSidecar, SidecarPolicy};
 pub struct TestContext {
     pub service: MemoryService,
     pub namespace: String,
+    pub qdrant_url: String,
     _sidecar: QdrantSidecar,
     _temp_dir: tempfile::TempDir,
 }
@@ -63,6 +64,7 @@ impl TestContext {
         Self {
             service,
             namespace,
+            qdrant_url: sidecar.url(),
             _sidecar: sidecar,
             _temp_dir: temp_dir,
         }

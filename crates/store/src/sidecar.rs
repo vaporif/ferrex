@@ -790,6 +790,31 @@ mod tests {
         assert!(!is_qdrant(u32::MAX - 1, "qdrant"));
     }
 
+    #[test]
+    fn process_comm_names_the_running_binary() {
+        let exe = std::env::current_exe().unwrap();
+        let comm = process_comm(std::process::id()).expect("own comm");
+        assert!(
+            matches_qdrant_name(&comm, exe.to_str().unwrap()),
+            "{comm} vs {}",
+            exe.display()
+        );
+    }
+
+    #[test]
+    fn process_queries_do_not_spawn_processes() {
+        // The reuse watcher polls pid_alive every REUSE_POLL for the daemon's lifetime; spawning
+        // ps for each call costs milliseconds, a kernel query microseconds.
+        let pid = std::process::id();
+        let started = Instant::now();
+        for _ in 0..100 {
+            assert!(pid_alive(pid));
+            assert!(!is_qdrant(pid, "qdrant"));
+        }
+        let elapsed = started.elapsed();
+        assert!(elapsed < Duration::from_millis(200), "took {elapsed:?}");
+    }
+
     #[tokio::test]
     async fn start_fails_and_cleans_up_when_bin_exits_immediately() {
         let dir = tempfile::tempdir().unwrap();

@@ -436,27 +436,95 @@ pub(super) mod tests {
         assert_eq!(PidFile::read(Path::new("/nonexistent/k.pid")), None);
     }
 
+    fn mode(dir: &Path) -> u32 {
+        fs::metadata(dir).unwrap().permissions().mode() & 0o777
+    }
+
     #[test]
-    fn ensure_run_dir_sets_0700() {
+    fn ensure_run_dir_creates_missing_dirs_0700() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("a/run");
+        ensure_run_dir(&dir).unwrap();
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&tmp.path().join("a")), 0o700);
+    }
+
+    #[test]
+    fn ensure_run_dir_accepts_existing_private_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("run");
         fs::create_dir(&dir).unwrap();
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
         ensure_run_dir(&dir).unwrap();
-        let mode = fs::metadata(&dir).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o700);
+        assert_eq!(mode(&dir), 0o700);
     }
 
-    fn live_daemon(dir: &Path, stem: &str, db: &str) -> std::os::unix::net::UnixListener {
-        let listener =
-            std::os::unix::net::UnixListener::bind(dir.join(format!("{stem}.sock"))).unwrap();
+    #[test]
+    fn ensure_run_dir_refuses_existing_open_dir_without_chmod() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("shared");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let err = ensure_run_dir(&dir).unwrap_err().to_string();
+        assert!(err.contains(dir.to_str().unwrap()), "{err}");
+        assert!(err.contains("chmod 700"), "{err}");
+        assert_eq!(mode(&dir), 0o755);
+    }
+
+    #[test]
+    fn ensure_run_dir_refuses_dir_owned_by_someone_else() {
+        // Root owns /, so this runs only as a regular user.
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        let err = ensure_run_dir(Path::new("/")).unwrap_err().to_string();
+        assert!(err.contains("owned by"), "{err}");
+    }
+
+    fn live_daemon(dir: &Path, stem: &str, db: &str) -> File {
         PidFile {
             pid: std::process::id(),
             db_path: PathBuf::from(db),
         }
-        .write(&dir.join(format!("{stem}.pid")))
+        .write_locked(&dir.join(format!("{stem}.pid")))
+        .unwrap()
+    }
+
+    #[test]
+    fn live_for_db_does_not_connect_to_the_socket() {
+        let tmp = tempfile::tempdir().unwrap();
+        let listener =
+            std::os::unix::net::UnixListener::bind(tmp.path().join("aaaa.sock")).unwrap();
+        let _lock = live_daemon(tmp.path(), "aaaa", "/abs/x.db");
+        assert!(live_for_db(tmp.path(), Path::new("/abs/x.db")).is_some());
+        listener.set_nonblocking(true).unwrap();
+        let err = listener.accept().unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn live_for_db_ignores_unlocked_pid_file_with_listening_socket() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _listener =
+            std::os::unix::net::UnixListener::bind(tmp.path().join("aaaa.sock")).unwrap();
+        PidFile {
+            pid: std::process::id(),
+            db_path: PathBuf::from("/abs/x.db"),
+        }
+        .write(&tmp.path().join("aaaa.pid"))
         .unwrap();
-        listener
+        assert_eq!(live_for_db(tmp.path(), Path::new("/abs/x.db")), None);
+    }
+
+    #[test]
+    fn pid_file_lock_survives_rewrite_and_releases_on_drop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("aaaa.pid");
+        let lock = live_daemon(tmp.path(), "aaaa", "/abs/x.db");
+        assert!(pid_file_held(&path));
+        drop(lock);
+        assert!(!pid_file_held(&path));
+        assert!(!pid_file_held(&tmp.path().join("missing.pid")));
     }
 
     #[test]

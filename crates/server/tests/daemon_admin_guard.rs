@@ -1,22 +1,23 @@
 mod common;
 
 use std::ffi::OsString;
-use std::fs;
-use std::os::unix::net::UnixListener;
+use std::fs::{self, DirBuilder, File};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 use std::time::{Duration, Instant};
 
-use common::{CmdOpts, TestEnv};
-use ferrex_store::{QdrantSidecar, SidecarPolicy, pid_alive};
+use common::{CmdOpts, TestEnv, signal};
+use ferrex_store::{QdrantSidecar, SidecarPolicy, pid_alive, read_pid};
+use rustix::process::Signal;
 use serde_json::json;
 
-/// A test-held listener plus a PID file naming this process stands in for a daemon.
-fn fake_live_daemon(env: &TestEnv) -> UnixListener {
-    fs::create_dir_all(&env.run_dir).unwrap();
-    let listener = UnixListener::bind(env.run_dir.join("feedfacefeedface.sock")).unwrap();
+/// A PID file naming this process, locked as a live daemon holds it, stands in for a daemon.
+fn fake_live_daemon(env: &TestEnv) -> File {
     write_pid_file(env);
-    listener
+    let file = File::open(env.run_dir.join("feedfacefeedface.pid")).unwrap();
+    file.lock().unwrap();
+    file
 }
 
 fn write_pid_file(env: &TestEnv) {
@@ -24,7 +25,11 @@ fn write_pid_file(env: &TestEnv) {
 }
 
 fn write_pid_file_for(env: &TestEnv, db_path: &Path) {
-    fs::create_dir_all(&env.run_dir).unwrap();
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&env.run_dir)
+        .unwrap();
     let body = json!({ "pid": std::process::id(), "db_path": db_path });
     fs::write(
         env.run_dir.join("feedfacefeedface.pid"),
@@ -275,4 +280,32 @@ async fn nuke_with_dead_qdrant_pid_deletes_files() {
         stdout(&out)
     );
     assert!(!dir.join("qdrant.pid").exists());
+}
+
+#[tokio::test]
+async fn diagnose_leaves_the_sidecar_it_started_running() {
+    let env = TestEnv::without_sidecar();
+    let out = env
+        .ferrex_cmd_with(CmdOpts {
+            qdrant_url: Some(None),
+            extra_args: vec!["diagnose".into()],
+            env: vec![
+                ("HOME".into(), env.root.display().to_string()),
+                ("FERREX_QDRANT_PORT".into(), env.qdrant_port.to_string()),
+            ],
+            ..Default::default()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .expect("run diagnose");
+    assert_ok(&out);
+    let pid = read_pid(&sidecar_dir(&env).join("qdrant.pid")).expect("qdrant.pid");
+    let alive = pid_alive(pid);
+    signal(pid, Signal::KILL);
+    assert!(
+        alive,
+        "diagnose killed the qdrant a daemon may have started reusing"
+    );
 }

@@ -216,6 +216,47 @@ async fn connection_during_idle_pause_is_served() {
 }
 
 #[tokio::test]
+async fn admin_guard_probes_do_not_delay_idle_exit() {
+    let env = TestEnv::new().await;
+    let mut daemon = Daemon::start(&env, &[("FERREX_IDLE_TIMEOUT", "2")]).await;
+    let (reply, conn) = raw_session(
+        &daemon.paths.socket,
+        &daemon.paths.key,
+        "default",
+        COLD_HELLO,
+    )
+    .await;
+    assert!(reply.ok, "{reply:?}");
+    drop(conn);
+
+    let deadline = Instant::now() + Duration::from_secs(2 + 15);
+    let mut refusals = 0;
+    while daemon.alive() {
+        assert!(
+            Instant::now() < deadline,
+            "daemon outlived its idle timeout while being probed"
+        );
+        let out = env
+            .ferrex_cmd_with(CmdOpts {
+                extra_args: ["audit", "reconcile", "--fix"].map(Into::into).into(),
+                ..Default::default()
+            })
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .await
+            .expect("run audit");
+        if String::from_utf8_lossy(&out.stderr).contains("Close your Claude sessions") {
+            refusals += 1;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(refusals > 0, "the guard never saw the daemon");
+    let status = daemon.wait_exit(Duration::from_secs(5)).await;
+    assert!(status.success(), "{status}");
+}
+
+#[tokio::test]
 async fn bad_or_silent_hello_does_not_block_idle_exit() {
     let env = TestEnv::new().await;
     let mut daemon = Daemon::start(&env, &[("FERREX_IDLE_TIMEOUT", "2")]).await;
