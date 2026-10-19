@@ -40,6 +40,7 @@ impl McpTestHarness {
             .arg(&config_path)
             .arg("--model-tier")
             .arg("small")
+            .arg("--no-daemon")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

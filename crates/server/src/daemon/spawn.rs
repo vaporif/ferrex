@@ -28,6 +28,7 @@ pub struct Budgets {
     pub flock: Duration,
     pub accept: Duration,
     pub hello: Duration,
+    #[allow(dead_code, reason = "used by Task 11")]
     pub replay: Duration,
 }
 
@@ -59,6 +60,7 @@ impl Budgets {
 
 #[derive(Debug)]
 pub struct AttemptError {
+    #[allow(dead_code, reason = "used by Task 11")]
     pub kind: Option<RefusalKind>,
     pub retryable: bool,
     pub child_exited_early: bool,
@@ -104,12 +106,14 @@ pub struct Resolved {
 #[derive(Debug)]
 pub struct Connected<T> {
     pub value: T,
+    #[allow(dead_code, reason = "used by Task 13")]
     pub attempts_used: u8,
 }
 
 #[derive(Debug)]
 pub struct RoundError {
     pub last: AttemptError,
+    #[allow(dead_code, reason = "used by Task 11")]
     pub any_child_exited_early: bool,
 }
 
@@ -117,6 +121,7 @@ pub struct RoundError {
 pub struct DaemonConn {
     pub reader: BufReader<OwnedReadHalf>,
     pub writer: OwnedWriteHalf,
+    #[allow(dead_code, reason = "used by Task 11")]
     pub key: String,
 }
 
