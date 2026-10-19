@@ -325,7 +325,6 @@ impl Watcher {
 async fn resolve_existing(bin: &str, port: u16, dir: &Path) -> Result<Resolution, StoreError> {
     let pid_file = dir.join(PID_FILE);
     let lock_path = dir.join(LOCK_FILE);
-    // Prevents two processes from racing to spawn qdrant.
     let mut lock = acquire_lock_file(&lock_path)?;
 
     loop {
@@ -434,7 +433,6 @@ fn build_client(port: u16) -> Result<qdrant_client::Qdrant, StoreError> {
         .map_err(|e| StoreError::Sidecar(e.to_string()))
 }
 
-/// One-shot check that something answers qdrant's health endpoint on `port`.
 async fn probe_qdrant(port: u16) -> bool {
     match build_client(port) {
         Ok(client) => client.health_check().await.is_ok(),
@@ -603,7 +601,6 @@ fn ps_field(field: &str, pid: u32) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).trim().to_string()).filter(|s| !s.is_empty())
 }
 
-/// Whether `pid` is a process whose name matches `qdrant_bin`.
 #[must_use]
 pub fn is_qdrant(pid: u32, qdrant_bin: &str) -> bool {
     process_comm(pid).is_some_and(|comm| matches_qdrant_name(&comm, qdrant_bin))

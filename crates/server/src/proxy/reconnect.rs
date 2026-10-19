@@ -45,7 +45,6 @@ pub struct ResendPending {
     pub attempts_used: u8,
 }
 
-/// What a reconnect round needs beyond the stdin side of the proxy.
 #[derive(Debug)]
 pub struct ReconnectCtx {
     pub exe: PathBuf,
@@ -57,7 +56,6 @@ pub struct ReconnectCtx {
 }
 
 impl ReconnectCtx {
-    /// The error message for requests a failed round leaves unanswered.
     #[must_use]
     pub fn failure_message(&self, err: &RoundError) -> String {
         let message = format!("ferrex daemon unavailable: {}", err.last);
@@ -237,7 +235,6 @@ async fn await_response(
         })?
 }
 
-/// Reads up to the response to `id`, skipping anything else the daemon sends first.
 async fn read_response(
     reader: &mut BufReader<OwnedReadHalf>,
     id: &Value,

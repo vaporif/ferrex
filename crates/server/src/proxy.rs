@@ -158,7 +158,6 @@ async fn connect(
     .await
 }
 
-/// The forwarding loop after start-up: owns stdin, the queue and the daemon connection state.
 struct Proxy<'a> {
     ctx: ReconnectCtx,
     stdin: mpsc::Receiver<StdinEvent>,
@@ -219,7 +218,6 @@ impl Proxy<'_> {
         Ok(())
     }
 
-    /// Forwards client lines until the daemon is lost: reader EOF or a failed write.
     async fn forward(&mut self, writer: &mut OwnedWriteHalf, lost: &mut oneshot::Receiver<()>) {
         loop {
             tokio::select! {
@@ -246,7 +244,7 @@ impl Proxy<'_> {
             let mut tracker = lock(&self.ctx.tracker);
             tracker.set_link(Link::Down);
             self.initialised_at_loss = tracker.initialised();
-            // Over once the kept id was answered or the session became initialised.
+            // The re-send's attempt count only carries over while its id is still the kept in-flight request.
             self.pending
                 .take()
                 .filter(|p| tracker.kept_in_flight().is_some_and(|k| k.id == p.id))
@@ -348,7 +346,6 @@ async fn write_line(writer: &mut OwnedWriteHalf, line: &[u8]) -> io::Result<()> 
     })
 }
 
-/// Queues a synthetic JSON-RPC line, adding its newline.
 fn send_json(out: &StdoutTx, line: String) {
     let mut line = line.into_bytes();
     line.push(b'\n');
@@ -360,7 +357,6 @@ fn send_line(out: &StdoutTx, line: Vec<u8>) {
     let _ = out.send(Out::Line(line));
 }
 
-/// Copies whole daemon lines to stdout until the socket closes, then reports the loss.
 async fn pump_daemon(
     mut reader: tokio::io::BufReader<OwnedReadHalf>,
     out: StdoutTx,

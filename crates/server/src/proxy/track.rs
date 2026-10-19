@@ -38,7 +38,7 @@ pub struct KeptRequest {
     pub initialize: bool,
 }
 
-/// Follows the JSON-RPC traffic just enough to reconnect a client mid-session.
+/// Follows the JSON-RPC traffic needed to reconnect a client mid-session.
 #[derive(Debug, Default)]
 pub struct Tracker {
     in_flight: HashMap<String, (Value, String)>,
@@ -83,7 +83,6 @@ fn id_key(id: &Value) -> String {
     id.to_string()
 }
 
-/// The id of a JSON-RPC request line.
 pub fn request_id(line: &[u8]) -> Option<Value> {
     match Envelope::parse(line)? {
         Envelope {
@@ -237,7 +236,6 @@ impl Tracker {
         self.kept_first.as_ref()
     }
 
-    /// The kept first request while the daemon still owes its response.
     #[must_use]
     pub fn kept_in_flight(&self) -> Option<&KeptRequest> {
         self.kept_first

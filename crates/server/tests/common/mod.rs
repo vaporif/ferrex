@@ -549,7 +549,6 @@ impl ProxyClient {
         self.child.id().expect("proxy pid")
     }
 
-    /// `true` while the proxy process has not exited.
     pub fn is_running(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
     }
@@ -563,7 +562,6 @@ impl ProxyClient {
         String::from_utf8_lossy(&self.stderr.lock().unwrap()).into_owned()
     }
 
-    /// Writes `line`, adding the newline if it is missing.
     pub async fn send(&mut self, line: impl AsRef<[u8]>) {
         let line = line.as_ref();
         let stdin = self.stdin.as_mut().expect("proxy stdin is open");
@@ -588,7 +586,6 @@ impl ProxyClient {
         self.response_within(id, within).await
     }
 
-    /// Sends a request without waiting for its response; returns its id.
     pub async fn send_request(&mut self, method: &str, params: &Value) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
@@ -596,7 +593,6 @@ impl ProxyClient {
         id
     }
 
-    /// Reads lines until the response to `id` arrives.
     pub async fn response_within(&mut self, id: u64, within: Duration) -> Value {
         let deadline = Instant::now() + within;
         loop {

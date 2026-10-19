@@ -51,7 +51,8 @@ pub fn run(mut config: FerrexConfig, key: &str) -> eyre::Result<()> {
             paths.key
         );
     }
-    // The key ignores namespace and every session sends its own; pinning keeps the daemon independent of whichever proxy spawned it.
+    // The key ignores namespace and every session sends its own. Pinning it keeps the daemon
+    // independent of whichever proxy spawned it.
     config.namespace = "default".into();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -295,7 +296,8 @@ impl Daemon {
         self.grace_deadline = Some(Instant::now() + grace);
     }
 
-    /// Takes the spawn lock; for an idle exit, re-checks for late connections. `None` means keep serving.
+    /// Takes the spawn lock; for an idle exit, re-checks for late connections.
+    /// `None` means keep serving.
     async fn begin_shutdown(&mut self, trigger: Trigger) -> Option<Commit> {
         let lock = acquire_lock_within(&self.paths.lock_file, SHUTDOWN_LOCK_WAIT).await;
         if trigger != Trigger::Idle {
@@ -363,7 +365,8 @@ impl Daemon {
         }
     }
 
-    /// Removes socket and pid file if we hold the lock, then stops sessions and the service (which owns the sidecar).
+    /// Removes socket and pid file if we hold the lock, then stops sessions and the service,
+    /// which owns the sidecar.
     async fn finish(mut self, commit: Commit) {
         drop(self.listener);
         if let Some(lock) = commit.lock {
