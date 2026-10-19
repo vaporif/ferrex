@@ -439,6 +439,23 @@ pub(super) mod tests {
             live_for_db(tmp.path(), Path::new("/abs/x.db")),
             Some(std::process::id())
         );
+        assert_eq!(live_for_db(tmp.path(), Path::new("/abs/none.db")), None);
+    }
+
+    #[test]
+    fn live_for_db_ignores_dead_pid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead = child.id();
+        child.wait().unwrap();
+        let _l = std::os::unix::net::UnixListener::bind(tmp.path().join("aaaa.sock")).unwrap();
+        PidFile {
+            pid: dead,
+            db_path: PathBuf::from("/abs/x.db"),
+        }
+        .write(&tmp.path().join("aaaa.pid"))
+        .unwrap();
+        assert_eq!(live_for_db(tmp.path(), Path::new("/abs/x.db")), None);
     }
 
     #[test]
