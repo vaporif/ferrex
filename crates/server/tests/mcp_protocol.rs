@@ -1,6 +1,6 @@
 use std::process::Stdio;
 
-use ferrex_store::QdrantSidecar;
+use ferrex_store::{QdrantSidecar, SidecarPolicy};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -21,9 +21,10 @@ impl McpTestHarness {
         let base_dir = temp_dir.path().to_path_buf();
         let port = portpicker::pick_unused_port().expect("no free port");
 
-        let sidecar = QdrantSidecar::start("qdrant", port, Some(base_dir))
-            .await
-            .expect("sidecar start");
+        let sidecar =
+            QdrantSidecar::start("qdrant", port, Some(base_dir), SidecarPolicy::KillOnDrop)
+                .await
+                .expect("sidecar start");
 
         let db_path = temp_dir.path().join("ferrex.db");
         let config_path = temp_dir.path().join("ferrex.toml");
