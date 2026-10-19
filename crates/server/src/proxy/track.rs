@@ -123,6 +123,7 @@ impl Tracker {
         }
     }
 
+    #[allow(dead_code, reason = "used by Task 11")]
     #[must_use]
     pub const fn initialised(&self) -> bool {
         self.initialised

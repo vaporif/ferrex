@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use ferrex_core::{FerrexConfig, ModelTier, RerankerTier};
 
 #[derive(Parser)]
@@ -32,6 +32,15 @@ pub struct Cli {
 
     #[arg(long, env = "FERREX_CONFIG_PATH")]
     pub config_path: Option<PathBuf>,
+
+    /// Serve MCP in this process instead of through the shared daemon.
+    #[arg(
+        long,
+        env = "FERREX_NO_DAEMON",
+        action = ArgAction::SetTrue,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    pub no_daemon: bool,
 }
 
 #[derive(Subcommand)]
@@ -137,6 +146,12 @@ fn absolutize(path: &Path) -> eyre::Result<PathBuf> {
     Ok(parent.join(name))
 }
 
+/// An in-memory database can't be shared, so it always runs standalone.
+#[must_use]
+pub fn use_standalone(no_daemon: bool, config: &FerrexConfig) -> bool {
+    no_daemon || ferrex_store::is_memory_path(&config.db_path)
+}
+
 pub fn build_config(cli: Cli) -> eyre::Result<FerrexConfig> {
     let default_dir = || {
         dirs::home_dir()
@@ -186,6 +201,77 @@ mod tests {
         let mut argv = vec!["ferrex"];
         argv.extend_from_slice(args);
         build_config(Cli::try_parse_from(argv)?)
+    }
+
+    fn standalone_for(args: &[&str]) -> bool {
+        let mut argv = vec!["ferrex"];
+        argv.extend_from_slice(args);
+        let cli = Cli::try_parse_from(argv).unwrap();
+        let no_daemon = cli.no_daemon;
+        use_standalone(no_daemon, &build_config(cli).unwrap())
+    }
+
+    #[test]
+    fn no_daemon_env_one_selects_standalone() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        // SAFETY: nextest runs each test in its own process.
+        unsafe { std::env::set_var("FERREX_NO_DAEMON", "1") };
+        assert!(standalone_for(&[
+            "--config-path",
+            "c.toml",
+            "--db-path",
+            "x.db"
+        ]));
+    }
+
+    #[test]
+    fn no_daemon_env_zero_uses_daemon() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        // SAFETY: nextest runs each test in its own process.
+        unsafe { std::env::set_var("FERREX_NO_DAEMON", "0") };
+        assert!(!standalone_for(&[
+            "--config-path",
+            "c.toml",
+            "--db-path",
+            "x.db"
+        ]));
+    }
+
+    #[test]
+    fn no_daemon_flag_selects_standalone() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        // SAFETY: nextest runs each test in its own process.
+        unsafe { std::env::remove_var("FERREX_NO_DAEMON") };
+        assert!(!standalone_for(&[
+            "--config-path",
+            "c.toml",
+            "--db-path",
+            "x.db"
+        ]));
+        assert!(standalone_for(&[
+            "--no-daemon",
+            "--config-path",
+            "c.toml",
+            "--db-path",
+            "x.db"
+        ]));
+    }
+
+    #[test]
+    fn memory_db_path_selects_standalone() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        // SAFETY: nextest runs each test in its own process.
+        unsafe { std::env::remove_var("FERREX_NO_DAEMON") };
+        assert!(standalone_for(&[
+            "--config-path",
+            "c.toml",
+            "--db-path",
+            ":memory:"
+        ]));
     }
 
     #[test]

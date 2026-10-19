@@ -2,16 +2,14 @@ mod audit;
 mod backfill;
 mod cli;
 mod commands;
-#[allow(dead_code)]
 mod daemon;
 mod hint;
 mod params;
-#[allow(dead_code)]
 mod proxy;
 mod server;
 mod standalone;
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -67,8 +65,30 @@ fn main() -> eyre::Result<()> {
         }
         Some(Command::DaemonPaths) => commands::daemon_paths(&cli::build_config(cli)?),
         Some(Command::Daemon { key }) => daemon::run(cli::build_config(cli)?, &key),
-        None => standalone::run(cli::build_config(cli)?),
+        None => {
+            let no_daemon = cli.no_daemon;
+            let config = cli::build_config(cli)?;
+            if cli::use_standalone(no_daemon, &config) {
+                standalone::run(config)
+            } else {
+                run_proxy(config)
+            }
+        }
     }
+}
+
+fn run_proxy(config: ferrex_core::FerrexConfig) -> ! {
+    let argv: Vec<_> = std::env::args_os().skip(1).collect();
+    let code = match proxy::run(config, &argv) {
+        Ok(()) => 0,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "ferrex: {e:?}");
+            1
+        }
+    };
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    std::process::exit(code)
 }
 
 fn init_tracing() {
