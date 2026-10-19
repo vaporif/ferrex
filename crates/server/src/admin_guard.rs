@@ -10,14 +10,14 @@ pub fn refuse_if_live(config: &FerrexConfig) -> eyre::Result<()> {
         return Ok(());
     }
     refuse(
-        addr::live_for_db(&addr::run_dir(), &config.db_path),
+        addr::live_for_db(&addr::run_dir()?, &config.db_path),
         config.db_path.display(),
     )
 }
 
 pub fn refuse_if_any_live() -> eyre::Result<()> {
     refuse(
-        addr::any_live(&addr::run_dir()),
+        addr::any_live(&addr::run_dir()?),
         "the qdrant sidecar in ~/.ferrex",
     )
 }

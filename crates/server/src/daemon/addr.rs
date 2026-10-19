@@ -30,17 +30,24 @@ pub struct PidFile {
     pub db_path: PathBuf,
 }
 
-#[must_use]
-pub fn run_dir() -> PathBuf {
-    std::env::var_os("FERREX_RUN_DIR").map_or_else(
-        || {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".ferrex")
-                .join("run")
-        },
-        PathBuf::from,
-    )
+/// Resolves the run dir; a relative `FERREX_RUN_DIR` is anchored to the current directory so every proxy agrees.
+pub fn run_dir() -> eyre::Result<PathBuf> {
+    let Some(dir) = std::env::var_os("FERREX_RUN_DIR").map(PathBuf::from) else {
+        return Ok(dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".ferrex")
+            .join("run"));
+    };
+    if dir.is_absolute() {
+        return Ok(dir);
+    }
+    let cwd = std::env::current_dir().map_err(|e| {
+        eyre::eyre!(
+            "FERREX_RUN_DIR {} is relative and the current directory is unavailable: {e}",
+            dir.display()
+        )
+    })?;
+    Ok(cwd.join(dir))
 }
 
 pub fn ensure_run_dir(dir: &Path) -> eyre::Result<()> {
@@ -113,7 +120,7 @@ fn is_executable_file(path: &Path) -> bool {
 
 impl DaemonPaths {
     pub fn for_config(config: &FerrexConfig, exe: &Path) -> eyre::Result<Self> {
-        let run_dir = run_dir();
+        let run_dir = run_dir()?;
         let key = compute_key(config, exe)?;
         let socket = run_dir.join(format!("{key}.sock"));
         let len = socket.as_os_str().len();
@@ -340,6 +347,36 @@ pub(super) mod tests {
         let exe = exe();
         let err = DaemonPaths::for_config(&base_config(), exe.path()).unwrap_err();
         assert!(err.to_string().contains(deep.to_str().unwrap()), "{err}");
+    }
+
+    #[test]
+    fn relative_run_dir_is_anchored_to_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: nextest runs each test in its own process.
+        unsafe { std::env::set_var("FERREX_RUN_DIR", "rel/run") };
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(run_dir().unwrap(), cwd.join("rel/run"));
+    }
+
+    #[test]
+    fn relative_run_dir_with_deleted_cwd_names_the_problem() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gone = tmp.path().join("gone");
+        fs::create_dir(&gone).unwrap();
+        std::env::set_current_dir(&gone).unwrap();
+        fs::remove_dir(&gone).unwrap();
+        // SAFETY: nextest runs each test in its own process.
+        unsafe { std::env::set_var("FERREX_RUN_DIR", "rel") };
+        let err = run_dir().unwrap_err();
+        assert!(err.to_string().contains("current directory"), "{err}");
+    }
+
+    #[test]
+    fn absolute_run_dir_is_used_as_is() {
+        // SAFETY: nextest runs each test in its own process.
+        unsafe { std::env::set_var("FERREX_RUN_DIR", "/abs/run") };
+        assert_eq!(run_dir().unwrap(), PathBuf::from("/abs/run"));
     }
 
     #[test]
