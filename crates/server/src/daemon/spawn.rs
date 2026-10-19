@@ -373,6 +373,11 @@ pub async fn send_hello(
                 "daemon closed the connection before replying to the hello",
             ));
         }
+        Ok(Ok(_)) if !line.ends_with('\n') => {
+            return Err(AttemptError::retryable(
+                "daemon closed the connection mid-reply to the hello",
+            ));
+        }
         Ok(Ok(_)) => {}
     }
     let reply = HelloReply::decode(&line).map_err(|message| AttemptError {
@@ -694,6 +699,28 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.retryable, "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn send_hello_partial_reply_at_eof_is_retryable() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        tokio::spawn(async move {
+            let (read, mut write) = theirs.into_split();
+            let mut line = String::new();
+            tokio::io::BufReader::new(read)
+                .read_line(&mut line)
+                .await
+                .unwrap();
+            let full = HelloReply::ok().encode();
+            tokio::io::AsyncWriteExt::write_all(&mut write, &full.as_bytes()[..full.len() / 2])
+                .await
+                .unwrap();
+        });
+        let err = send_hello(ours, &hello(), Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(err.retryable, "{err:?}");
+        assert_eq!(err.kind, None);
     }
 
     async fn reply_with(reply: HelloReply) -> Result<DaemonConn, AttemptError> {
