@@ -297,7 +297,7 @@ async fn wait_for_accept(
     }
 }
 
-// Dropping it kills the child before releasing the lock, so a late bind can't race the next spawn.
+// Dropping the guard kills the child before releasing the lock, so a late bind cannot race a new spawn.
 #[derive(Debug)]
 struct SpawnGuard {
     child: Option<Child>,
