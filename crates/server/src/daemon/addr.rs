@@ -158,7 +158,7 @@ impl PidFile {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::fs::{self, File};
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
@@ -173,7 +173,7 @@ mod tests {
 
     type Mutation = fn(&mut FerrexConfig);
 
-    fn base_config() -> FerrexConfig {
+    pub(in crate::daemon) fn base_config() -> FerrexConfig {
         FerrexConfig {
             qdrant_url: None,
             qdrant_bin: "qdrant".into(),
