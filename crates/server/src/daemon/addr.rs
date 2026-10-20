@@ -186,6 +186,7 @@ impl DaemonPaths {
 impl PidFile {
     /// An unlocked PID file, as a crashed daemon leaves behind.
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn write(&self, path: &Path) -> io::Result<()> {
         let tmp = Self::tmp_path(path);
         std::fs::write(&tmp, serde_json::to_vec(self)?)?;
@@ -257,6 +258,7 @@ fn live_daemons(run_dir: &Path) -> impl Iterator<Item = PidFile> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) mod tests {
     use std::fs::{self, File};
     use std::os::unix::fs::PermissionsExt;

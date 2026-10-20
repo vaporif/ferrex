@@ -1,3 +1,4 @@
+mod budget;
 mod reconnect;
 mod track;
 
@@ -15,7 +16,7 @@ use ferrex_core::FerrexConfig;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{Notify, OwnedSemaphorePermit, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::cli::{Cli, build_config};
@@ -25,6 +26,7 @@ use crate::daemon::spawn::{
     AttemptError, Budgets, Connected, DaemonConn, MAX_ATTEMPTS, Resolved, RoundError,
     connect_or_spawn, run_round, send_hello,
 };
+use crate::proxy::budget::StdoutBudget;
 use crate::proxy::reconnect::{
     AfterHello, LossAction, ReconnectCtx, ResendPending, exe_mtime, fail_pending, on_daemon_loss,
     reconnect,
@@ -46,10 +48,12 @@ pub enum StdinEvent {
 
 #[derive(Debug)]
 enum Out {
-    Line(Vec<u8>),
+    /// A daemon line carries its share of the stdout budget, returned once it is written.
+    Line(Vec<u8>, Option<OwnedSemaphorePermit>),
     Exit(i32),
 }
 
+/// Unbounded so synthetic lines and `Exit` never block; daemon lines are metered by a budget.
 type StdoutTx = mpsc::UnboundedSender<Out>;
 
 #[derive(Debug)]
@@ -116,6 +120,7 @@ async fn proxy(
         stdin,
         queue,
         out,
+        budget: Arc::default(),
         initialised_at_loss: false,
         pending: None,
         answered: Arc::default(),
@@ -164,6 +169,7 @@ struct Proxy<'a> {
     stdin: mpsc::Receiver<StdinEvent>,
     queue: VecDeque<Vec<u8>>,
     out: &'a StdoutTx,
+    budget: Arc<StdoutBudget>,
     initialised_at_loss: bool,
     pending: Option<ResendPending>,
     /// Woken whenever a daemon response leaves no request in flight.
@@ -203,6 +209,7 @@ impl Proxy<'_> {
         let reader = tokio::spawn(pump_daemon(
             reader,
             self.out.clone(),
+            Arc::clone(&self.budget),
             Arc::clone(&self.ctx.tracker),
             Arc::clone(&self.answered),
             lost_tx,
@@ -257,6 +264,8 @@ impl Proxy<'_> {
         tokio::select! {
             () = answered => {}
             _ = lost => {}
+            // A client that has stopped reading stdout can never receive what we'd wait for.
+            () = self.budget.stalled() => {}
             () = tokio::time::sleep(self.ctx.budgets.drain) => {
                 diag("ferrex: stdin closed with requests still unanswered; exiting");
             }
@@ -267,16 +276,19 @@ impl Proxy<'_> {
         reader.abort();
         // Once it has stopped it can't forward a response whose id gets the restart error.
         let _ = reader.await;
+        // Nothing was queued after it, so forwarding it now keeps stdout in daemon order.
+        if let Some(line) = self.budget.take_held() {
+            lock(&self.ctx.tracker).on_daemon_line(&line);
+            send_line(self.out, line);
+        }
         self.queue.clear();
         let used = {
             let mut tracker = lock(&self.ctx.tracker);
             tracker.set_link(Link::Down);
             self.initialised_at_loss = tracker.initialised();
-            // The re-send's attempt count only carries over while its id is still the kept in-flight request.
             self.pending
                 .take()
-                .filter(|p| tracker.kept_in_flight().is_some_and(|k| k.id == p.id))
-                .map_or(0, |p| p.attempts_used)
+                .map_or(0, |p| p.attempts_carried(&tracker))
         };
         match on_daemon_loss(&self.ctx.tracker, self.out) {
             LossAction::WaitForRequest => {
@@ -340,10 +352,7 @@ impl Proxy<'_> {
                 if after == AfterHello::ResendKept {
                     self.pending = lock(&self.ctx.tracker)
                         .kept_first()
-                        .map(|kept| ResendPending {
-                            id: kept.id.clone(),
-                            attempts_used,
-                        });
+                        .map(|kept| ResendPending::new(kept, attempts_used));
                 }
                 self.connected(conn)
             }
@@ -382,12 +391,14 @@ fn send_json(out: &StdoutTx, line: String) {
 
 /// The writer thread only stops by exiting the process, so a send error needs no handling.
 fn send_line(out: &StdoutTx, line: Vec<u8>) {
-    let _ = out.send(Out::Line(line));
+    let _ = out.send(Out::Line(line, None));
 }
 
+/// Waiting on `budget` stops reads, so an unread stdout back-pressures the daemon socket.
 async fn pump_daemon(
     mut reader: tokio::io::BufReader<OwnedReadHalf>,
     out: StdoutTx,
+    budget: Arc<StdoutBudget>,
     tracker: SharedTracker,
     answered: Arc<Notify>,
     lost: oneshot::Sender<()>,
@@ -404,8 +415,14 @@ async fn pump_daemon(
                 break;
             }
         }
+        let Some(credit) = budget.hold_until_free(line).await else {
+            break;
+        };
+        let Some(line) = budget.take_held() else {
+            break;
+        };
         lock(&tracker).on_daemon_line(&line);
-        if out.send(Out::Line(line)).is_err() {
+        if out.send(Out::Line(line, Some(credit))).is_err() {
             break;
         }
         // After the send, so an exit the notify triggers is queued behind this line.
@@ -483,10 +500,11 @@ fn spawn_stdout_writer() -> io::Result<StdoutTx> {
             let mut stdout = io::stdout().lock();
             while let Some(msg) = rx.blocking_recv() {
                 match msg {
-                    Out::Line(line) => {
+                    Out::Line(line, credit) => {
                         if let Err(e) = stdout.write_all(&line).and_then(|()| stdout.flush()) {
                             exit_on_stdout_error(&e);
                         }
+                        drop(credit);
                     }
                     Out::Exit(code) => {
                         let _ = stdout.flush();
@@ -538,6 +556,7 @@ pub fn jsonrpc_error(id: &Value, code: i64, message: &str) -> String {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use serde_json::json;
 

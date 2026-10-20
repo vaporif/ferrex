@@ -368,6 +368,7 @@ pub struct DiagnosticsReport {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

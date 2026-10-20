@@ -41,6 +41,7 @@ fn dedup_drain(buf: &mut Vec<String>) -> Vec<String> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

@@ -178,6 +178,25 @@ async fn nuke_custom_path_refuses_only_for_same_db_and_leaves_qdrant() {
     assert!(pid_alive(qdrant_pid));
 }
 
+/// A leftover WAL next to a fresh DB could replay deleted rows into it.
+#[tokio::test]
+async fn nuke_removes_sqlite_wal_and_shm() {
+    let env = TestEnv::without_sidecar();
+    let custom = env.root.join("custom/x.db");
+    fs::create_dir_all(custom.parent().unwrap()).unwrap();
+    let wal = env.root.join("custom/x.db-wal");
+    let shm = env.root.join("custom/x.db-shm");
+    for f in [&custom, &wal, &shm] {
+        fs::write(f, b"x").unwrap();
+    }
+
+    let out = nuke(&env, &custom).await;
+    assert_ok(&out);
+    assert!(!custom.exists());
+    assert!(!wal.exists(), "{}", stdout(&out));
+    assert!(!shm.exists());
+}
+
 #[tokio::test]
 async fn nuke_default_path_with_qdrant_url_still_stops_sidecar() {
     let env = TestEnv::without_sidecar();

@@ -88,9 +88,10 @@ impl<M: MetadataStore> EntityResolver<'_, M> {
             ferrex_store::QdrantField::POINT_TYPE,
             ferrex_store::PointType::ENTITY.to_string(),
         )]);
+        // Dense only: the threshold is a cosine similarity, which fused hybrid scores are not.
         let results = self
             .vector_store
-            .search(namespace, embedding.clone(), normalized, 1, Some(filter))
+            .search_dense(namespace, embedding.clone(), 1, Some(filter))
             .await?;
 
         if let Some((point_id, score)) = results.first()
@@ -177,6 +178,7 @@ fn find_entity_by_point_id(entities: &[Entity], point_id: &str) -> Option<Entity
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 async fn resolve_entities_stages_1_2<M: MetadataStore>(
     metadata_store: &M,
     entity_names: &[String],
@@ -220,6 +222,7 @@ async fn resolve_entities_stages_1_2<M: MetadataStore>(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use ferrex_store::SqliteStore;

@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use qdrant_client::qdrant::{
-    CreateCollectionBuilder, CreateFieldIndexCollectionBuilder, DeletePointsBuilder, Distance,
-    Document, FieldType, Filter, Fusion, Modifier, NamedVectors, PointStruct, PrefetchQueryBuilder,
-    Query, QueryPointsBuilder, ScrollPointsBuilder, SparseVectorParamsBuilder,
-    SparseVectorsConfigBuilder, UpsertPointsBuilder, VectorInput, VectorParamsBuilder,
-    VectorsConfigBuilder, point_id::PointIdOptions,
+    Condition, CreateCollectionBuilder, CreateFieldIndexCollectionBuilder, DeletePointsBuilder,
+    Distance, Document, FieldType, Filter, Fusion, Modifier, NamedVectors, PointStruct,
+    PrefetchQueryBuilder, Query, QueryPointsBuilder, ScrollPointsBuilder,
+    SparseVectorParamsBuilder, SparseVectorsConfigBuilder, UpsertPointsBuilder, VectorInput,
+    VectorParamsBuilder, VectorsConfigBuilder, point_id::PointIdOptions,
 };
 use qdrant_client::{Payload, Qdrant};
 use tokio::sync::OnceCell;
@@ -33,6 +33,14 @@ const SPARSE_VECTOR: &str = "sparse";
 const BM25_TOKENIZER: &str = "Qdrant/bm25";
 const MIN_PREFETCH_LIMIT: u64 = 20;
 const SCROLL_PAGE_SIZE: u32 = 1024;
+const INDEXED_FIELDS: [(&str, FieldType); 6] = [
+    (crate::QdrantField::MEMORY_TYPE, FieldType::Keyword),
+    (crate::QdrantField::NAMESPACE, FieldType::Keyword),
+    (crate::QdrantField::ENTITIES, FieldType::Keyword),
+    (crate::QdrantField::POINT_TYPE, FieldType::Keyword),
+    (crate::QdrantField::AGENT_ID, FieldType::Keyword),
+    (crate::QdrantField::CREATED_AT, FieldType::Datetime),
+];
 
 pub fn validate_namespace(namespace: &str) -> Result<(), String> {
     if namespace.is_empty()
@@ -92,16 +100,31 @@ impl VectorStore {
     }
 
     async fn create_or_validate(&self, name: &str) -> Result<(), StoreError> {
-        if self
+        let exists = self
             .client
             .collection_exists(name)
             .await
-            .map_err(|e| StoreError::Qdrant(e.to_string()))?
-        {
-            self.validate_collection_schema(name).await?;
-            return Ok(());
+            .map_err(|e| StoreError::Qdrant(e.to_string()))?;
+        if !exists {
+            self.create_hybrid_collection(name).await?;
         }
+        let indexed = self.validate_collection_schema(name).await?;
+        // Re-checked every time: a crash after creating the collection can leave indexes missing.
+        for (field, field_type) in INDEXED_FIELDS {
+            if indexed.iter().any(|f| f == field) {
+                continue;
+            }
+            self.client
+                .create_field_index(
+                    CreateFieldIndexCollectionBuilder::new(name, field, field_type).wait(true),
+                )
+                .await
+                .map_err(|e| StoreError::Qdrant(e.to_string()))?;
+        }
+        Ok(())
+    }
 
+    async fn create_hybrid_collection(&self, name: &str) -> Result<(), StoreError> {
         let mut vectors_config = VectorsConfigBuilder::default();
         vectors_config.add_named_vector_params(
             DENSE_VECTOR,
@@ -114,73 +137,54 @@ impl VectorStore {
             SparseVectorParamsBuilder::default().modifier(Modifier::Idf),
         );
 
-        self.client
+        match self
+            .client
             .create_collection(
                 CreateCollectionBuilder::new(name)
                     .vectors_config(vectors_config)
                     .sparse_vectors_config(sparse_config),
             )
             .await
-            .map_err(|e| StoreError::Qdrant(e.to_string()))?;
-
-        for field in [
-            crate::QdrantField::MEMORY_TYPE,
-            crate::QdrantField::NAMESPACE,
-            crate::QdrantField::ENTITIES,
-            crate::QdrantField::POINT_TYPE,
-            crate::QdrantField::AGENT_ID,
-        ] {
-            self.client
-                .create_field_index(CreateFieldIndexCollectionBuilder::new(
-                    name,
-                    field,
-                    FieldType::Keyword,
-                ))
-                .await
-                .map_err(|e| StoreError::Qdrant(e.to_string()))?;
+        {
+            Ok(_) => Ok(()),
+            // Another process created it between our existence check and now.
+            Err(e) if e.to_string().contains("already exists") => Ok(()),
+            Err(e) => Err(StoreError::Qdrant(e.to_string())),
         }
-
-        self.client
-            .create_field_index(CreateFieldIndexCollectionBuilder::new(
-                name,
-                crate::QdrantField::CREATED_AT,
-                FieldType::Datetime,
-            ))
-            .await
-            .map_err(|e| StoreError::Qdrant(e.to_string()))?;
-
-        Ok(())
     }
 
-    async fn validate_collection_schema(&self, name: &str) -> Result<(), StoreError> {
+    /// Checks the vector layout and returns the payload fields already indexed.
+    async fn validate_collection_schema(&self, name: &str) -> Result<Vec<String>, StoreError> {
         let info = self
             .client
             .collection_info(name)
             .await
-            .map_err(|e| StoreError::Qdrant(e.to_string()))?;
-
-        let has_named_vectors = info
+            .map_err(|e| StoreError::Qdrant(e.to_string()))?
             .result
-            .and_then(|r| r.config)
+            .ok_or_else(|| StoreError::Qdrant(format!("collection {name} returned no info")))?;
+
+        let params = info
+            .config
             .and_then(|c| c.params)
             .and_then(|p| p.vectors_config)
-            .and_then(|vc| vc.config)
-            .is_some_and(|c| {
-                matches!(
-                    c,
-                    qdrant_client::qdrant::vectors_config::Config::ParamsMap(_)
-                )
-            });
-
-        if !has_named_vectors {
+            .and_then(|vc| vc.config);
+        let Some(qdrant_client::qdrant::vectors_config::Config::ParamsMap(map)) = params else {
             return Err(StoreError::Qdrant(format!(
                 "collection {name} uses an incompatible schema (single vector). \
                  Hybrid search requires named vectors (dense + sparse). \
                  Delete the collection or start with a fresh database."
             )));
+        };
+        let dense_size = map.map.get(DENSE_VECTOR).map(|p| p.size);
+        if dense_size != Some(self.dimension as u64) {
+            return Err(StoreError::Qdrant(format!(
+                "collection {name} has dense dimension {dense_size:?}, but the embedding \
+                 model produces {}. Use the original model or start with a fresh database.",
+                self.dimension
+            )));
         }
 
-        Ok(())
+        Ok(info.payload_schema.into_keys().collect())
     }
 
     pub async fn upsert(
@@ -413,12 +417,18 @@ impl VectorStore {
         Ok(())
     }
 
-    pub async fn scroll_all_ids(&self, namespace: &str) -> Result<Vec<Uuid>, StoreError> {
+    /// Ids of memory points only; entity points share the collection.
+    pub async fn scroll_memory_ids(&self, namespace: &str) -> Result<Vec<Uuid>, StoreError> {
         let name = Self::collection_name(namespace)?;
+        let memories_only = Filter::must([Condition::matches(
+            crate::QdrantField::POINT_TYPE,
+            crate::PointType::MEMORY.to_string(),
+        )]);
         let mut ids = Vec::new();
         let mut offset: Option<qdrant_client::qdrant::PointId> = None;
         loop {
             let mut req = ScrollPointsBuilder::new(&name)
+                .filter(memories_only.clone())
                 .limit(SCROLL_PAGE_SIZE)
                 .with_payload(false);
             if let Some(o) = offset.clone() {
@@ -455,9 +465,9 @@ impl VectorStore {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use qdrant_client::qdrant::Condition;
 
     const TEST_DIM: usize = 384;
 
@@ -577,5 +587,109 @@ mod tests {
             !results.is_empty(),
             "BM25 should find MemoryService keyword"
         );
+    }
+
+    async fn sidecar() -> (crate::QdrantSidecar, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let port = crate::sidecar::tests::free_port();
+        let sidecar = crate::QdrantSidecar::start(
+            "qdrant",
+            port,
+            Some(dir.path().to_path_buf()),
+            crate::SidecarPolicy::KillOnDrop,
+        )
+        .await
+        .unwrap();
+        (sidecar, dir)
+    }
+
+    const INDEXED_FIELD_COUNT: usize = 6;
+
+    async fn indexed_fields(store: &VectorStore, name: &str) -> Vec<String> {
+        let info = store.client.collection_info(name).await.unwrap();
+        let mut fields: Vec<String> = info.result.unwrap().payload_schema.into_keys().collect();
+        fields.sort();
+        fields
+    }
+
+    /// Index creation finishes asynchronously, so poll for the expected count.
+    async fn wait_for_indexes(store: &VectorStore, name: &str, count: usize) -> Vec<String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let fields = indexed_fields(store, name).await;
+            if fields.len() == count || std::time::Instant::now() > deadline {
+                return fields;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires qdrant binary on PATH"]
+    async fn ensure_collection_adds_indexes_missing_after_partial_create() {
+        let (sidecar, _dir) = sidecar().await;
+        let store = VectorStore::new(&sidecar.url(), TEST_DIM).unwrap();
+        let ns = "partial";
+        store.ensure_collection(ns).await.unwrap();
+        let full = wait_for_indexes(&store, "ferrex_partial", INDEXED_FIELD_COUNT).await;
+        assert_eq!(full.len(), INDEXED_FIELD_COUNT, "{full:?}");
+
+        // Simulate a crash between creating the collection and its indexes.
+        for field in &full {
+            store
+                .client
+                .delete_field_index(
+                    qdrant_client::qdrant::DeleteFieldIndexCollectionBuilder::new(
+                        "ferrex_partial",
+                        field,
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+        assert!(
+            wait_for_indexes(&store, "ferrex_partial", 0)
+                .await
+                .is_empty()
+        );
+        let fresh = VectorStore::new(&sidecar.url(), TEST_DIM).unwrap();
+        fresh.ensure_collection(ns).await.unwrap();
+
+        assert_eq!(
+            wait_for_indexes(&fresh, "ferrex_partial", INDEXED_FIELD_COUNT).await,
+            full
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires qdrant binary on PATH"]
+    async fn ensure_collection_rejects_dimension_mismatch() {
+        let (sidecar, _dir) = sidecar().await;
+        VectorStore::new(&sidecar.url(), TEST_DIM)
+            .unwrap()
+            .ensure_collection("dims")
+            .await
+            .unwrap();
+
+        let err = VectorStore::new(&sidecar.url(), TEST_DIM * 2)
+            .unwrap()
+            .ensure_collection("dims")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("dimension"), "{err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires qdrant binary on PATH"]
+    async fn concurrent_ensure_collection_from_two_processes_succeeds() {
+        let (sidecar, _dir) = sidecar().await;
+        for i in 0..10 {
+            let a = VectorStore::new(&sidecar.url(), TEST_DIM).unwrap();
+            let b = VectorStore::new(&sidecar.url(), TEST_DIM).unwrap();
+            let ns = format!("race{i}");
+            let (ra, rb) = tokio::join!(a.ensure_collection(&ns), b.ensure_collection(&ns));
+            ra.unwrap();
+            rb.unwrap();
+        }
     }
 }

@@ -1,0 +1,23 @@
+id: test-coverage-off
+language: rust
+severity: error
+message: Test-only code must be excluded from coverage.
+note: Add `#[cfg_attr(coverage_nightly, coverage(off))]` next to `#[cfg(test)]`.
+files:
+  - crates/**/src/**/*.rs
+rule:
+  any:
+    - kind: mod_item
+    - kind: function_item
+  follows:
+    pattern: "#[cfg(test)]"
+    stopBy: &attrs
+      not:
+        any:
+          - kind: attribute_item
+          - kind: line_comment
+          - kind: block_comment
+  not:
+    follows:
+      pattern: "#[cfg_attr(coverage_nightly, coverage(off))]"
+      stopBy: *attrs

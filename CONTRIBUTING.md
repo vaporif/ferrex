@@ -14,7 +14,7 @@ nix develop
 nix build
 ```
 
-The dev shell provides the stable Rust toolchain (cargo, clippy, rustfmt, rust-analyzer), plus `cargo-nextest`, `cargo-llvm-cov`, `cargo-deny`, `taplo`, and `typos`.
+The dev shell provides the stable Rust toolchain (cargo, clippy, rustfmt, rust-analyzer), plus `just`, `cargo-nextest`, `cargo-llvm-cov`, `cargo-deny`, `taplo`, `typos`, `actionlint`, `alejandra`, `lefthook`, and `qdrant`.
 
 ### Without Nix
 
@@ -32,14 +32,14 @@ You'll also need these tools (provided automatically by the Nix dev shell):
 
 ## Setup
 
-After cloning, configure git hooks:
+After cloning, install git hooks with [lefthook](https://github.com/evilmartians/lefthook) (included in the dev shell):
 
 ```bash
 just setup
 ```
 
-This sets up:
-- **pre-commit** - runs `just fmt` to check formatting
+Hooks are defined in `lefthook.yml`:
+- **pre-commit** - runs `just check-fmt` to check formatting
 - **pre-push** - runs `just check` for full lint + test suite
 
 ## Building and testing

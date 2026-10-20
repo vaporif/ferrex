@@ -12,6 +12,7 @@ pub struct TestContext {
     pub service: MemoryService,
     pub namespace: String,
     pub qdrant_url: String,
+    pub config: FerrexConfig,
     _sidecar: QdrantSidecar,
     _temp_dir: tempfile::TempDir,
 }
@@ -23,9 +24,34 @@ impl TestContext {
 
     pub async fn with_config(f: impl FnOnce(FerrexConfig) -> FerrexConfig) -> Self {
         let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        Self::in_dir(temp_dir, f).await
+    }
+
+    /// Like [`Self::with_config`], with a file-backed SQLite DB that a second service can reopen.
+    pub async fn with_file_db() -> Self {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let db_path = temp_dir.path().join("ferrex.db");
+        Self::in_dir(temp_dir, |mut c| {
+            c.db_path = db_path;
+            c
+        })
+        .await
+    }
+
+    /// A second service over the same DB and Qdrant; runs startup recovery.
+    pub async fn reopen(&self) -> MemoryService {
+        MemoryService::from_config(self.config.clone())
+            .await
+            .expect("failed to reopen MemoryService")
+    }
+
+    async fn in_dir(
+        temp_dir: tempfile::TempDir,
+        f: impl FnOnce(FerrexConfig) -> FerrexConfig,
+    ) -> Self {
         let base_dir = temp_dir.path().to_path_buf();
 
-        let port = portpicker::pick_unused_port().expect("no free port");
+        let port = qdrant_port();
 
         let sidecar =
             QdrantSidecar::start("qdrant", port, Some(base_dir), SidecarPolicy::KillOnDrop)
@@ -57,7 +83,7 @@ impl TestContext {
         };
 
         let config = f(config);
-        let service = MemoryService::from_config(config)
+        let service = MemoryService::from_config(config.clone())
             .await
             .expect("failed to create test MemoryService");
 
@@ -65,6 +91,7 @@ impl TestContext {
             service,
             namespace,
             qdrant_url: sidecar.url(),
+            config,
             _sidecar: sidecar,
             _temp_dir: temp_dir,
         }
@@ -116,5 +143,15 @@ pub fn recall_query(query: &str) -> RecallRequest {
         as_of: None,
         validate_ids: None,
         explain: false,
+    }
+}
+
+/// A free gRPC port whose HTTP neighbour (`port - 1`, used by the sidecar) is free too.
+pub fn qdrant_port() -> u16 {
+    loop {
+        let port = portpicker::pick_unused_port().expect("no free port");
+        if port > 2 && portpicker::is_free(port - 1) {
+            return port;
+        }
     }
 }

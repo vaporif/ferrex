@@ -7,6 +7,9 @@ members = [
 ]
 resolver = "3"
 
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage_nightly)"] }
+
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
@@ -79,7 +82,7 @@ clap = { version = "4", features = ["derive", "env"] }
 sha2 = "0.11"
 
 # Filesystem
-dirs = "7"
+dirs = "6"
 libc = "0.2"
 rustix = { version = "1", features = ["process"] }
 

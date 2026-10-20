@@ -25,7 +25,7 @@ use crate::daemon::addr::{
     DaemonPaths, PidFile, current_exe_canonical, ensure_run_dir, try_lock_until,
 };
 use crate::daemon::env::{env_duration, test_hook_millis};
-use crate::daemon::idle::{ConnEvent, IdleState};
+use crate::daemon::idle::{ConnEvent, IdleTimer};
 use crate::daemon::session::{InitView, SessionCtx, serve_connection};
 
 const INIT_TIMEOUT_DEFAULT_SECS: u64 = 1800;
@@ -142,9 +142,7 @@ struct Daemon {
     init_timeout: Duration,
     init_deadline: Instant,
     grace_deadline: Option<Instant>,
-    idle: IdleState,
-    idle_timeout: Duration,
-    idle_deadline: Option<Instant>,
+    idle: IdleTimer,
     sessions: JoinSet<()>,
     events_tx: mpsc::UnboundedSender<ConnEvent>,
     events_rx: mpsc::UnboundedReceiver<ConnEvent>,
@@ -199,9 +197,11 @@ impl Daemon {
             init_timeout,
             init_deadline: Instant::now() + init_timeout,
             grace_deadline: None,
-            idle: IdleState::default(),
-            idle_timeout: env_duration("FERREX_IDLE_TIMEOUT", IDLE_TIMEOUT_DEFAULT_SECS, None),
-            idle_deadline: None,
+            idle: IdleTimer::new(env_duration(
+                "FERREX_IDLE_TIMEOUT",
+                IDLE_TIMEOUT_DEFAULT_SECS,
+                None,
+            )),
             sessions: JoinSet::new(),
             events_tx,
             events_rx,
@@ -210,7 +210,7 @@ impl Daemon {
 
     async fn serve(mut self) {
         let commit = loop {
-            self.update_idle_timer();
+            self.idle.update(Instant::now());
             let trigger = tokio::select! {
                 accepted = self.listener.accept() => {
                     match accepted {
@@ -235,7 +235,7 @@ impl Daemon {
                 () = sleep_until_opt(self.grace_deadline), if self.grace_deadline.is_some() => {
                     Trigger::InitFailedGrace
                 }
-                () = sleep_until_opt(self.idle_deadline), if self.idle_deadline.is_some() => {
+                () = sleep_until_opt(self.idle.deadline()), if self.idle.deadline().is_some() => {
                     Trigger::Idle
                 }
                 Some(event) = self.events_rx.recv() => {
@@ -259,14 +259,6 @@ impl Daemon {
         self.finish(commit).await;
     }
 
-    fn update_idle_timer(&mut self) {
-        match (self.idle.should_arm(), self.idle_deadline) {
-            (true, None) => self.idle_deadline = Some(Instant::now() + self.idle_timeout),
-            (false, Some(_)) => self.idle_deadline = None,
-            _ => {}
-        }
-    }
-
     fn spawn_session(&mut self, stream: UnixStream) {
         self.idle.accepted();
         let ctx = SessionCtx {
@@ -283,7 +275,7 @@ impl Daemon {
                 let service = Arc::new(service);
                 self.init = InitState::Ready(Arc::clone(&service));
                 self.init_view.send_replace(InitView::Ready(service));
-                self.idle.init_ok = true;
+                self.idle.init_succeeded();
                 tracing::info!("ferrex daemon ready");
             }
             Ok(Err(e)) => self.fail_init(e),
@@ -314,7 +306,7 @@ impl Daemon {
         }
         let Some(lock) = lock else {
             tracing::info!("spawn lock busy, postponing idle exit");
-            self.idle_deadline = Some(Instant::now() + self.idle_timeout);
+            self.idle.postpone(Instant::now());
             return None;
         };
         if let Some(pause) = test_hook_millis("FERREX_TEST_IDLE_PAUSE_MS") {
@@ -341,7 +333,6 @@ impl Daemon {
             }
         }
         release_lock(&lock);
-        self.idle_deadline = None;
         None
     }
 

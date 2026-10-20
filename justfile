@@ -3,11 +3,11 @@ default:
 
 # Setup git hooks
 setup:
-    git config core.hooksPath .githooks
+    lefthook install --reset-hooks-path
 
 check: clippy test check-fmt lint
 
-lint: lint-toml check-typos check-nix-fmt lint-actions
+lint: lint-toml check-typos check-nix-fmt lint-actions lint-ast
 
 fmt: fmt-rust fmt-toml fmt-nix
 
@@ -24,11 +24,12 @@ clippy:
 test:
     cargo nextest run --workspace
 
+# Nightly so `coverage(off)` excludes test code from the report
 coverage:
-    cargo llvm-cov nextest --workspace --lcov --output-path lcov.info
+    nix develop .#coverage --command cargo llvm-cov nextest --workspace --lcov --output-path lcov.info
 
 coverage-html:
-    cargo llvm-cov nextest --workspace --html
+    nix develop .#coverage --command cargo llvm-cov nextest --workspace --html
 
 check-fmt:
     cargo fmt --all -- --check
@@ -53,6 +54,9 @@ check-typos:
 
 lint-actions:
     actionlint
+
+lint-ast:
+    ast-grep scan
 
 e2e:
     cargo nextest run -p ferrex-core -p ferrex-server --test '*' --no-capture

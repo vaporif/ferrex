@@ -9,7 +9,6 @@ authors.workspace = true
 [features]
 default = []
 onnx = ["fastembed/ort-load-dynamic"]
-onnx-fetch = []
 
 [dependencies]
 dirs = { workspace = true }

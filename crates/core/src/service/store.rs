@@ -118,6 +118,7 @@ const fn detect_memory_type(req: &StoreRequest) -> MemoryType {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

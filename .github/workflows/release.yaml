@@ -4,8 +4,23 @@ on:
       - v[0-9]+.*
 
 jobs:
+  create-release:
+    name: create release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create release if missing
+        run: |
+          gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 \
+            || gh release create "${TAG}" --repo "${GITHUB_REPOSITORY}" --generate-notes --verify-tag
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   release:
     name: release ${{ matrix.target }}
+    needs: create-release
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write

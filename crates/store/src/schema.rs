@@ -12,6 +12,15 @@ pub fn migrate(conn: &Connection) -> Result<(), StoreError> {
          PRAGMA cache_size = -20000;",
     )?;
 
+    // IMMEDIATE takes the write lock up front, so concurrent first opens run the
+    // column checks and ALTERs one at a time instead of racing them.
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    migrate_schema(&tx)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_schema(conn: &Connection) -> Result<(), StoreError> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS memories (
             id TEXT PRIMARY KEY,
@@ -144,6 +153,7 @@ pub fn migrate(conn: &Connection) -> Result<(), StoreError> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use rusqlite::Connection;

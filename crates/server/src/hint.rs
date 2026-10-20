@@ -17,6 +17,7 @@ pub fn looks_like_workflow(content: &str) -> bool {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

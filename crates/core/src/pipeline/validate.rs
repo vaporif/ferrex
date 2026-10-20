@@ -73,6 +73,7 @@ pub fn run(ctx: &StoreContext<'_>) -> Result<(), CoreError> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use std::collections::HashMap;

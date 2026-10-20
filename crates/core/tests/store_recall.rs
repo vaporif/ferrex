@@ -659,3 +659,135 @@ async fn taxonomy_default_namespace_used_when_unscoped() {
         .expect("unscoped taxonomy should still list namespaces");
     assert!(ns_list.contains(&ctx.namespace) && ns_list.contains(&other));
 }
+
+/// Stale memories that outrank fresh ones must not eat the `limit` before the
+/// stale filter drops them.
+#[tokio::test]
+async fn recall_excluding_stale_still_fills_limit() {
+    let ctx = common::TestContext::with_config(|mut c| {
+        // Episodic memories go stale within a second; procedural ones stay fresh.
+        c.staleness
+            .type_config
+            .get_mut(&MemoryType::Episodic)
+            .unwrap()
+            .half_life_days = 1e-6;
+        c
+    })
+    .await;
+    let svc = &ctx.service;
+    for text in [
+        "database migration rollback failed on the orders table",
+        "database migration rollback was retried twice",
+        "database migration rollback docs were updated",
+    ] {
+        svc.store(episodic(text)).await.unwrap();
+    }
+    for text in [
+        "to undo a schema change, run the down migration",
+        "restore the database from the nightly backup",
+    ] {
+        let mut req = episodic(text);
+        req.memory_type = Some(MemoryType::Procedural);
+        svc.store(req).await.unwrap();
+    }
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    let req = RecallRequest {
+        limit: Some(2),
+        include_stale: Some(false),
+        ..recall_query("database migration rollback")
+    };
+    let results = svc.recall(req).await.unwrap();
+
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert!(
+        results
+            .iter()
+            .all(|r| r.memory.memory_type == MemoryType::Procedural)
+    );
+}
+
+/// Time ranges that differ only below one second must not share a cached result.
+#[tokio::test]
+async fn recall_cache_distinguishes_sub_second_time_ranges() {
+    use ferrex_core::TimeRange;
+
+    let ctx = common::TestContext::new().await;
+    let svc = &ctx.service;
+    let stored = svc
+        .store(episodic("the load balancer certificate was rotated"))
+        .await
+        .unwrap();
+    let created_at = svc
+        .recall(recall_query("load balancer certificate"))
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.memory.id == stored.id)
+        .unwrap()
+        .memory
+        .created_at;
+    let including = created_at + chrono::Duration::milliseconds(1);
+    let excluding = created_at - chrono::Duration::milliseconds(1);
+    assert_eq!(
+        including.timestamp(),
+        excluding.timestamp(),
+        "straddles a second"
+    );
+
+    let ending_at = |end| RecallRequest {
+        time_range: Some(TimeRange {
+            start: None,
+            end: Some(end),
+        }),
+        ..recall_query("load balancer certificate")
+    };
+    assert_eq!(svc.recall(ending_at(including)).await.unwrap().len(), 1);
+    assert!(svc.recall(ending_at(excluding)).await.unwrap().is_empty());
+}
+
+/// Access bookkeeping is best effort; failing to flush it must not fail the recall.
+#[tokio::test]
+async fn recall_survives_failed_access_flush() {
+    let ctx = common::TestContext::with_file_db().await;
+    let svc = &ctx.service;
+    for text in [
+        "the payments api timed out during the evening peak",
+        "a disk filled up on the logging host",
+        "dns resolution broke after the vpn change",
+        "the search index rebuild took six hours",
+        "a bad feature flag disabled checkout",
+        "the kafka consumer lag grew past one million",
+        "tls certificates expired on the internal gateway",
+        "the mobile app crashed on older android versions",
+        "a cron job deleted yesterday's exports",
+        "memory leak in the image resizer service",
+    ] {
+        svc.store(episodic(text)).await.unwrap();
+    }
+    rusqlite::Connection::open(&ctx.config.db_path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_access BEFORE UPDATE OF last_accessed ON memories \
+             BEGIN SELECT RAISE(ABORT, 'access flush refused'); END;",
+        )
+        .unwrap();
+
+    // Distinct queries dodge the result cache, so every recall records accesses
+    // and one of them crosses the flush threshold.
+    for query in [
+        "payments timeout",
+        "disk full",
+        "dns vpn",
+        "search index",
+        "feature flag checkout",
+        "kafka lag",
+        "certificate expiry",
+        "android crash",
+        "cron exports",
+        "memory leak",
+    ] {
+        let results = svc.recall(recall_query(query)).await.unwrap();
+        assert!(!results.is_empty());
+    }
+}

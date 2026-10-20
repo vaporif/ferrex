@@ -23,6 +23,7 @@ pub fn compute_recency_boost(memory_type: MemoryType, age_days: f64) -> f64 {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

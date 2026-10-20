@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -92,7 +93,7 @@ impl TestEnv {
             run_dir: root.join("run"),
             db_path: root.join("ferrex.db"),
             config_path: root.join("ferrex.toml"),
-            qdrant_port: portpicker::pick_unused_port().expect("free port"),
+            qdrant_port: qdrant_port(),
             root,
             temp,
             _sidecar: None,
@@ -161,41 +162,71 @@ pub fn ferrex_bin() -> String {
 /// SIGKILLs the daemon on drop, so a panicking test leaves no process behind.
 #[derive(Debug)]
 pub struct DaemonGuard {
-    pid: Option<u32>,
-    pid_file: PathBuf,
+    target: GuardTarget,
+}
+
+#[derive(Debug)]
+enum GuardTarget {
+    Pid(u32),
+    /// Whatever the PID file names at drop time, unless that is `exclude`.
+    PidFile {
+        path: PathBuf,
+        exclude: u32,
+    },
+    Disarmed,
 }
 
 impl DaemonGuard {
     pub fn for_child(child: &Child) -> Self {
-        Self {
-            pid: child.id(),
-            pid_file: PathBuf::new(),
-        }
+        Self::from_pid(child.id())
     }
 
     /// For a daemon spawned by someone else: reads its PID once the PID file appears.
     pub async fn from_pid_file(pid_file: &Path, within: Duration) -> Self {
         wait_for_path(pid_file, within).await;
-        let pid = read_pid_file(pid_file).map(|p| p.pid);
+        Self::from_pid(read_pid_file(pid_file).map(|p| p.pid))
+    }
+
+    /// Armed before a respawned daemon exists: on drop, kills whichever PID `pid_file` then
+    /// holds, unless it is `exclude` (the daemon the test already killed).
+    pub fn lazy(pid_file: &Path, exclude: u32) -> Self {
         Self {
-            pid,
-            pid_file: pid_file.to_path_buf(),
+            target: GuardTarget::PidFile {
+                path: pid_file.to_path_buf(),
+                exclude,
+            },
+        }
+    }
+
+    fn from_pid(pid: Option<u32>) -> Self {
+        Self {
+            target: pid.map_or(GuardTarget::Disarmed, GuardTarget::Pid),
         }
     }
 
     pub const fn pid(&self) -> Option<u32> {
-        self.pid
+        match self.target {
+            GuardTarget::Pid(pid) => Some(pid),
+            GuardTarget::PidFile { .. } | GuardTarget::Disarmed => None,
+        }
     }
 
     /// Forgets the PID once the process has been reaped, so `Drop` can't hit a recycled PID.
-    pub const fn disarm(&mut self) {
-        self.pid = None;
+    pub fn disarm(&mut self) {
+        self.target = GuardTarget::Disarmed;
     }
 }
 
 impl Drop for DaemonGuard {
     fn drop(&mut self) {
-        if let Some(pid) = self.pid.filter(|&p| p > 1) {
+        let pid = match &self.target {
+            GuardTarget::Pid(pid) => Some(*pid),
+            GuardTarget::PidFile { path, exclude } => read_pid_file(path)
+                .map(|p| p.pid)
+                .filter(|pid| pid != exclude),
+            GuardTarget::Disarmed => None,
+        };
+        if let Some(pid) = pid.filter(|&p| p > 1) {
             signal(pid, rustix::process::Signal::KILL);
         }
     }
@@ -376,11 +407,24 @@ pub enum FakeBehaviour {
     HoldFirst {
         close_on: Option<usize>,
     },
+    /// Answers the first request with `lines` notifications of about `bytes` each, then echoes.
+    Flood {
+        lines: usize,
+        bytes: usize,
+    },
+    /// Echoes, except the `request`-th request (1-based), which gets `lines` notifications of
+    /// about `bytes` each, then its answer, then the connection closes.
+    FloodAnswerClose {
+        request: usize,
+        lines: usize,
+        bytes: usize,
+    },
 }
 
 /// A scripted stand-in for the daemon: connection n follows `script[n]`, the last entry repeats.
 pub struct FakeDaemon {
     received: Arc<Mutex<Vec<Vec<String>>>>,
+    flooded: Arc<AtomicUsize>,
     accept: JoinHandle<()>,
 }
 
@@ -389,8 +433,23 @@ impl FakeDaemon {
         assert!(!script.is_empty(), "fake daemon needs a script");
         let listener = UnixListener::bind(socket).expect("bind fake daemon");
         let received = Arc::default();
-        let accept = tokio::spawn(fake_accept_loop(listener, script, Arc::clone(&received)));
-        Self { received, accept }
+        let flooded = Arc::default();
+        let accept = tokio::spawn(fake_accept_loop(
+            listener,
+            script,
+            Arc::clone(&received),
+            Arc::clone(&flooded),
+        ));
+        Self {
+            received,
+            flooded,
+            accept,
+        }
+    }
+
+    /// How many `Flood` lines have been written in full, across all connections.
+    pub fn flooded(&self) -> usize {
+        self.flooded.load(Ordering::SeqCst)
     }
 
     /// The lines each connection received after its hello, in accept order.
@@ -413,6 +472,7 @@ async fn fake_accept_loop(
     listener: UnixListener,
     script: Vec<FakeConn>,
     received: Arc<Mutex<Vec<Vec<String>>>>,
+    flooded: Arc<AtomicUsize>,
 ) {
     let mut conns = JoinSet::new();
     loop {
@@ -426,7 +486,13 @@ async fn fake_accept_loop(
             all.len() - 1
         };
         let entry = script[idx.min(script.len() - 1)];
-        conns.spawn(fake_conn(stream, entry, idx, Arc::clone(&received)));
+        conns.spawn(fake_conn(
+            stream,
+            entry,
+            idx,
+            Arc::clone(&received),
+            Arc::clone(&flooded),
+        ));
     }
 }
 
@@ -435,6 +501,7 @@ async fn fake_conn(
     entry: FakeConn,
     idx: usize,
     received: Arc<Mutex<Vec<Vec<String>>>>,
+    flooded: Arc<AtomicUsize>,
 ) {
     let (read, mut writer) = stream.into_split();
     let mut reader = BufReader::new(read);
@@ -482,9 +549,29 @@ async fn fake_conn(
                 return;
             }
             FakeBehaviour::HoldFirst { .. } if requests == 1 => continue,
+            FakeBehaviour::Flood { lines, bytes } if requests == 1 => {
+                if flood(&mut writer, lines, bytes, &flooded).await.is_ok() {
+                    continue;
+                }
+                return;
+            }
+            FakeBehaviour::FloodAnswerClose {
+                request,
+                lines,
+                bytes,
+            } if requests == request => {
+                if flood(&mut writer, lines, bytes, &flooded).await.is_ok()
+                    && writer.write_all(reply.as_bytes()).await.is_ok()
+                {
+                    flooded.fetch_add(1, Ordering::SeqCst);
+                }
+                return;
+            }
             FakeBehaviour::Echo
             | FakeBehaviour::CloseOnRequest(_)
-            | FakeBehaviour::HoldFirst { .. } => {}
+            | FakeBehaviour::HoldFirst { .. }
+            | FakeBehaviour::Flood { .. }
+            | FakeBehaviour::FloodAnswerClose { .. } => {}
             FakeBehaviour::NeverAnswer => continue,
             FakeBehaviour::DelayMs(ms) => tokio::time::sleep(Duration::from_millis(ms)).await,
         }
@@ -492,6 +579,29 @@ async fn fake_conn(
             return;
         }
     }
+}
+
+async fn flood(
+    writer: &mut OwnedWriteHalf,
+    lines: usize,
+    bytes: usize,
+    flooded: &AtomicUsize,
+) -> std::io::Result<()> {
+    let line = flood_line(bytes);
+    for _ in 0..lines {
+        writer.write_all(line.as_bytes()).await?;
+        flooded.fetch_add(1, Ordering::SeqCst);
+    }
+    Ok(())
+}
+
+fn flood_line(bytes: usize) -> String {
+    let msg = json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/message",
+        "params": {"data": "x".repeat(bytes)},
+    });
+    format!("{msg}\n")
 }
 
 fn echo_reply(line: &[u8]) -> Option<String> {
@@ -665,5 +775,15 @@ impl ProxyClient {
             let _ = tokio::time::timeout(Duration::from_secs(5), drain).await;
         }
         Some(status)
+    }
+}
+
+/// A free gRPC port whose HTTP neighbour (`port - 1`, used by the sidecar) is free too.
+pub fn qdrant_port() -> u16 {
+    loop {
+        let port = portpicker::pick_unused_port().expect("no free port");
+        if port > 2 && portpicker::is_free(port - 1) {
+            return port;
+        }
     }
 }

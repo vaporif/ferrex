@@ -49,8 +49,8 @@ impl MemoryService {
         let time_hash = req.time_range.as_ref().map(|tr| {
             use std::hash::{Hash, Hasher};
             let mut h = rustc_hash::FxHasher::default();
-            tr.start.map(|s| s.timestamp()).hash(&mut h);
-            tr.end.map(|e| e.timestamp()).hash(&mut h);
+            tr.start.map(|s| s.timestamp_nanos_opt()).hash(&mut h);
+            tr.end.map(|e| e.timestamp_nanos_opt()).hash(&mut h);
             h.finish()
         });
         let as_of_nanos = req.as_of.and_then(|t| t.timestamp_nanos_opt());
@@ -67,6 +67,7 @@ impl MemoryService {
             explain: req.explain,
         });
 
+        let generation = self.cache.generation(namespace).await;
         if let Some(cached) = self.cache.get_results(&cache_key, namespace).await {
             self.process_validate_ids(req.validate_ids.as_ref(), &cached)
                 .await?;
@@ -127,7 +128,12 @@ impl MemoryService {
         let doc_texts: Vec<String> = ordered.iter().map(|m| m.searchable_text()).collect();
         let doc_refs: Vec<&str> = doc_texts.iter().map(String::as_str).collect();
 
-        let reranked = self.reranker.rerank(&req.query, &doc_refs, limit).await?;
+        // Score the whole pool: the stale filter and recency boost below can still
+        // promote candidates past the first `limit`.
+        let reranked = self
+            .reranker
+            .rerank(&req.query, &doc_refs, doc_refs.len())
+            .await?;
 
         let now = Utc::now();
         let staleness_config = &self.config.staleness;
@@ -179,12 +185,11 @@ impl MemoryService {
             );
         }
 
-        results.sort_by(|a, b| b.relevance_score.total_cmp(&a.relevance_score));
-        results.truncate(limit);
-
         if req.include_stale == Some(false) {
             results.retain(|r| r.freshness_label != FreshnessLabel::Stale);
         }
+        results.sort_by(|a, b| b.relevance_score.total_cmp(&a.relevance_score));
+        results.truncate(limit);
 
         if req.explain {
             for (i, r) in results.iter_mut().enumerate() {
@@ -199,12 +204,14 @@ impl MemoryService {
 
         let accessed_ids: Vec<String> = results.iter().map(|r| r.memory.id.clone()).collect();
         self.access_tracker.record(&accessed_ids);
-        if let Some(ids) = self.access_tracker.drain_if_full() {
-            self.metadata_store.update_last_accessed(&ids).await?;
+        if let Some(ids) = self.access_tracker.drain_if_full()
+            && let Err(e) = self.metadata_store.update_last_accessed(&ids).await
+        {
+            tracing::warn!("access flush failed: {e}");
         }
 
         self.cache
-            .put_results(&cache_key, results.clone(), namespace)
+            .put_results(&cache_key, results.clone(), generation)
             .await;
 
         self.process_validate_ids(req.validate_ids.as_ref(), &results)

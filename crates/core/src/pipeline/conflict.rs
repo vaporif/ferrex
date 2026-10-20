@@ -87,6 +87,7 @@ pub async fn run(ctx: &mut StoreContext<'_>, metadata: &SqliteStore) -> Result<(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use chrono::Utc;

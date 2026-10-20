@@ -131,17 +131,18 @@ impl RecallCache {
         }
     }
 
+    /// `generation` must be read before the results were computed, so a write
+    /// that lands mid-recall leaves them already stale.
     pub async fn put_results(
         &self,
         key: &ResultCacheKey,
         results: Vec<RecallResult>,
-        namespace: &str,
+        generation: u64,
     ) {
-        let current_gen = self.generation(namespace).await;
         self.results.write().await.put(
             key.hash,
             CachedResults {
-                generation: current_gen,
+                generation,
                 results,
             },
         );
@@ -179,6 +180,7 @@ impl RecallCache {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::types::CacheConfig;
@@ -224,7 +226,9 @@ mod tests {
             as_of_nanos: None,
             explain: false,
         });
-        cache.put_results(&filter, results, ns).await;
+        cache
+            .put_results(&filter, results, cache.generation(ns).await)
+            .await;
 
         let current_gen = cache.generation(ns).await;
         assert_eq!(current_gen, 0);
@@ -250,12 +254,39 @@ mod tests {
             as_of_nanos: None,
             explain: false,
         });
-        cache.put_results(&filter, vec![], ns).await;
+        cache
+            .put_results(&filter, vec![], cache.generation(ns).await)
+            .await;
 
         cache.bump_generation(ns).await;
 
         let cached = cache.get_results(&filter, ns).await;
         assert!(cached.is_none(), "should miss after generation bump");
+    }
+
+    #[tokio::test]
+    async fn results_computed_before_a_write_are_not_served_after_it() {
+        let cache = make_cache();
+        let ns = "test-ns";
+        let embedding = vec![0.1, 0.2];
+        let key = ResultCacheKey::new(&ResultCacheKeyInput {
+            embedding: &embedding,
+            types: None,
+            entities: None,
+            namespace: ns,
+            limit: 10,
+            include_stale: None,
+            include_invalidated: None,
+            time_range_hash: None,
+            as_of_nanos: None,
+            explain: false,
+        });
+
+        let read_at = cache.generation(ns).await;
+        cache.bump_generation(ns).await;
+        cache.put_results(&key, vec![], read_at).await;
+
+        assert!(cache.get_results(&key, ns).await.is_none());
     }
 
     #[tokio::test]

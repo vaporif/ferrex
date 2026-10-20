@@ -217,9 +217,26 @@ async fn daemon_exit_before_bind_fails_fast() {
     assert!(lock_is_free(&paths.lock_file));
 }
 
-/// After the bind delay has passed, a surviving child would have bound and written its PID file.
+/// Live daemons spawned for `key`. Uses `ps`: `pgrep -f` can't see arguments on recent macOS.
+fn daemon_pids(key: &str) -> Vec<String> {
+    let needle = format!("daemon --key {key}");
+    let out = std::process::Command::new("ps")
+        .args(["-axo", "pid=,args="])
+        .output()
+        .expect("run ps");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| line.contains(&needle))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Waits for the spawned daemon to die instead of sleeping past its bind delay.
 async fn assert_child_never_binds(paths: &PathsJson) {
-    tokio::time::sleep(Duration::from_secs(7)).await;
+    wait_until("spawned daemon exits", Duration::from_secs(5), || {
+        daemon_pids(&paths.key).is_empty()
+    })
+    .await;
     assert!(!paths.socket.exists(), "socket appeared");
     assert!(!paths.pid_file.exists(), "pid file appeared");
 }
@@ -238,7 +255,10 @@ async fn stdin_close_during_accept_poll_kills_child_and_releases_lock() {
         || paths.lock_file.exists() && !lock_is_free(&paths.lock_file),
     )
     .await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_until("spawned daemon is running", Duration::from_secs(5), || {
+        !daemon_pids(&paths.key).is_empty()
+    })
+    .await;
     proxy.close_stdin();
     let status = expect_exit(&mut proxy, Duration::from_secs(5)).await;
     assert!(status.success(), "{status}");

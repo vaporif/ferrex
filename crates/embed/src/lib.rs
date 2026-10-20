@@ -1,3 +1,5 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Once};
 
@@ -158,7 +160,7 @@ impl Embedder {
         let model = Arc::clone(&self.model);
         let text = text.to_owned();
         tokio::task::spawn_blocking(move || {
-            let mut model = model.lock().expect("embedding model lock poisoned");
+            let mut model = lock_model(&model);
             let results = model
                 .embed(vec![&text], None)
                 .map_err(|e| EmbedError::Embed(e.to_string()))?;
@@ -175,7 +177,7 @@ impl Embedder {
         let model = Arc::clone(&self.model);
         let texts: Vec<String> = texts.iter().copied().map(String::from).collect();
         tokio::task::spawn_blocking(move || {
-            let mut model = model.lock().expect("embedding model lock poisoned");
+            let mut model = lock_model(&model);
             let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
             model
                 .embed(refs, None)
@@ -192,6 +194,14 @@ impl Embedder {
     pub const fn tier(&self) -> ModelTier {
         self.tier
     }
+}
+
+/// A panic during inference poisons the lock but leaves the ONNX session usable,
+/// so carry on instead of failing every later call.
+fn lock_model<T>(model: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    model
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 pub struct Reranker {
@@ -224,7 +234,7 @@ impl Reranker {
         let query = query.to_owned();
         let documents: Vec<String> = documents.iter().copied().map(String::from).collect();
         tokio::task::spawn_blocking(move || {
-            let mut model = model.lock().expect("reranker model lock poisoned");
+            let mut model = lock_model(&model);
             let doc_refs: Vec<&str> = documents.iter().map(String::as_str).collect();
             let results = model
                 .rerank(query.as_str(), doc_refs.as_slice(), false, None)
@@ -246,8 +256,23 @@ impl Reranker {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_lock_recovers_after_a_panicking_holder() {
+        let model = Arc::new(Mutex::new(1));
+        let poisoner = Arc::clone(&model);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock().unwrap();
+            panic!("inference panicked");
+        })
+        .join();
+        assert!(model.is_poisoned());
+
+        assert_eq!(*lock_model(&model), 1);
+    }
 
     #[tokio::test]
     #[ignore = "requires ONNX runtime"]
