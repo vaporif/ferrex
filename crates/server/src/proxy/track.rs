@@ -36,6 +36,8 @@ pub struct KeptRequest {
     pub id: Value,
     pub line: Vec<u8>,
     pub initialize: bool,
+    /// Tells a kept line from a later one that reuses its id.
+    pub generation: u64,
 }
 
 /// Follows the JSON-RPC traffic needed to reconnect a client mid-session.
@@ -46,6 +48,7 @@ pub struct Tracker {
     initialize: Option<Vec<u8>>,
     initialized: Option<Vec<u8>>,
     kept_first: Option<KeptRequest>,
+    kept_generation: u64,
     link: Link,
     replay_started: bool,
 }
@@ -146,10 +149,12 @@ impl Tracker {
                 self.initialize = Some(line.to_vec());
             }
             if self.kept_first.is_none() && counts_for_lifecycle(&method) {
+                self.kept_generation += 1;
                 self.kept_first = Some(KeptRequest {
                     id: id.clone(),
                     line: line.to_vec(),
                     initialize: method == INITIALIZE,
+                    generation: self.kept_generation,
                 });
             }
         }
@@ -391,6 +396,7 @@ mod tests {
                 id: json!(3),
                 line: call,
                 initialize: false,
+                generation: 1,
             })
         );
         t.on_daemon_line(&result(&json!(3)));
@@ -411,6 +417,20 @@ mod tests {
         assert!(!t.initialised());
         t.on_client_line(&c);
         assert_eq!(t.kept_first().map(|k| &k.line), Some(&c));
+    }
+
+    #[test]
+    fn reused_id_gets_a_new_generation() {
+        let mut t = Tracker::default();
+        let a = request(&json!("a"), "tools/call");
+        t.on_client_line(&a);
+        let first = t.kept_first().map(|k| k.generation);
+        t.on_client_line(&request(&json!("b"), "tools/call"));
+        assert_eq!(t.kept_first().map(|k| k.generation), first);
+        t.on_daemon_line(&error(&json!("a")));
+        t.on_client_line(&a);
+        let second = t.kept_first().map(|k| k.generation);
+        assert!(second > first, "{first:?} then {second:?}");
     }
 
     #[test]

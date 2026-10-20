@@ -289,6 +289,26 @@ async fn bad_or_silent_hello_does_not_block_idle_exit() {
 }
 
 #[tokio::test]
+async fn probe_connections_do_not_postpone_idle_exit() {
+    let env = TestEnv::new().await;
+    let mut daemon = Daemon::start(&env, &[("FERREX_IDLE_TIMEOUT", "3")]).await;
+    // The hello waits out init, so the countdown starts when this session ends.
+    drop(daemon.session("default", COLD_HELLO).await);
+    let socket = daemon.paths.socket.clone();
+    let probes = tokio::spawn(async move {
+        loop {
+            drop(UnixStream::connect(&socket).await);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
+    let status = daemon
+        .wait_exit(Duration::from_secs(3) + SHUTDOWN_SLACK)
+        .await;
+    probes.abort();
+    assert!(status.success(), "{status}");
+}
+
+#[tokio::test]
 async fn invalid_namespace_gets_session_refusal_others_fine() {
     let env = TestEnv::new().await;
     let daemon = Daemon::start(&env, &[]).await;

@@ -8,7 +8,7 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 use crate::daemon::handshake::RefusalKind;
 use crate::daemon::spawn::{AttemptError, Budgets, Connected, DaemonConn, RoundError, run_round};
-use crate::proxy::track::{KeptRequest, Link, Outcome, request_id, response_outcome};
+use crate::proxy::track::{KeptRequest, Link, Outcome, Tracker, request_id, response_outcome};
 use crate::proxy::{
     SharedTracker, StdoutTx, connect, jsonrpc_error, lock, resolve_attempt, send_json,
 };
@@ -39,10 +39,29 @@ pub enum AfterHello {
 }
 
 /// The re-sent inline first request whose response is still outstanding; its round stays open.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResendPending {
-    pub id: Value,
-    pub attempts_used: u8,
+    generation: u64,
+    attempts_used: u8,
+}
+
+impl ResendPending {
+    #[must_use]
+    pub const fn new(kept: &KeptRequest, attempts_used: u8) -> Self {
+        Self {
+            generation: kept.generation,
+            attempts_used,
+        }
+    }
+
+    /// The attempt count only carries over while this re-send is still the kept in-flight request.
+    #[must_use]
+    pub fn attempts_carried(&self, tracker: &Tracker) -> u8 {
+        tracker
+            .kept_in_flight()
+            .filter(|kept| kept.generation == self.generation)
+            .map_or(0, |_| self.attempts_used)
+    }
 }
 
 #[derive(Debug)]
@@ -299,10 +318,36 @@ mod tests {
 
     fn drain(rx: &mut mpsc::UnboundedReceiver<Out>) -> Vec<serde_json::Value> {
         let mut lines = Vec::new();
-        while let Ok(Out::Line(line)) = rx.try_recv() {
+        while let Ok(Out::Line(line, _)) = rx.try_recv() {
             lines.push(serde_json::from_slice(&line).unwrap());
         }
         lines
+    }
+
+    #[test]
+    fn resend_pending_carries_attempts_while_kept() {
+        let call = b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\"}\n";
+        let tracker = tracker_with(&[call], &[]);
+        let pending = ResendPending::new(lock(&tracker).kept_first().unwrap(), 2);
+        assert_eq!(pending.attempts_carried(&lock(&tracker)), 2);
+        lock(&tracker).on_daemon_line(b"{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{}}\n");
+        assert_eq!(pending.attempts_carried(&lock(&tracker)), 0);
+    }
+
+    #[test]
+    fn reused_kept_id_starts_a_fresh_round() {
+        let call = b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\"}\n";
+        let tracker = tracker_with(&[call], &[]);
+        let pending = ResendPending::new(lock(&tracker).kept_first().unwrap(), 2);
+        {
+            let mut t = lock(&tracker);
+            t.on_daemon_line(
+                b"{\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":1,\"message\":\"x\"}}\n",
+            );
+            t.on_client_line(call);
+            assert!(t.kept_in_flight().is_some());
+        }
+        assert_eq!(pending.attempts_carried(&lock(&tracker)), 0);
     }
 
     fn restart_error(id: u64) -> serde_json::Value {

@@ -299,3 +299,78 @@ async fn stdin_eof_drain_is_bounded() {
     let status = expect_exit(&mut proxy, Duration::from_secs(5)).await;
     assert!(status.success(), "{status}");
 }
+
+/// Polls `sample` until it holds still for a second; returns the settled value.
+async fn settled(within: Duration, sample: impl Fn() -> usize) -> usize {
+    let deadline = tokio::time::Instant::now() + within;
+    let mut last = sample();
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let now = sample();
+        if now == last && now > 0 {
+            return now;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never settled, last {now}"
+        );
+        last = now;
+    }
+}
+
+#[tokio::test]
+async fn unread_stdout_back_pressures_the_daemon() {
+    const LINES: usize = 64;
+    let flood = FakeBehaviour::Flood {
+        lines: LINES,
+        bytes: 1024 * 1024,
+    };
+    let (env, fake) = with_fake(vec![FakeConn::Serve(flood)]).await;
+    let mut proxy = ProxyClient::spawn(&env, CmdOpts::default());
+    proxy.send_request("tools/call", &json!({})).await;
+    let written = settled(Duration::from_secs(20), || fake.flooded()).await;
+    // The proxy's few-MB queue plus the socket and pipe buffers hold well under 16 such lines.
+    assert!(
+        written < 16,
+        "proxy kept draining the socket: {written} of {LINES} lines written"
+    );
+    proxy.close_stdin();
+    expect_exit(&mut proxy, Duration::from_secs(5)).await;
+}
+
+#[tokio::test]
+async fn response_held_for_budget_survives_daemon_loss() {
+    const LINES: usize = 3;
+    const MIB: usize = 1024 * 1024;
+    let behaviour = FakeBehaviour::FloodAnswerClose {
+        request: 2,
+        lines: LINES,
+        bytes: MIB,
+    };
+    let (env, fake) = with_fake(vec![FakeConn::Serve(behaviour)]).await;
+    let mut proxy = ProxyClient::spawn(&env, CmdOpts::default());
+    proxy.initialize().await;
+    // Three 1 MiB notifications fill most of the 4 MiB budget, so the 1 MiB answer waits for it.
+    let params = json!({"content": "x".repeat(MIB)});
+    let call = proxy.send_request("tools/call", &params).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while fake.flooded() < LINES + 1 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "fake never sent the answer"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Writing to the closed socket is how the proxy learns of the loss.
+    let ping = proxy.send_request("ping", &json!({})).await;
+    let responses = proxy
+        .responses_within(&[call, ping], Duration::from_secs(20))
+        .await;
+    assert!(
+        responses[0]["result"]["params"] == params,
+        "the held answer was replaced: {}",
+        responses[0]["error"]
+    );
+    assert_eq!(responses[1]["error"]["code"], -32603, "{}", responses[1]);
+}

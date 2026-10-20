@@ -445,6 +445,48 @@ async fn call_tool(proxy: &mut ProxyClient, name: &str, arguments: Value) -> Val
     serde_json::from_str(text).expect("tool result json")
 }
 
+fn sleeper_with_pid_file(env: &TestEnv) -> (tokio::process::Child, std::path::PathBuf) {
+    let child = tokio::process::Command::new("sleep")
+        .arg("30")
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn sleep");
+    let pid_file = env.root.join("sleeper.pid");
+    let pid = child.id().expect("sleeper pid");
+    std::fs::write(&pid_file, json!({"pid": pid, "db_path": "/x"}).to_string()).unwrap();
+    (child, pid_file)
+}
+
+#[tokio::test]
+async fn lazy_guard_kills_the_pid_file_daemon() {
+    let env = TestEnv::without_sidecar();
+    let (mut child, pid_file) = sleeper_with_pid_file(&env);
+    drop(DaemonGuard::lazy(&pid_file, 1));
+    let status = tokio::time::timeout(WITHIN, child.wait())
+        .await
+        .expect("sleeper killed")
+        .unwrap();
+    assert_eq!(
+        std::os::unix::process::ExitStatusExt::signal(&status),
+        Some(9)
+    );
+}
+
+#[tokio::test]
+async fn lazy_guard_spares_the_excluded_pid() {
+    let env = TestEnv::without_sidecar();
+    let (mut child, pid_file) = sleeper_with_pid_file(&env);
+    drop(DaemonGuard::lazy(
+        &pid_file,
+        child.id().expect("sleeper pid"),
+    ));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "excluded pid was killed"
+    );
+}
+
 #[tokio::test]
 async fn real_daemon_kill9_next_request_succeeds() {
     let env = TestEnv::new().await;
@@ -454,6 +496,7 @@ async fn real_daemon_kill9_next_request_succeeds() {
     assert!(init["result"]["serverInfo"].is_object(), "{init}");
     let mut first = DaemonGuard::from_pid_file(&paths.pid_file, Duration::from_secs(30)).await;
     let first_pid = first.pid().expect("daemon pid");
+    let _respawned = DaemonGuard::lazy(&paths.pid_file, first_pid);
     let stored = call_tool(
         &mut proxy,
         "store",
@@ -474,7 +517,6 @@ async fn real_daemon_kill9_next_request_succeeds() {
         read_pid_file(&paths.pid_file).is_some_and(|p| p.pid != first_pid)
     })
     .await;
-    let _second = DaemonGuard::from_pid_file(&paths.pid_file, WITHIN).await;
     let hits = recalled.as_array().expect("recall returns an array");
     assert!(hits.iter().any(|r| r["id"] == stored["id"]), "{recalled}");
     let init_responses = proxy
