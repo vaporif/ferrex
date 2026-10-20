@@ -178,6 +178,7 @@ fn find_entity_by_point_id(entities: &[Entity], point_id: &str) -> Option<Entity
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 async fn resolve_entities_stages_1_2<M: MetadataStore>(
     metadata_store: &M,
     entity_names: &[String],
@@ -221,6 +222,7 @@ async fn resolve_entities_stages_1_2<M: MetadataStore>(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use ferrex_store::SqliteStore;

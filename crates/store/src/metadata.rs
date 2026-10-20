@@ -1557,6 +1557,7 @@ pub fn is_memory_path(path: &Path) -> bool {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::MemoryType;

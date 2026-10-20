@@ -199,6 +199,7 @@ pub fn build_config(cli: Cli) -> eyre::Result<FerrexConfig> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

@@ -153,6 +153,7 @@ fn migrate_schema(conn: &Connection) -> Result<(), StoreError> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use rusqlite::Connection;

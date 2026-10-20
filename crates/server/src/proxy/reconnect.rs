@@ -277,6 +277,7 @@ async fn read_response(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use tokio::net::UnixStream;
     use tokio::sync::mpsc;

@@ -1,3 +1,5 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Once};
 
@@ -254,6 +256,7 @@ impl Reranker {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

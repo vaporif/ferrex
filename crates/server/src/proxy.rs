@@ -556,6 +556,7 @@ pub fn jsonrpc_error(id: &Value, code: i64, message: &str) -> String {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use serde_json::json;
 

@@ -129,6 +129,7 @@ impl QdrantSidecar {
     }
 
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn stop_watcher(&self) {
         self.watcher_stop.store(true, Ordering::Relaxed);
     }
@@ -657,6 +658,7 @@ fn matches_qdrant_name(comm: &str, qdrant_bin: &str) -> bool {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub mod tests {
     use std::fs::File;
     use std::os::unix::fs::OpenOptionsExt;
