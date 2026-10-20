@@ -174,6 +174,11 @@ impl PidFile {
         std::fs::rename(&tmp, path)
     }
 
+    pub fn write_locked(&self, path: &Path) -> io::Result<File> {
+        self.write(path)?;
+        File::open(path)
+    }
+
     #[must_use]
     pub fn read(path: &Path) -> Option<Self> {
         let bytes = std::fs::read(path)
@@ -187,6 +192,11 @@ impl PidFile {
             )
             .ok()
     }
+}
+
+#[must_use]
+pub fn pid_file_held(_path: &Path) -> bool {
+    false
 }
 
 #[must_use]

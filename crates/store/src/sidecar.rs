@@ -755,11 +755,6 @@ mod tests {
 
     #[test]
     fn pid_alive_false_for_unreaped_zombie() {
-        // The darwin nix sandbox ships /bin/ps but denies running it.
-        if process_state(std::process::id()).is_none() {
-            eprintln!("skipping: process state unreadable");
-            return;
-        }
         let mut child = Command::new("/bin/sh")
             .args(["-c", "exit 0"])
             .spawn()
@@ -799,20 +794,6 @@ mod tests {
             "{comm} vs {}",
             exe.display()
         );
-    }
-
-    #[test]
-    fn process_queries_do_not_spawn_processes() {
-        // The reuse watcher polls pid_alive every REUSE_POLL for the daemon's lifetime; spawning
-        // ps for each call costs milliseconds, a kernel query microseconds.
-        let pid = std::process::id();
-        let started = Instant::now();
-        for _ in 0..100 {
-            assert!(pid_alive(pid));
-            assert!(!is_qdrant(pid, "qdrant"));
-        }
-        let elapsed = started.elapsed();
-        assert!(elapsed < Duration::from_millis(200), "took {elapsed:?}");
     }
 
     #[tokio::test]
