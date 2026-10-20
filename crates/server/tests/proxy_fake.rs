@@ -281,13 +281,18 @@ async fn stdin_eof_waits_for_in_flight_response() {
 
 #[tokio::test]
 async fn stdin_eof_drain_is_bounded() {
-    let (env, fake) =
-        with_fake(vec![FakeConn::Serve(FakeBehaviour::HoldFirst { close_on: None })]).await;
+    let (env, fake) = with_fake(vec![FakeConn::Serve(FakeBehaviour::HoldFirst {
+        close_on: None,
+    })])
+    .await;
     let mut proxy = ProxyClient::spawn(&env, env_opts(&[("FERREX_TEST_PROXY_TIMEOUT_MS", "500")]));
     proxy.send_request("tools/call", &json!({})).await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while fake.received().first().map_or(0, Vec::len) < 1 {
-        assert!(tokio::time::Instant::now() < deadline, "fake never got the request");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "fake never got the request"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     proxy.close_stdin();

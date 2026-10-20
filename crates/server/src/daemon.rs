@@ -26,7 +26,7 @@ use crate::daemon::addr::{
 };
 use crate::daemon::env::{env_duration, test_hook_millis};
 use crate::daemon::idle::{ConnEvent, IdleState};
-use crate::daemon::session::{CollectionMemo, InitView, SessionCtx, serve_connection};
+use crate::daemon::session::{InitView, SessionCtx, serve_connection};
 
 const INIT_TIMEOUT_DEFAULT_SECS: u64 = 1800;
 const INIT_TIMEOUT_CAP_SECS: u64 = 3000;
@@ -133,6 +133,8 @@ struct Daemon {
     paths: DaemonPaths,
     listener: UnixListener,
     socket_id: SocketId,
+    /// Held until exit: admin commands and proxies read it as "this daemon is alive".
+    _pid_lock: File,
     sigterm: Signal,
     sigint: Signal,
     init: InitState,
@@ -146,7 +148,6 @@ struct Daemon {
     sessions: JoinSet<()>,
     events_tx: mpsc::UnboundedSender<ConnEvent>,
     events_rx: mpsc::UnboundedReceiver<ConnEvent>,
-    memo: Arc<CollectionMemo>,
 }
 
 impl Daemon {
@@ -169,10 +170,14 @@ impl Daemon {
             pid: std::process::id(),
             db_path: config.db_path.clone(),
         };
-        if let Err(e) = pid_file.write(&paths.pid_file) {
-            remove_socket_if_ours(&paths.socket, socket_id);
-            return Err(e).wrap_err_with(|| format!("write pid file {}", paths.pid_file.display()));
-        }
+        let pid_lock = match pid_file.write_locked(&paths.pid_file) {
+            Ok(lock) => lock,
+            Err(e) => {
+                remove_socket_if_ours(&paths.socket, socket_id);
+                return Err(e)
+                    .wrap_err_with(|| format!("write pid file {}", paths.pid_file.display()));
+            }
+        };
         tracing::info!(key = %paths.key, socket = %paths.socket.display(), "daemon listening");
 
         let init_timeout = env_duration(
@@ -186,6 +191,7 @@ impl Daemon {
             paths,
             listener,
             socket_id,
+            _pid_lock: pid_lock,
             sigterm,
             sigint,
             init: InitState::Pending(start_init(config)),
@@ -199,7 +205,6 @@ impl Daemon {
             sessions: JoinSet::new(),
             events_tx,
             events_rx,
-            memo: Arc::new(CollectionMemo::default()),
         })
     }
 
@@ -267,7 +272,6 @@ impl Daemon {
         let ctx = SessionCtx {
             key: Arc::from(self.paths.key.as_str()),
             init: self.init_view.subscribe(),
-            memo: Arc::clone(&self.memo),
             events: self.events_tx.clone(),
         };
         self.sessions.spawn(serve_connection(stream, ctx));

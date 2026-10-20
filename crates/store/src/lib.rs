@@ -11,7 +11,7 @@ pub use journal::{CompletedOp, PendingOp, PendingOpKind};
 pub use metadata::{MetadataStore, SqliteStore, is_memory_path};
 pub use qdrant_client::{Payload, qdrant::Filter};
 pub use sidecar::{QdrantSidecar, SidecarPolicy, is_qdrant, pid_alive, read_pid};
-pub use vector::{BatchPoint, ScoredPayload, VectorStore};
+pub use vector::{BatchPoint, ScoredPayload, VectorStore, validate_namespace};
 
 pub struct QdrantField;
 

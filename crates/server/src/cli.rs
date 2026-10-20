@@ -24,7 +24,7 @@ pub struct Cli {
     #[arg(long, env = "FERREX_RERANKER_TIER", default_value = "default")]
     pub reranker_tier: RerankerTier,
 
-    #[arg(long, env = "FERREX_NAMESPACE", default_value = "default")]
+    #[arg(long, env = "FERREX_NAMESPACE", default_value = "default", value_parser = parse_namespace)]
     pub namespace: String,
 
     #[arg(long, env = "FERREX_DB_PATH")]
@@ -41,6 +41,11 @@ pub struct Cli {
         value_parser = clap::builder::BoolishValueParser::new()
     )]
     pub no_daemon: bool,
+}
+
+fn parse_namespace(value: &str) -> Result<String, String> {
+    ferrex_store::validate_namespace(value)?;
+    Ok(value.to_owned())
 }
 
 #[derive(Subcommand)]

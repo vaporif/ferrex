@@ -15,7 +15,7 @@ use ferrex_core::FerrexConfig;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::cli::{Cli, build_config};
@@ -118,6 +118,7 @@ async fn proxy(
         out,
         initialised_at_loss: false,
         pending: None,
+        answered: Arc::default(),
     }
     .run(conn)
     .await
@@ -165,6 +166,8 @@ struct Proxy<'a> {
     out: &'a StdoutTx,
     initialised_at_loss: bool,
     pending: Option<ResendPending>,
+    /// Woken whenever a daemon response leaves no request in flight.
+    answered: Arc<Notify>,
 }
 
 impl Proxy<'_> {
@@ -201,6 +204,7 @@ impl Proxy<'_> {
             reader,
             self.out.clone(),
             Arc::clone(&self.ctx.tracker),
+            Arc::clone(&self.answered),
             lost_tx,
         ));
         ConnState::Connected {
@@ -228,9 +232,33 @@ impl Proxy<'_> {
                             return;
                         }
                     }
-                    Some(StdinEvent::Eof) | None => exit_via_writer(self.out, 0),
+                    Some(StdinEvent::Eof) | None => {
+                        self.drain(lost).await;
+                        exit_via_writer(self.out, 0)
+                    }
                 },
                 _ = &mut *lost => return,
+            }
+        }
+    }
+
+    /// Gives the daemon up to the drain budget to answer requests sent before stdin closed.
+    async fn drain(&self, lost: &mut oneshot::Receiver<()>) {
+        let answered = async {
+            loop {
+                // Created before the check, so a notify in between isn't missed.
+                let notified = self.answered.notified();
+                if !lock(&self.ctx.tracker).has_in_flight() {
+                    return;
+                }
+                notified.await;
+            }
+        };
+        tokio::select! {
+            () = answered => {}
+            _ = lost => {}
+            () = tokio::time::sleep(self.ctx.budgets.drain) => {
+                diag("ferrex: stdin closed with requests still unanswered; exiting");
             }
         }
     }
@@ -361,6 +389,7 @@ async fn pump_daemon(
     mut reader: tokio::io::BufReader<OwnedReadHalf>,
     out: StdoutTx,
     tracker: SharedTracker,
+    answered: Arc<Notify>,
     lost: oneshot::Sender<()>,
 ) {
     loop {
@@ -378,6 +407,10 @@ async fn pump_daemon(
         lock(&tracker).on_daemon_line(&line);
         if out.send(Out::Line(line)).is_err() {
             break;
+        }
+        // After the send, so an exit the notify triggers is queued behind this line.
+        if !lock(&tracker).has_in_flight() {
+            answered.notify_waiters();
         }
     }
     let _ = lost.send(());

@@ -46,8 +46,9 @@ pub struct MemoryService {
 }
 
 impl MemoryService {
+    /// Leaves a qdrant it starts running: a daemon may already be reusing it.
     pub async fn from_config(config: FerrexConfig) -> Result<Self, CoreError> {
-        Self::from_config_with(config, SidecarPolicy::KillOnDrop).await
+        Self::from_config_with(config, SidecarPolicy::LeaveRunning).await
     }
 
     /// Like [`Self::from_config`], with `policy` governing the qdrant sidecar it may start.

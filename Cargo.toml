@@ -80,6 +80,7 @@ sha2 = "0.11"
 
 # Filesystem
 dirs = "7"
+libc = "0.2"
 rustix = { version = "1", features = ["process"] }
 
 # Async utilities

@@ -14,7 +14,7 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::process::{Child, Command};
 use tokio::time::Instant;
 
-use crate::daemon::addr::{DaemonPaths, ensure_run_dir, try_lock_until};
+use crate::daemon::addr::{DaemonPaths, ensure_run_dir, pid_file_held, try_lock_until};
 use crate::daemon::handshake::{Hello, HelloReply, RefusalKind};
 
 pub const MAX_ATTEMPTS: u8 = 3;
@@ -28,6 +28,8 @@ pub struct Budgets {
     pub accept: Duration,
     pub hello: Duration,
     pub replay: Duration,
+    /// How long the proxy waits for in-flight responses after the client closes stdin.
+    pub drain: Duration,
 }
 
 impl Budgets {
@@ -42,6 +44,7 @@ impl Budgets {
                     accept: Duration::from_secs(30),
                     hello: Duration::from_secs(3600),
                     replay: Duration::from_secs(30),
+                    drain: Duration::from_secs(10),
                 },
                 |ms| {
                     let all = Duration::from_millis(ms);
@@ -50,6 +53,7 @@ impl Budgets {
                         accept: all,
                         hello: all,
                         replay: all,
+                        drain: all,
                     }
                 },
             )
@@ -174,6 +178,15 @@ pub async fn connect_or_spawn(
     match UnixStream::connect(&paths.socket).await {
         Ok(stream) => return Ok(stream),
         Err(e) => match classify_connect_error(&e) {
+            // macOS refuses connections to a live listener whose backlog is full.
+            ConnectClass::Stale
+                if e.kind() != io::ErrorKind::NotFound && pid_file_held(&paths.pid_file) =>
+            {
+                return Err(AttemptError::retryable(format!(
+                    "daemon at {} is alive but refused the connection: {e}",
+                    paths.socket.display()
+                )));
+            }
             ConnectClass::Stale => remove_stale_socket(&paths.socket)?,
             ConnectClass::Busy => {
                 return Err(AttemptError::retryable(format!(
@@ -641,8 +654,14 @@ mod tests {
         let budgets = Budgets::from_env();
         let ms = Duration::from_millis(250);
         assert_eq!(
-            [budgets.flock, budgets.accept, budgets.hello, budgets.replay],
-            [ms; 4]
+            [
+                budgets.flock,
+                budgets.accept,
+                budgets.hello,
+                budgets.replay,
+                budgets.drain
+            ],
+            [ms; 5]
         );
     }
 
@@ -655,6 +674,7 @@ mod tests {
         assert_eq!(budgets.accept, Duration::from_secs(30));
         assert_eq!(budgets.hello, Duration::from_secs(3600));
         assert_eq!(budgets.replay, Duration::from_secs(30));
+        assert_eq!(budgets.drain, Duration::from_secs(10));
     }
 
     fn hello() -> Hello {
@@ -746,9 +766,14 @@ mod tests {
         }
     }
 
-    fn temp_paths(dir: &Path) -> DaemonPaths {
+    /// Paths in `parent/run`, created 0700 here since tempdirs are 0755.
+    fn temp_paths(parent: &Path) -> DaemonPaths {
+        let dir = parent.join("run");
+        if parent.is_dir() {
+            ensure_run_dir(&dir).unwrap();
+        }
         let mut paths = resolved("k").paths;
-        paths.run_dir = dir.to_owned();
+        paths.run_dir = dir.clone();
         paths.socket = dir.join("k.sock");
         paths.pid_file = dir.join("k.pid");
         paths.lock_file = dir.join("k.lock");
@@ -763,6 +788,7 @@ mod tests {
             accept: ms,
             hello: ms,
             replay: ms,
+            drain: ms,
         }
     }
 

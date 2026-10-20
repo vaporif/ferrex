@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, PoisonError};
+
 use qdrant_client::qdrant::{
     CreateCollectionBuilder, CreateFieldIndexCollectionBuilder, DeletePointsBuilder, Distance,
     Document, FieldType, Filter, Fusion, Modifier, NamedVectors, PointStruct, PrefetchQueryBuilder,
@@ -6,6 +9,7 @@ use qdrant_client::qdrant::{
     VectorsConfigBuilder, point_id::PointIdOptions,
 };
 use qdrant_client::{Payload, Qdrant};
+use tokio::sync::OnceCell;
 use uuid::Uuid;
 
 use crate::StoreError;
@@ -30,9 +34,24 @@ const BM25_TOKENIZER: &str = "Qdrant/bm25";
 const MIN_PREFETCH_LIMIT: u64 = 20;
 const SCROLL_PAGE_SIZE: u32 = 1024;
 
+pub fn validate_namespace(namespace: &str) -> Result<(), String> {
+    if namespace.is_empty()
+        || !namespace
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "invalid namespace: {namespace:?} (only alphanumeric, underscore, hyphen allowed)"
+        ));
+    }
+    Ok(())
+}
+
 pub struct VectorStore {
     pub(crate) client: Qdrant,
     pub(crate) dimension: usize,
+    /// Collections already created or validated, so each is checked once per process.
+    ensured: Mutex<HashMap<String, Arc<OnceCell<()>>>>,
 }
 
 impl VectorStore {
@@ -42,32 +61,44 @@ impl VectorStore {
             .skip_compatibility_check()
             .build()
             .map_err(|e| StoreError::Qdrant(e.to_string()))?;
-        Ok(Self { client, dimension })
+        Ok(Self {
+            client,
+            dimension,
+            ensured: Mutex::default(),
+        })
     }
 
     fn collection_name(namespace: &str) -> Result<String, StoreError> {
-        if namespace.is_empty()
-            || !namespace
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        {
-            return Err(StoreError::Qdrant(format!(
-                "invalid namespace: {namespace:?} (only alphanumeric, underscore, hyphen allowed)"
-            )));
-        }
+        validate_namespace(namespace).map_err(StoreError::Qdrant)?;
         Ok(format!("ferrex_{namespace}"))
     }
 
     pub async fn ensure_collection(&self, namespace: &str) -> Result<(), StoreError> {
         let name = Self::collection_name(namespace)?;
+        let cell = {
+            let mut ensured = self.ensured.lock().unwrap_or_else(PoisonError::into_inner);
+            Arc::clone(ensured.entry(name.clone()).or_default())
+        };
+        cell.get_or_try_init(|| self.create_or_validate(&name))
+            .await
+            .map(|&()| ())
+    }
 
+    pub(crate) fn forget_ensured(&self, name: &str) {
+        self.ensured
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(name);
+    }
+
+    async fn create_or_validate(&self, name: &str) -> Result<(), StoreError> {
         if self
             .client
-            .collection_exists(&name)
+            .collection_exists(name)
             .await
             .map_err(|e| StoreError::Qdrant(e.to_string()))?
         {
-            self.validate_collection_schema(&name).await?;
+            self.validate_collection_schema(name).await?;
             return Ok(());
         }
 
@@ -85,7 +116,7 @@ impl VectorStore {
 
         self.client
             .create_collection(
-                CreateCollectionBuilder::new(&name)
+                CreateCollectionBuilder::new(name)
                     .vectors_config(vectors_config)
                     .sparse_vectors_config(sparse_config),
             )
@@ -101,7 +132,7 @@ impl VectorStore {
         ] {
             self.client
                 .create_field_index(CreateFieldIndexCollectionBuilder::new(
-                    &name,
+                    name,
                     field,
                     FieldType::Keyword,
                 ))
@@ -111,7 +142,7 @@ impl VectorStore {
 
         self.client
             .create_field_index(CreateFieldIndexCollectionBuilder::new(
-                &name,
+                name,
                 crate::QdrantField::CREATED_AT,
                 FieldType::Datetime,
             ))

@@ -1,13 +1,12 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::Duration;
 
-use ferrex_core::{CoreError, MemoryService, VectorStore};
+use ferrex_core::MemoryService;
 use rmcp::ServiceExt;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::net::unix::OwnedWriteHalf;
-use tokio::sync::{OnceCell, mpsc, watch};
+use tokio::sync::{mpsc, watch};
 
 use crate::daemon::handshake::{Hello, HelloReply, RefusalKind};
 use crate::daemon::idle::ConnEvent;
@@ -35,27 +34,10 @@ impl InitView {
     }
 }
 
-/// Runs `ensure_collection` once per namespace for the life of the process.
-#[derive(Debug, Default)]
-pub struct CollectionMemo(Mutex<HashMap<String, Arc<OnceCell<()>>>>);
-
-impl CollectionMemo {
-    pub async fn ensure(&self, vs: &VectorStore, ns: &str) -> Result<(), CoreError> {
-        let cell = {
-            let mut cells = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-            Arc::clone(cells.entry(ns.to_owned()).or_default())
-        };
-        cell.get_or_try_init(|| async { vs.ensure_collection(ns).await.map_err(CoreError::from) })
-            .await
-            .map(|&()| ())
-    }
-}
-
 #[derive(Clone)]
 pub struct SessionCtx {
     pub key: Arc<str>,
     pub init: watch::Receiver<InitView>,
-    pub memo: Arc<CollectionMemo>,
     pub events: mpsc::UnboundedSender<ConnEvent>,
 }
 
@@ -163,8 +145,9 @@ async fn accept_hello(
     let service = init.map_err(|error| HelloReply::refuse(RefusalKind::Init, &*error))?;
     let hello = Hello::decode(line)?;
     hello.check(&ctx.key)?;
-    ctx.memo
-        .ensure(service.vector_store(), &hello.namespace)
+    service
+        .vector_store()
+        .ensure_collection(&hello.namespace)
         .await
         .map_err(|e| {
             HelloReply::refuse(

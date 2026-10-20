@@ -217,6 +217,11 @@ impl Tracker {
     }
 
     #[must_use]
+    pub fn has_in_flight(&self) -> bool {
+        !self.in_flight.is_empty()
+    }
+
+    #[must_use]
     pub fn is_in_flight(&self, id: &Value) -> bool {
         self.in_flight.contains_key(&id_key(id))
     }

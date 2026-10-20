@@ -560,20 +560,13 @@ pub fn pid_alive(pid: u32) -> bool {
     }
 }
 
-fn is_zombie(pid: u32) -> bool {
-    process_state(pid).is_some_and(|state| state.starts_with('Z'))
-}
-
 #[cfg(target_os = "linux")]
-fn process_state(pid: u32) -> Option<String> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let after_comm = &stat[stat.rfind(')')? + 1..];
-    Some(after_comm.trim_start().to_string()).filter(|s| !s.is_empty())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn process_state(pid: u32) -> Option<String> {
-    ps_field("stat", pid)
+fn is_zombie(pid: u32) -> bool {
+    let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    stat.rfind(')')
+        .is_some_and(|end| stat[end + 1..].trim_start().starts_with('Z'))
 }
 
 #[cfg(target_os = "linux")]
@@ -582,23 +575,52 @@ fn process_comm(pid: u32) -> Option<String> {
     Some(comm.trim().to_string()).filter(|s| !s.is_empty())
 }
 
-#[cfg(not(target_os = "linux"))]
-fn process_comm(pid: u32) -> Option<String> {
-    ps_field("comm", pid)
+/// Only meaningful once `kill(pid, 0)` has succeeded: macOS has no BSD info for a zombie and
+/// answers ESRCH, which then means the pid is a zombie.
+#[cfg(target_os = "macos")]
+fn is_zombie(pid: u32) -> bool {
+    match bsd_info(pid) {
+        Ok(info) => info.pbsi_status == libc::SZOMB,
+        Err(e) => e.raw_os_error() == Some(libc::ESRCH),
+    }
 }
 
-// Absolute path: a nix build's PATH has no ps.
-#[cfg(not(target_os = "linux"))]
-fn ps_field(field: &str, pid: u32) -> Option<String> {
-    let output = Command::new("/bin/ps")
-        .args(["-o", &format!("{field}="), "-p", &pid.to_string()])
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+#[cfg(target_os = "macos")]
+fn process_comm(pid: u32) -> Option<String> {
+    let info = bsd_info(pid).ok()?;
+    // Not NUL-terminated when the name fills all MAXCOMLEN bytes.
+    let bytes: Vec<u8> = info
+        .pbsi_comm
+        .iter()
+        .take_while(|&&c| c != 0)
+        .map(|&c| c.cast_unsigned())
+        .collect();
+    Some(String::from_utf8_lossy(&bytes).into_owned()).filter(|s| !s.is_empty())
+}
+
+/// One `proc_pidinfo` syscall; the reuse watcher calls this every `REUSE_POLL`.
+#[cfg(target_os = "macos")]
+fn bsd_info(pid: u32) -> std::io::Result<libc::proc_bsdshortinfo> {
+    let pid = libc::c_int::try_from(pid).map_err(|_| Errno::INVAL)?;
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdshortinfo>())
+        .map_err(|_| Errno::INVAL)?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::zeroed();
+    // SAFETY: the buffer is a zeroed proc_bsdshortinfo of exactly `size` bytes, the layout
+    // PROC_PIDT_SHORTBSDINFO writes.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDT_SHORTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if written != size {
+        return Err(std::io::Error::last_os_error());
     }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string()).filter(|s| !s.is_empty())
+    // SAFETY: a full-size write initialised every field; zeroed bytes are valid for all of them.
+    Ok(unsafe { info.assume_init() })
 }
 
 #[must_use]

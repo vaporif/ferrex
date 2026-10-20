@@ -32,7 +32,10 @@ async fn store_does_not_recheck_a_known_collection() {
         .service
         .store(in_namespace(&other, "an unrelated second memory"))
         .await;
-    assert!(result.is_err(), "store re-checked the collection: {result:?}");
+    assert!(
+        result.is_err(),
+        "store re-checked the collection: {result:?}"
+    );
 }
 
 #[tokio::test]

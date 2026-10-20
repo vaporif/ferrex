@@ -1,8 +1,7 @@
 use std::fs::{File, OpenOptions, TryLockError};
-use std::io;
+use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-use std::os::unix::net::UnixStream;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -74,14 +73,33 @@ pub fn run_dir() -> eyre::Result<PathBuf> {
     Ok(cwd.join(dir))
 }
 
+/// Creates the run dir private to this user; an existing one must already be private, since
+/// anyone who can reach its sockets can talk to the daemon.
 pub fn ensure_run_dir(dir: &Path) -> eyre::Result<()> {
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(dir)
         .map_err(|e| eyre::eyre!("create run dir {}: {e}", dir.display()))?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-        .map_err(|e| eyre::eyre!("chmod run dir {}: {e}", dir.display()))
+    let meta =
+        std::fs::metadata(dir).map_err(|e| eyre::eyre!("stat run dir {}: {e}", dir.display()))?;
+    let uid = rustix::process::geteuid().as_raw();
+    if meta.uid() != uid {
+        eyre::bail!(
+            "run dir {} is owned by uid {}, not {uid}; point FERREX_RUN_DIR at a directory of your own",
+            dir.display(),
+            meta.uid()
+        );
+    }
+    if meta.mode() & 0o077 != 0 {
+        eyre::bail!(
+            "run dir {} is accessible to other users (mode {:o}); run `chmod 700 {}` or point FERREX_RUN_DIR elsewhere",
+            dir.display(),
+            meta.mode() & 0o777,
+            dir.display()
+        );
+    }
+    Ok(())
 }
 
 pub fn current_exe_canonical() -> eyre::Result<PathBuf> {
@@ -166,17 +184,29 @@ impl DaemonPaths {
 }
 
 impl PidFile {
+    /// An unlocked PID file, as a crashed daemon leaves behind.
+    #[cfg(test)]
     pub fn write(&self, path: &Path) -> io::Result<()> {
-        let mut tmp = path.as_os_str().to_owned();
-        tmp.push(".tmp");
-        let tmp = PathBuf::from(tmp);
+        let tmp = Self::tmp_path(path);
         std::fs::write(&tmp, serde_json::to_vec(self)?)?;
         std::fs::rename(&tmp, path)
     }
 
+    /// Writes the file under an exclusive lock that marks the daemon alive until the returned
+    /// handle closes; the lock stays on the file through the rename.
     pub fn write_locked(&self, path: &Path) -> io::Result<File> {
-        self.write(path)?;
-        File::open(path)
+        let tmp = Self::tmp_path(path);
+        let mut file = File::create(&tmp)?;
+        file.try_lock().map_err(io::Error::from)?;
+        file.write_all(&serde_json::to_vec(self)?)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(file)
+    }
+
+    fn tmp_path(path: &Path) -> PathBuf {
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        PathBuf::from(tmp)
     }
 
     #[must_use]
@@ -194,9 +224,12 @@ impl PidFile {
     }
 }
 
+/// Whether a live daemon holds the lock on this PID file. Unlike connecting to its socket, this
+/// doesn't count as a connection, and the kernel drops the lock when the daemon dies.
 #[must_use]
-pub fn pid_file_held(_path: &Path) -> bool {
-    false
+pub fn pid_file_held(path: &Path) -> bool {
+    File::open(path)
+        .is_ok_and(|file| matches!(file.try_lock_shared(), Err(TryLockError::WouldBlock)))
 }
 
 #[must_use]
@@ -211,7 +244,7 @@ pub fn any_live(run_dir: &Path) -> Option<u32> {
     live_daemons(run_dir).next().map(|pid_file| pid_file.pid)
 }
 
-/// Best-effort: PID files that are unreadable, name a dead process, or have no listening socket are skipped.
+/// Best-effort: PID files that are unreadable or not held by a live daemon are skipped.
 fn live_daemons(run_dir: &Path) -> impl Iterator<Item = PidFile> {
     std::fs::read_dir(run_dir)
         .into_iter()
@@ -219,12 +252,8 @@ fn live_daemons(run_dir: &Path) -> impl Iterator<Item = PidFile> {
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "pid"))
-        .filter_map(|path| {
-            let pid_file = PidFile::read(&path)?;
-            (ferrex_store::pid_alive(pid_file.pid)
-                && UnixStream::connect(path.with_extension("sock")).is_ok())
-            .then_some(pid_file)
-        })
+        .filter(|path| pid_file_held(path))
+        .filter_map(|path| PidFile::read(&path))
 }
 
 #[cfg(test)]
