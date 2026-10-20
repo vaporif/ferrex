@@ -1,6 +1,6 @@
 use std::process::Stdio;
 
-use ferrex_store::QdrantSidecar;
+use ferrex_store::{QdrantSidecar, SidecarPolicy};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -21,9 +21,10 @@ impl McpTestHarness {
         let base_dir = temp_dir.path().to_path_buf();
         let port = portpicker::pick_unused_port().expect("no free port");
 
-        let sidecar = QdrantSidecar::start("qdrant", port, Some(base_dir))
-            .await
-            .expect("sidecar start");
+        let sidecar =
+            QdrantSidecar::start("qdrant", port, Some(base_dir), SidecarPolicy::KillOnDrop)
+                .await
+                .expect("sidecar start");
 
         let db_path = temp_dir.path().join("ferrex.db");
         let config_path = temp_dir.path().join("ferrex.toml");
@@ -39,6 +40,7 @@ impl McpTestHarness {
             .arg(&config_path)
             .arg("--model-tier")
             .arg("small")
+            .arg("--no-daemon")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -997,6 +999,19 @@ async fn test_concurrent_requests() {
             "concurrent response should have result: {resp}"
         );
     }
+
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn initialize_advertises_list_changed_and_ferrex_server_info() {
+    let mut h = McpTestHarness::new_raw().await;
+    let resp = h.initialize().await;
+
+    let result = &resp["result"];
+    assert_eq!(result["capabilities"]["tools"]["listChanged"], true);
+    assert_eq!(result["serverInfo"]["name"], "ferrex");
+    assert_eq!(result["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
 
     h.shutdown().await;
 }

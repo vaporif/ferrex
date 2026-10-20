@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ferrex_embed::{Embedder, Reranker};
-use ferrex_store::{MetadataStore, QdrantSidecar, SqliteStore, VectorStore};
+use ferrex_store::{MetadataStore, QdrantSidecar, SidecarPolicy, SqliteStore, VectorStore};
 use tokio_util::sync::CancellationToken;
 
 use crate::access_tracker::AccessTracker;
@@ -46,7 +46,16 @@ pub struct MemoryService {
 }
 
 impl MemoryService {
+    /// Leaves a qdrant it starts running: a daemon may already be reusing it.
     pub async fn from_config(config: FerrexConfig) -> Result<Self, CoreError> {
+        Self::from_config_with(config, SidecarPolicy::LeaveRunning).await
+    }
+
+    /// Like [`Self::from_config`], with `policy` governing the qdrant sidecar it may start.
+    pub async fn from_config_with(
+        config: FerrexConfig,
+        policy: SidecarPolicy,
+    ) -> Result<Self, CoreError> {
         if let Some(parent) = config.db_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
                 CoreError::Validation(format!("failed to create db directory: {e}"))
@@ -60,7 +69,8 @@ impl MemoryService {
             let vs = VectorStore::new(url, embedder.dimension())?;
             (vs, None)
         } else {
-            let sc = QdrantSidecar::start(&config.qdrant_bin, config.qdrant_port, None).await?;
+            let sc =
+                QdrantSidecar::start(&config.qdrant_bin, config.qdrant_port, None, policy).await?;
             let vs = VectorStore::new(&sc.url(), embedder.dimension())?;
             (vs, Some(sc))
         };

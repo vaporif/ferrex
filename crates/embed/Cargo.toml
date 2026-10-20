@@ -14,6 +14,7 @@ onnx-fetch = []
 [dependencies]
 dirs = { workspace = true }
 fastembed = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

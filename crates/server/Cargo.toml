@@ -12,26 +12,29 @@ path = "src/main.rs"
 
 [dependencies]
 ferrex-core = { workspace = true }
+ferrex-store = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 dirs = { workspace = true }
 color-eyre = { workspace = true }
 eyre = { workspace = true }
 rmcp = { workspace = true }
+rustix = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-ferrex-store = { workspace = true }
 portpicker = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process", "io-util"] }
+tokio = { workspace = true, features = ["test-util"] }
+uuid = { workspace = true }
 
 [lints]
 workspace = true

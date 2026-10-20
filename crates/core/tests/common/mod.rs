@@ -6,11 +6,12 @@ use ferrex_core::{
     CacheConfig, DedupConfig, FerrexConfig, MemoryService, ModelTier, RecallRequest, RerankerTier,
     StalenessConfig, StoreRequest,
 };
-use ferrex_store::{MemoryType, QdrantSidecar};
+use ferrex_store::{MemoryType, QdrantSidecar, SidecarPolicy};
 
 pub struct TestContext {
     pub service: MemoryService,
     pub namespace: String,
+    pub qdrant_url: String,
     _sidecar: QdrantSidecar,
     _temp_dir: tempfile::TempDir,
 }
@@ -26,9 +27,10 @@ impl TestContext {
 
         let port = portpicker::pick_unused_port().expect("no free port");
 
-        let sidecar = QdrantSidecar::start("qdrant", port, Some(base_dir))
-            .await
-            .expect("failed to start test sidecar");
+        let sidecar =
+            QdrantSidecar::start("qdrant", port, Some(base_dir), SidecarPolicy::KillOnDrop)
+                .await
+                .expect("failed to start test sidecar");
 
         let namespace = format!("test_{}", uuid::Uuid::now_v7());
         let db_path = PathBuf::from(format!(
@@ -62,6 +64,7 @@ impl TestContext {
         Self {
             service,
             namespace,
+            qdrant_url: sidecar.url(),
             _sidecar: sidecar,
             _temp_dir: temp_dir,
         }

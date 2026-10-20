@@ -358,8 +358,7 @@ impl SqliteStore {
         pool_size: usize,
     ) -> Result<Self, StoreError> {
         let path_ref = path.as_ref();
-        let path_str = path_ref.to_str().unwrap_or("");
-        let is_memory = path_str == ":memory:" || path_str.contains("mode=memory");
+        let is_memory = is_memory_path(path_ref);
 
         let (writer_conn, source, keepalive) = if is_memory {
             let name = format!("memdb_{}", uuid::Uuid::now_v7().simple());
@@ -1433,10 +1432,23 @@ impl MetadataStore for SqliteStore {
     }
 }
 
+#[must_use]
+pub fn is_memory_path(path: &Path) -> bool {
+    let path = path.to_str().unwrap_or("");
+    path == ":memory:" || path.contains("mode=memory")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::MemoryType;
+
+    #[test]
+    fn is_memory_path_detects_both_forms() {
+        assert!(is_memory_path(Path::new(":memory:")));
+        assert!(is_memory_path(Path::new("file:x?mode=memory&cache=shared")));
+        assert!(!is_memory_path(Path::new("/tmp/x.db")));
+    }
 
     fn test_memory(id: &str) -> Memory {
         let now = Utc::now();

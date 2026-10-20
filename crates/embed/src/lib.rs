@@ -6,20 +6,20 @@ use fastembed::{RerankInitOptions, TextRerank};
 
 static SET_CACHE_DIR: Once = Once::new();
 
-fn ensure_cache_dir() {
+pub fn ensure_cache_dir() {
     SET_CACHE_DIR.call_once(|| {
         if std::env::var("FASTEMBED_CACHE_DIR").is_err() {
             let cache_dir = dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join(".ferrex")
                 .join("models");
-            // SAFETY: called once during init before any threads are spawned
+            // SAFETY: `main` calls this before any thread starts
             unsafe { std::env::set_var("FASTEMBED_CACHE_DIR", &cache_dir) };
         }
     });
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
 pub enum ModelTier {
     Small,
     Mid,
@@ -73,7 +73,7 @@ impl std::str::FromStr for ModelTier {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
 pub enum RerankerTier {
     #[default]
     Default,

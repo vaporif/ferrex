@@ -213,6 +213,16 @@ Decay is exponential with half-lives tuned per memory type. Results come back la
 
 Recall runs both dense (cosine) and sparse (BM25) searches in Qdrant, fuses them with reciprocal rank fusion, then reranks the top candidates using a BGE cross-encoder. Recency boosts are type-specific: episodic memories get a stronger recent-is-better signal than semantic ones, procedural gets none.
 
+### Shared daemon
+
+The first session for a given database and config spawns one `ferrex` daemon. Later sessions reuse it, and each Claude session runs a thin stdio proxy that connects to it. The daemon loads the models and opens the database once, so extra sessions cost almost nothing.
+
+- The daemon exits after `FERREX_IDLE_TIMEOUT` seconds with no sessions (default 600).
+- Its log is `~/.ferrex/run/ferrexd.log`. Set `FERREX_RUN_DIR` to move the run directory.
+- `--no-daemon` or `FERREX_NO_DAEMON=1` serves MCP in the process itself, as before. A `:memory:` database does the same.
+- The Qdrant sidecar keeps running after the last session ends. `ferrex nuke` stops it, but only when the recorded PID is confirmed to be a qdrant process; otherwise it fails without deleting anything, naming the PID and `qdrant.pid`, so you can stop that process or remove the file and retry.
+- `ferrex audit reconcile --fix` and `ferrex backfill` (without `--dry-run`) refuse to run while a daemon is using the database. `ferrex nuke` on the default path (`~/.ferrex`) refuses while any daemon is running; with a custom `--db-path` it refuses only while a daemon uses that database. Close your sessions or wait for the daemon to go idle.
+
 ## Configuration
 
 CLI flags, environment variables, or `~/.ferrex/ferrex.toml`.
@@ -227,6 +237,10 @@ CLI flags, environment variables, or `~/.ferrex/ferrex.toml`.
 | `--namespace` | `FERREX_NAMESPACE` | default | Default namespace |
 | `--db-path` | `FERREX_DB_PATH` | ~/.ferrex/ferrex.db | SQLite path |
 | `--config-path` | `FERREX_CONFIG_PATH` | ~/.ferrex/ferrex.toml | Config file |
+| `--no-daemon` | `FERREX_NO_DAEMON` | off | Serve in-process instead of through the shared daemon |
+| -- | `FERREX_IDLE_TIMEOUT` | 600 | Seconds before an idle daemon exits |
+| -- | `FERREX_INIT_TIMEOUT` | 1800 | Seconds a daemon may spend starting up |
+| -- | `FERREX_RUN_DIR` | ~/.ferrex/run | Daemon sockets, PID files and `ferrexd.log` |
 
 ### Embedding models
 
@@ -246,6 +260,7 @@ Thresholds, predicate synonym groups, staleness weights, cache sizes -- all conf
 ferrex                              # start MCP server (default)
 ferrex audit reconcile [--fix]      # detect/fix Qdrant<>SQLite mismatches
 ferrex backfill normalized-predicates [--dry-run]  # populate missing normalized predicates
+ferrex nuke [--force]               # delete all data; stops the qdrant sidecar only on the default path (~/.ferrex)
 ```
 
 ## Design docs

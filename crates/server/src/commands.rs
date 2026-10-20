@@ -1,9 +1,18 @@
+use std::path::Path;
+use std::time::{Duration, Instant};
+
 use ferrex_core::{FerrexConfig, MemoryService};
+use ferrex_store::{is_qdrant, pid_alive};
+use rustix::io::Errno;
+use rustix::process::{Pid, Signal};
+
+use crate::admin_guard;
 
 pub fn diagnose(config: FerrexConfig) -> eyre::Result<()> {
     runtime()?.block_on(async move {
+        let namespace = config.namespace.clone();
         let service = MemoryService::from_config(config).await?;
-        let report = service.diagnostics().await?;
+        let report = service.diagnostics(&namespace).await?;
 
         println!("ferrex v{} | {}", report.version, report.embedding_model);
         println!();
@@ -254,11 +263,15 @@ pub fn nuke(config: &FerrexConfig, force: bool) -> eyre::Result<()> {
     let ferrex_dir = config
         .db_path
         .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
+        .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
+    let owns_sidecar = is_sidecar_dir(&ferrex_dir);
+    guard(config, owns_sidecar)?;
+
     let db_path = &config.db_path;
     let qdrant_data = ferrex_dir.join("qdrant-data");
     let qdrant_pid = ferrex_dir.join("qdrant.pid");
+    let qdrant_port = ferrex_dir.join("qdrant.port");
     let qdrant_lock = ferrex_dir.join("qdrant.lock");
     let qdrant_config = ferrex_dir.join("qdrant-config.yaml");
 
@@ -272,8 +285,12 @@ pub fn nuke(config: &FerrexConfig, force: bool) -> eyre::Result<()> {
     if qdrant_pid.exists() {
         println!("  Qdrant PID:   {}", qdrant_pid.display());
     }
+    if qdrant_port.exists() {
+        println!("  Qdrant port:  {}", qdrant_port.display());
+    }
 
-    let has_anything = db_path.exists() || qdrant_data.exists();
+    let has_anything =
+        db_path.exists() || qdrant_data.exists() || qdrant_pid.exists() || qdrant_port.exists();
     if !has_anything {
         println!("  (nothing found)");
         return Ok(());
@@ -289,6 +306,11 @@ pub fn nuke(config: &FerrexConfig, force: bool) -> eyre::Result<()> {
         }
     }
 
+    guard(config, owns_sidecar)?;
+    if owns_sidecar {
+        stop_sidecar(config, &ferrex_dir)?;
+    }
+
     if db_path.exists() {
         std::fs::remove_file(db_path)?;
         println!("Deleted {}", db_path.display());
@@ -297,7 +319,7 @@ pub fn nuke(config: &FerrexConfig, force: bool) -> eyre::Result<()> {
         std::fs::remove_dir_all(&qdrant_data)?;
         println!("Deleted {}", qdrant_data.display());
     }
-    for f in [&qdrant_pid, &qdrant_lock, &qdrant_config] {
+    for f in [&qdrant_pid, &qdrant_port, &qdrant_lock, &qdrant_config] {
         if f.exists() {
             std::fs::remove_file(f)?;
         }
@@ -307,9 +329,95 @@ pub fn nuke(config: &FerrexConfig, force: bool) -> eyre::Result<()> {
     Ok(())
 }
 
+fn guard(config: &FerrexConfig, owns_sidecar: bool) -> eyre::Result<()> {
+    if owns_sidecar {
+        admin_guard::refuse_if_any_live()
+    } else {
+        admin_guard::refuse_if_live(config)
+    }
+}
+
+/// Whether `dir` is `~/.ferrex`, the directory the shared qdrant sidecar lives in.
+fn is_sidecar_dir(dir: &Path) -> bool {
+    let Some(home_ferrex) = dirs::home_dir().map(|home| home.join(".ferrex")) else {
+        return false;
+    };
+    match (dir.canonicalize(), home_ferrex.canonicalize()) {
+        (Ok(dir), Ok(home_ferrex)) => dir == home_ferrex,
+        _ => false,
+    }
+}
+
+const STOP_GRACE: Duration = Duration::from_secs(10);
+const KILL_GRACE: Duration = Duration::from_secs(1);
+const STOP_POLL: Duration = Duration::from_millis(100);
+
+fn stop_sidecar(config: &FerrexConfig, dir: &Path) -> eyre::Result<()> {
+    let pid_file = dir.join("qdrant.pid");
+    let Some(pid) = ferrex_store::read_pid(&pid_file).filter(|&p| pid_alive(p)) else {
+        return Ok(());
+    };
+    if !is_qdrant(pid, &config.qdrant_bin) {
+        eyre::bail!(
+            "qdrant pid {pid} (from {}) is alive but could not be confirmed as ferrex's sidecar; nothing was deleted. Stop that process or remove qdrant.pid, then retry.",
+            pid_file.display()
+        );
+    }
+    kill_and_wait(pid)?;
+    println!("Stopped qdrant (pid {pid})");
+    Ok(())
+}
+
+fn kill_and_wait(pid: u32) -> eyre::Result<()> {
+    let Some(raw) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
+        return Ok(());
+    };
+    if signal_gone(raw, Signal::TERM)? || wait_until_gone(pid, STOP_GRACE) {
+        return Ok(());
+    }
+    signal_gone(raw, Signal::KILL)?;
+    wait_until_gone(pid, KILL_GRACE);
+    Ok(())
+}
+
+/// Polls until `pid` is gone or `grace` runs out; `true` when it is gone.
+fn wait_until_gone(pid: u32, grace: Duration) -> bool {
+    let deadline = Instant::now() + grace;
+    while pid_alive(pid) && Instant::now() < deadline {
+        std::thread::sleep(STOP_POLL);
+    }
+    !pid_alive(pid)
+}
+
+/// Sends `sig`; `true` when the process no longer exists.
+fn signal_gone(pid: Pid, sig: Signal) -> eyre::Result<bool> {
+    match rustix::process::kill_process(pid, sig) {
+        Ok(()) => Ok(false),
+        Err(Errno::SRCH) => Ok(true),
+        Err(e) => Err(eyre::eyre!("failed to signal qdrant: {e}")),
+    }
+}
+
 fn runtime() -> eyre::Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(Into::into)
+}
+
+pub fn daemon_paths(config: &FerrexConfig) -> eyre::Result<()> {
+    let exe = crate::daemon::addr::current_exe_canonical()?;
+    let paths = crate::daemon::addr::DaemonPaths::for_config(config, &exe)?;
+    crate::daemon::addr::ensure_run_dir(&paths.run_dir)?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "key": paths.key,
+            "socket": paths.socket,
+            "pid_file": paths.pid_file,
+            "lock_file": paths.lock_file,
+            "run_dir": paths.run_dir,
+        })
+    );
+    Ok(())
 }

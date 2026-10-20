@@ -5,7 +5,10 @@ use ferrex_core::{
     StoreRequest, TaxonomyRequest, TimelineRequest,
 };
 use rmcp::{
-    ErrorData, ServerHandler, handler::server::wrapper::Parameters, tool, tool_handler, tool_router,
+    ErrorData, ServerHandler,
+    handler::server::wrapper::Parameters,
+    model::{Implementation, ServerCapabilities, ServerConfig},
+    tool, tool_handler, tool_router,
 };
 
 use crate::hint;
@@ -32,18 +35,31 @@ fn parse_datetime(s: &str, field: &str) -> Result<chrono::DateTime<chrono::Utc>,
         .map_err(|e| ErrorData::invalid_params(format!("invalid {field}: {e}"), None))
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionDefaults {
+    pub namespace: String,
+}
+
 #[derive(Clone)]
 pub struct FerrexServer {
     service: Arc<MemoryService>,
+    defaults: SessionDefaults,
     tool_router: rmcp::handler::server::router::tool::ToolRouter<Self>,
 }
 
 impl FerrexServer {
-    pub fn new(service: Arc<MemoryService>) -> Self {
-        Self {
+    pub fn with_session(service: Arc<MemoryService>, defaults: SessionDefaults) -> Self {
+        let server = Self {
             service,
+            defaults,
             tool_router: Self::tool_router(),
-        }
+        };
+        tracing::info!(namespace = %server.defaults.namespace, "session started");
+        server
+    }
+
+    fn namespace_or_default(&self, requested: Option<String>) -> Option<String> {
+        requested.or_else(|| Some(self.defaults.namespace.clone()))
     }
 }
 
@@ -106,7 +122,7 @@ impl FerrexServer {
             source: p.source,
             context: p.context,
             entities: p.entities,
-            namespace: p.namespace,
+            namespace: self.namespace_or_default(p.namespace),
             supersedes: p.supersedes,
         };
 
@@ -177,7 +193,7 @@ impl FerrexServer {
             query: p.query,
             types,
             entities: p.entities,
-            namespace: p.namespace,
+            namespace: self.namespace_or_default(p.namespace),
             limit: p.limit,
             include_stale: p.include_stale,
             include_invalidated: p.include_invalidated,
@@ -270,7 +286,7 @@ impl FerrexServer {
 
         let req = TimelineRequest {
             entity: p.entity,
-            namespace: p.namespace,
+            namespace: self.namespace_or_default(p.namespace),
             limit: p.limit,
             types,
             include_invalidated: p.include_invalidated,
@@ -290,6 +306,7 @@ impl FerrexServer {
         let req = TaxonomyRequest {
             namespace: p.namespace,
             limit: p.limit,
+            default_namespace: Some(self.defaults.namespace.clone()),
         };
         let resp = self.service.taxonomy(req).await.map_err(map_error)?;
         Ok(serde_json::to_string_pretty(&resp).unwrap_or_default())
@@ -297,4 +314,14 @@ impl FerrexServer {
 }
 
 #[tool_handler(router = self.tool_router)]
-impl ServerHandler for FerrexServer {}
+impl ServerHandler for FerrexServer {
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_tool_list_changed()
+                .build(),
+        )
+        .with_server_info(Implementation::new("ferrex", env!("CARGO_PKG_VERSION")))
+    }
+}

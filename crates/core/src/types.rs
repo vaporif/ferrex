@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::staleness::StalenessConfig;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FerrexConfig {
     pub qdrant_url: Option<String>,
     pub qdrant_bin: String,
@@ -27,7 +27,7 @@ pub struct FerrexConfig {
     pub cache: CacheConfig,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DedupConfig {
     pub threshold: f32,
 }
@@ -38,7 +38,7 @@ impl Default for DedupConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ConflictConfig {
     pub object_fuzzy_duplicate: f32,
     pub object_fuzzy_update: f32,
@@ -53,18 +53,18 @@ impl Default for ConflictConfig {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct PredicatesConfig {
     pub groups: HashMap<String, Vec<String>>,
     pub namespaces: HashMap<String, NamespacePredicatesConfig>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct NamespacePredicatesConfig {
     pub groups: HashMap<String, Vec<String>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ReconciliationConfig {
     pub audit_interval_hours: Option<u64>,
     pub audit_fix_limit: u64,
@@ -79,7 +79,7 @@ impl Default for ReconciliationConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CacheConfig {
     pub embedding_capacity: usize,
     pub result_capacity: usize,
@@ -185,6 +185,8 @@ pub struct TimelineResponse {
 pub struct TaxonomyRequest {
     pub namespace: Option<String>,
     pub limit: Option<usize>,
+    /// Fallback scope when `namespace` is `None`; the namespace list is still returned.
+    pub default_namespace: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -363,4 +365,46 @@ pub struct DiagnosticsReport {
     pub pending_ops: u64,
     pub cache: CacheStats,
     pub recent_ops: Vec<OpRecord>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_config() -> FerrexConfig {
+        FerrexConfig {
+            qdrant_url: None,
+            qdrant_bin: "qdrant".into(),
+            qdrant_port: 6334,
+            model_tier: ModelTier::Small,
+            reranker_tier: RerankerTier::Default,
+            namespace: "test".into(),
+            db_path: PathBuf::from("/tmp/ferrex.db"),
+            config_path: None,
+            deduplication: DedupConfig::default(),
+            conflict: ConflictConfig::default(),
+            predicates: PredicatesConfig {
+                groups: HashMap::from([
+                    ("likes".into(), vec!["loves".into(), "enjoys".into()]),
+                    ("works_at".into(), vec!["employed_by".into()]),
+                ]),
+                namespaces: HashMap::new(),
+            },
+            reconciliation: ReconciliationConfig::default(),
+            staleness: StalenessConfig::default(),
+            reader_pool_size: 2,
+            cache: CacheConfig::default(),
+        }
+    }
+
+    #[test]
+    fn ferrex_config_serializes_with_sorted_keys() {
+        let value = serde_json::to_value(sample_config()).unwrap();
+        let keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!(keys, sorted);
+        assert_eq!(value["model_tier"], "Small");
+        assert!(value["staleness"]["type_config"].get("episodic").is_some());
+    }
 }

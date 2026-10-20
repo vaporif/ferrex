@@ -95,6 +95,7 @@ impl VectorStore {
             .delete_collection(name)
             .await
             .map_err(|e| StoreError::Qdrant(e.to_string()))?;
+        self.forget_ensured(name);
         Ok(())
     }
 }

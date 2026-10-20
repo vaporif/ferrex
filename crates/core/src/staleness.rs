@@ -21,14 +21,14 @@ pub const PROCEDURAL_STALE_THRESHOLD: f64 = 0.90;
 
 pub const COUNT_SCALE: f64 = 10.0;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct StalenessConfig {
     pub weights: StalenessWeights,
     pub count_scale: f64,
     pub type_config: HashMap<MemoryType, TypeStalenessConfig>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct StalenessWeights {
     pub age: f64,
     pub access: f64,
@@ -36,7 +36,7 @@ pub struct StalenessWeights {
     pub count: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TypeStalenessConfig {
     pub half_life_days: f64,
     pub stale_threshold: f64,

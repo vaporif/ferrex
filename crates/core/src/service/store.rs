@@ -22,9 +22,7 @@ impl MemoryService {
             .cloned()
             .unwrap_or_else(|| std::sync::Arc::clone(&self.default_normalizer));
 
-        if namespace != self.config.namespace {
-            self.vector_store.ensure_collection(&namespace).await?;
-        }
+        self.vector_store.ensure_collection(&namespace).await?;
 
         let mut ctx = StoreContext::new(
             req,
