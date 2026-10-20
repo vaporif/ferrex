@@ -821,15 +821,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dirs"
-version = "7.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d57d423b3c82e89b9a24ca3091fee61f456a26edbd28d26c65906f4bc1dcd8f"
-dependencies = [
- "dirs-sys",
-]
-
-[[package]]
 name = "dirs-sys"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1026,7 +1017,7 @@ dependencies = [
 name = "ferrex-embed"
 version = "0.2.0"
 dependencies = [
- "dirs 7.0.0",
+ "dirs",
  "fastembed",
  "serde",
  "thiserror",
@@ -1041,7 +1032,7 @@ dependencies = [
  "chrono",
  "clap",
  "color-eyre",
- "dirs 7.0.0",
+ "dirs",
  "eyre",
  "ferrex-core",
  "ferrex-store",
@@ -1067,7 +1058,7 @@ dependencies = [
  "chrono",
  "deadpool",
  "deadpool-sync",
- "dirs 7.0.0",
+ "dirs",
  "libc",
  "portpicker",
  "qdrant-client",
@@ -1336,7 +1327,7 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aef3982638978efa195ff11b305f51f1f22f4f0a6cabee7af79b383ebee6a213"
 dependencies = [
- "dirs 6.0.0",
+ "dirs",
  "http",
  "indicatif",
  "libc",
@@ -2970,9 +2961,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "log",
  "once_cell",
@@ -3373,7 +3364,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

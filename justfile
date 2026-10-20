@@ -3,7 +3,7 @@ default:
 
 # Setup git hooks
 setup:
-    git config core.hooksPath .githooks
+    lefthook install --reset-hooks-path
 
 check: clippy test check-fmt lint
 

@@ -175,6 +175,7 @@
             pkgs.cargo-deny
             pkgs.taplo
             pkgs.typos
+            pkgs.lefthook
             qdrant
             pkgs.onnxruntime
             pkgs.maturin

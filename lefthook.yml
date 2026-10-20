@@ -1,0 +1,9 @@
+pre-commit:
+  jobs:
+    - name: check-fmt
+      run: just check-fmt
+
+pre-push:
+  jobs:
+    - name: check
+      run: just check
