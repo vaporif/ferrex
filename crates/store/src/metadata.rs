@@ -93,6 +93,11 @@ pub trait MetadataStore: Send + Sync {
     ) -> impl Future<Output = Result<Vec<String>, StoreError>> + Send {
         async { Ok(vec![]) }
     }
+    /// Every memory row, invalidated ones included: all of them keep a vector.
+    fn list_vectored_memory_ids(
+        &self,
+        namespace: &str,
+    ) -> impl Future<Output = Result<Vec<String>, StoreError>> + Send;
     fn semantic_rows_missing_normalized_predicate(
         &self,
         _namespace: Option<&str>,
@@ -237,6 +242,18 @@ pub trait MetadataStore: Send + Sync {
     ) -> impl Future<Output = Result<u64, StoreError>> + Send {
         async { Ok(0) }
     }
+    fn is_op_completed(&self, op_id: &str)
+    -> impl Future<Output = Result<bool, StoreError>> + Send;
+    /// Inserts `memory`, links its entities, invalidates `invalidate_ids` and
+    /// completes the journal op as one SQLite transaction.
+    fn commit_memory_write(
+        &self,
+        memory: &Memory,
+        entity_ids: &[String],
+        invalidate_ids: &[String],
+        t_invalid: DateTime<Utc>,
+        completed: &crate::journal::CompletedOp,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
 }
 
 const DEFAULT_READER_POOL_SIZE: usize = 4;
@@ -298,6 +315,8 @@ impl deadpool::managed::Manager for ReaderManager {
 }
 
 const SQLITE_CACHE_SIZE_KB: i32 = 20_000;
+// Lets a second process opening the same DB wait out our migration or writes.
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const SQLITE_MMAP_SIZE: u64 = 256 * 1024 * 1024;
 
 fn apply_reader_pragmas(conn: &Connection, is_memory: bool) -> Result<(), StoreError> {
@@ -318,18 +337,15 @@ fn apply_reader_pragmas(conn: &Connection, is_memory: bool) -> Result<(), StoreE
 }
 
 fn apply_writer_pragmas(conn: &Connection, is_memory: bool) -> Result<(), StoreError> {
+    if !is_memory {
+        enable_wal(conn)?;
+    }
     conn.execute_batch(&format!(
-        "{wal}
-         PRAGMA synchronous = NORMAL;
+        "PRAGMA synchronous = NORMAL;
          PRAGMA foreign_keys = ON;
          PRAGMA temp_store = MEMORY;
          {mmap}
          PRAGMA cache_size = -{SQLITE_CACHE_SIZE_KB};",
-        wal = if is_memory {
-            ""
-        } else {
-            "PRAGMA journal_mode = WAL;"
-        },
         mmap = if is_memory {
             String::new()
         } else {
@@ -337,6 +353,24 @@ fn apply_writer_pragmas(conn: &Connection, is_memory: bool) -> Result<(), StoreE
         },
     ))?;
     Ok(())
+}
+
+/// Switching a fresh file to WAL can fail with `SQLITE_BUSY` without consulting
+/// the busy handler while another process does the same, so retry it by hand.
+fn enable_wal(conn: &Connection) -> Result<(), StoreError> {
+    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+    let deadline = std::time::Instant::now() + BUSY_TIMEOUT;
+    loop {
+        match conn.execute_batch("PRAGMA journal_mode = WAL;") {
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::DatabaseBusy
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(RETRY_DELAY);
+            }
+            res => return res.map_err(Into::into),
+        }
+    }
 }
 
 type ReaderPool = deadpool::managed::Pool<ReaderManager>;
@@ -378,6 +412,7 @@ impl SqliteStore {
             (conn, ConnectionSource::File(path_ref.to_path_buf()), None)
         };
 
+        writer_conn.busy_timeout(BUSY_TIMEOUT)?;
         apply_writer_pragmas(&writer_conn, is_memory)?;
         migrate(&writer_conn)?;
         let writer = Arc::new(Mutex::new(writer_conn));
@@ -418,7 +453,11 @@ impl SqliteStore {
     {
         let writer = Arc::clone(&self.writer);
         tokio::task::spawn_blocking(move || {
-            let mut conn = writer.lock().expect("writer lock poisoned");
+            // A panicking closure rolls back its own transaction while unwinding, so the
+            // connection is still usable.
+            let mut conn = writer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             f(&mut conn)
         })
         .await
@@ -495,37 +534,81 @@ fn get_entity_names_for_memory(
     Ok(names)
 }
 
+fn insert_memory_in(conn: &Connection, memory: &Memory) -> Result<(), StoreError> {
+    let mut stmt = conn.prepare_cached(
+        "INSERT INTO memories (id, namespace, memory_type, content, subject, predicate, object, confidence, source, context, created_at, updated_at, t_valid, t_invalid, last_accessed, last_validated, access_count, normalized_predicate)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+    )?;
+    stmt.execute(rusqlite::params![
+        memory.id,
+        memory.namespace,
+        memory.memory_type.as_str(),
+        memory.content,
+        memory.subject,
+        memory.predicate,
+        memory.object,
+        memory.confidence,
+        memory.source,
+        memory.context.as_ref().map(ToString::to_string),
+        memory.created_at.to_rfc3339(),
+        memory.updated_at.to_rfc3339(),
+        memory.t_valid.map(|d| d.to_rfc3339()),
+        memory.t_invalid.map(|d| d.to_rfc3339()),
+        memory.last_accessed.to_rfc3339(),
+        memory.last_validated.map(|d| d.to_rfc3339()),
+        memory.access_count.cast_signed(),
+        memory.normalized_predicate,
+    ])?;
+    Ok(())
+}
+
+fn link_memory_entity_in(
+    conn: &Connection,
+    memory_id: &str,
+    entity_id: &str,
+) -> Result<(), StoreError> {
+    conn.prepare_cached(
+        "INSERT OR IGNORE INTO memory_entities (memory_id, entity_id) VALUES (?1, ?2)",
+    )?
+    .execute(rusqlite::params![memory_id, entity_id])?;
+    Ok(())
+}
+
+fn invalidate_memory_in(
+    conn: &Connection,
+    id: &str,
+    t_invalid: DateTime<Utc>,
+) -> Result<(), StoreError> {
+    conn.prepare_cached("UPDATE memories SET t_invalid = ?1, updated_at = ?1 WHERE id = ?2")?
+        .execute(rusqlite::params![t_invalid.to_rfc3339(), id])?;
+    Ok(())
+}
+
+fn complete_op_in(conn: &Connection, op: &crate::journal::CompletedOp) -> Result<(), StoreError> {
+    conn.execute(
+        "INSERT OR REPLACE INTO completed_ops \
+         (op_id, kind, memory_id, namespace, started_at, completed_at, duration_ms, outcome) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![
+            op.op_id,
+            op.kind.as_str(),
+            op.memory_id,
+            op.namespace,
+            op.started_at.to_rfc3339(),
+            op.completed_at.to_rfc3339(),
+            op.duration_ms,
+            op.outcome,
+        ],
+    )?;
+    conn.execute("DELETE FROM pending_ops WHERE op_id = ?1", [&op.op_id])?;
+    Ok(())
+}
+
 impl MetadataStore for SqliteStore {
     async fn insert_memory(&self, memory: &Memory) -> Result<(), StoreError> {
         let memory = memory.clone();
-        self.with_writer(move |conn| {
-            let mut stmt = conn.prepare_cached(
-                "INSERT INTO memories (id, namespace, memory_type, content, subject, predicate, object, confidence, source, context, created_at, updated_at, t_valid, t_invalid, last_accessed, last_validated, access_count, normalized_predicate)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
-            )?;
-            stmt.execute(rusqlite::params![
-                memory.id,
-                memory.namespace,
-                memory.memory_type.as_str(),
-                memory.content,
-                memory.subject,
-                memory.predicate,
-                memory.object,
-                memory.confidence,
-                memory.source,
-                memory.context.as_ref().map(ToString::to_string),
-                memory.created_at.to_rfc3339(),
-                memory.updated_at.to_rfc3339(),
-                memory.t_valid.map(|d| d.to_rfc3339()),
-                memory.t_invalid.map(|d| d.to_rfc3339()),
-                memory.last_accessed.to_rfc3339(),
-                memory.last_validated.map(|d| d.to_rfc3339()),
-                memory.access_count.cast_signed(),
-                memory.normalized_predicate,
-            ])?;
-            Ok(())
-        })
-        .await
+        self.with_writer(move |conn| insert_memory_in(conn, &memory))
+            .await
     }
 
     async fn get_memory(&self, id: &str) -> Result<Option<Memory>, StoreError> {
@@ -616,7 +699,8 @@ impl MetadataStore for SqliteStore {
         let entity = entity.clone();
         self.with_writer(move |conn| {
             let aliases_json = serde_json::to_string(&entity.aliases)?;
-            let mut stmt = conn.prepare_cached(
+            let tx = conn.transaction()?;
+            let mut stmt = tx.prepare_cached(
                 "INSERT INTO entities (id, name, aliases, entity_type, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
@@ -628,6 +712,15 @@ impl MetadataStore for SqliteStore {
                 entity.created_at.to_rfc3339(),
                 entity.updated_at.to_rfc3339(),
             ])?;
+            drop(stmt);
+            let mut alias_stmt = tx.prepare_cached(
+                "INSERT OR IGNORE INTO entity_aliases (entity_id, alias) VALUES (?1, ?2)",
+            )?;
+            for alias in &entity.aliases {
+                alias_stmt.execute(rusqlite::params![entity.id, alias])?;
+            }
+            drop(alias_stmt);
+            tx.commit()?;
             Ok(())
         })
         .await
@@ -723,14 +816,8 @@ impl MetadataStore for SqliteStore {
     async fn link_memory_entity(&self, memory_id: &str, entity_id: &str) -> Result<(), StoreError> {
         let memory_id = memory_id.to_string();
         let entity_id = entity_id.to_string();
-        self.with_writer(move |conn| {
-            let mut stmt = conn.prepare_cached(
-                "INSERT OR IGNORE INTO memory_entities (memory_id, entity_id) VALUES (?1, ?2)",
-            )?;
-            stmt.execute(rusqlite::params![memory_id, entity_id])?;
-            Ok(())
-        })
-        .await
+        self.with_writer(move |conn| link_memory_entity_in(conn, &memory_id, &entity_id))
+            .await
     }
 
     async fn get_metadata(&self, key: &str) -> Result<Option<String>, StoreError> {
@@ -863,14 +950,8 @@ impl MetadataStore for SqliteStore {
         t_invalid: DateTime<Utc>,
     ) -> Result<(), StoreError> {
         let id = id.to_string();
-        self.with_writer(move |conn| {
-            let mut stmt = conn.prepare_cached(
-                "UPDATE memories SET t_invalid = ?1, updated_at = ?1 WHERE id = ?2",
-            )?;
-            stmt.execute(rusqlite::params![t_invalid.to_rfc3339(), id])?;
-            Ok(())
-        })
-        .await
+        self.with_writer(move |conn| invalidate_memory_in(conn, &id, t_invalid))
+            .await
     }
 
     async fn insert_pending_op(&self, op: &PendingOp) -> Result<(), StoreError> {
@@ -1006,6 +1087,18 @@ impl MetadataStore for SqliteStore {
                 out.push(row_to_memory(row, vec![])?);
             }
             Ok(out)
+        })
+        .await
+    }
+
+    async fn list_vectored_memory_ids(&self, namespace: &str) -> Result<Vec<String>, StoreError> {
+        let namespace = namespace.to_string();
+        self.with_reader(move |conn| {
+            let mut stmt = conn.prepare_cached("SELECT id FROM memories WHERE namespace = ?1")?;
+            let ids: Vec<String> = stmt
+                .query_map(rusqlite::params![namespace], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
+            Ok(ids)
         })
         .await
     }
@@ -1325,25 +1418,50 @@ impl MetadataStore for SqliteStore {
         .await
     }
 
+    async fn is_op_completed(&self, op_id: &str) -> Result<bool, StoreError> {
+        let op_id = op_id.to_string();
+        self.with_reader(move |conn| {
+            Ok(conn
+                .prepare_cached("SELECT 1 FROM completed_ops WHERE op_id = ?1")?
+                .exists([&op_id])?)
+        })
+        .await
+    }
+
+    async fn commit_memory_write(
+        &self,
+        memory: &Memory,
+        entity_ids: &[String],
+        invalidate_ids: &[String],
+        t_invalid: DateTime<Utc>,
+        completed: &crate::journal::CompletedOp,
+    ) -> Result<(), StoreError> {
+        let memory = memory.clone();
+        let entity_ids = entity_ids.to_vec();
+        let invalidate_ids = invalidate_ids.to_vec();
+        let completed = completed.clone();
+        self.with_writer(move |conn| {
+            let tx = conn.transaction()?;
+            insert_memory_in(&tx, &memory)?;
+            for entity_id in &entity_ids {
+                link_memory_entity_in(&tx, &memory.id, entity_id)?;
+            }
+            for id in &invalidate_ids {
+                invalidate_memory_in(&tx, id, t_invalid)?;
+            }
+            complete_op_in(&tx, &completed)?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn complete_op(&self, op: &crate::journal::CompletedOp) -> Result<(), StoreError> {
         let op = op.clone();
         self.with_writer(move |conn| {
-            conn.execute(
-                "INSERT OR REPLACE INTO completed_ops \
-                 (op_id, kind, memory_id, namespace, started_at, completed_at, duration_ms, outcome) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                rusqlite::params![
-                    op.op_id,
-                    op.kind.as_str(),
-                    op.memory_id,
-                    op.namespace,
-                    op.started_at.to_rfc3339(),
-                    op.completed_at.to_rfc3339(),
-                    op.duration_ms,
-                    op.outcome,
-                ],
-            )?;
-            conn.execute("DELETE FROM pending_ops WHERE op_id = ?1", [&op.op_id])?;
+            let tx = conn.transaction()?;
+            complete_op_in(&tx, &op)?;
+            tx.commit()?;
             Ok(())
         })
         .await
@@ -2165,5 +2283,169 @@ mod tests {
 
         let namespaces = store.list_namespaces().await.unwrap();
         assert_eq!(namespaces, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    fn completed(op_id: &str, memory_id: &str) -> crate::journal::CompletedOp {
+        let now = Utc::now();
+        crate::journal::CompletedOp {
+            op_id: op_id.into(),
+            kind: PendingOpKind::Supersede,
+            memory_id: memory_id.into(),
+            namespace: "default".into(),
+            started_at: now,
+            completed_at: now,
+            duration_ms: 0,
+            outcome: "ok".into(),
+        }
+    }
+
+    async fn insert_written_op(store: &SqliteStore, op_id: &str, memory_id: &str) {
+        store
+            .insert_pending_op(&PendingOp {
+                op_id: op_id.into(),
+                kind: PendingOpKind::Supersede,
+                memory_id: memory_id.into(),
+                namespace: "default".into(),
+                target_id: None,
+                qdrant_written: true,
+                started_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn commit_memory_write_links_invalidates_and_completes() {
+        let store = SqliteStore::open(":memory:").unwrap();
+        store.insert_memory(&test_memory("old")).await.unwrap();
+        let now = Utc::now();
+        store
+            .insert_entity(&Entity {
+                id: "ent".into(),
+                name: "pg".into(),
+                aliases: vec![],
+                entity_type: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+        insert_written_op(&store, "op", "new").await;
+
+        store
+            .commit_memory_write(
+                &test_memory("new"),
+                &["ent".to_string()],
+                &["old".to_string()],
+                now,
+                &completed("op", "new"),
+            )
+            .await
+            .unwrap();
+
+        let new = store.get_memory("new").await.unwrap().unwrap();
+        assert_eq!(new.entities, vec!["pg".to_string()]);
+        let old = store.get_memory("old").await.unwrap().unwrap();
+        assert!(old.t_invalid.is_some());
+        assert!(store.list_pending_ops().await.unwrap().is_empty());
+        assert_eq!(
+            store
+                .list_completed_ops(None, 10, None)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_memory_write_rolls_back_everything_on_failure() {
+        let store = SqliteStore::open(":memory:").unwrap();
+        store.insert_memory(&test_memory("old")).await.unwrap();
+        insert_written_op(&store, "op", "new").await;
+
+        // Linking an unknown entity violates the foreign key after the insert and before the invalidation.
+        let res = store
+            .commit_memory_write(
+                &test_memory("new"),
+                &["missing-entity".to_string()],
+                &["old".to_string()],
+                Utc::now(),
+                &completed("op", "new"),
+            )
+            .await;
+
+        assert!(res.is_err());
+        assert!(store.get_memory("new").await.unwrap().is_none());
+        assert!(
+            store
+                .get_memory("old")
+                .await
+                .unwrap()
+                .unwrap()
+                .t_invalid
+                .is_none()
+        );
+        assert_eq!(store.list_pending_ops().await.unwrap().len(), 1);
+        assert!(
+            store
+                .list_completed_ops(None, 10, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn insert_entity_aliases_are_readable() {
+        let store = SqliteStore::open(":memory:").unwrap();
+        let now = Utc::now();
+        store
+            .insert_entity(&Entity {
+                id: "ent".into(),
+                name: "postgresql".into(),
+                aliases: vec!["pg".into()],
+                entity_type: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        let by_alias = store.get_entity_by_name("pg").await.unwrap().unwrap();
+        assert_eq!(by_alias.id, "ent");
+        assert_eq!(by_alias.aliases, vec!["pg".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn writer_survives_a_panicking_closure() {
+        let store = SqliteStore::open(":memory:").unwrap();
+        let res: Result<(), StoreError> = store.with_writer(|_| panic!("boom")).await;
+        assert!(res.is_err());
+
+        store.set_metadata("k", "v").await.unwrap();
+        assert_eq!(store.get_metadata("k").await.unwrap().as_deref(), Some("v"));
+    }
+
+    #[test]
+    fn concurrent_first_open_of_a_file_db_succeeds() {
+        for _ in 0..20 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("ferrex.db");
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let path = path.clone();
+                    let barrier = std::sync::Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        SqliteStore::open(&path).map(|_| ())
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().unwrap().unwrap();
+            }
+        }
     }
 }

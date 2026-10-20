@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ferrex_core::{FerrexConfig, MemoryService};
@@ -269,6 +269,12 @@ pub fn nuke(config: &FerrexConfig, force: bool) -> eyre::Result<()> {
     guard(config, owns_sidecar)?;
 
     let db_path = &config.db_path;
+    // A WAL left beside a fresh DB of the same name could replay deleted rows into it.
+    let db_sidecars = ["-wal", "-shm"].map(|suffix| {
+        let mut p = db_path.clone().into_os_string();
+        p.push(suffix);
+        PathBuf::from(p)
+    });
     let qdrant_data = ferrex_dir.join("qdrant-data");
     let qdrant_pid = ferrex_dir.join("qdrant.pid");
     let qdrant_port = ferrex_dir.join("qdrant.port");
@@ -278,6 +284,9 @@ pub fn nuke(config: &FerrexConfig, force: bool) -> eyre::Result<()> {
     println!("This will delete:");
     if db_path.exists() {
         println!("  SQLite DB:    {}", db_path.display());
+    }
+    for f in db_sidecars.iter().filter(|f| f.exists()) {
+        println!("  SQLite WAL:   {}", f.display());
     }
     if qdrant_data.exists() {
         println!("  Qdrant data:  {}", qdrant_data.display());
@@ -289,8 +298,11 @@ pub fn nuke(config: &FerrexConfig, force: bool) -> eyre::Result<()> {
         println!("  Qdrant port:  {}", qdrant_port.display());
     }
 
-    let has_anything =
-        db_path.exists() || qdrant_data.exists() || qdrant_pid.exists() || qdrant_port.exists();
+    let has_anything = db_path.exists()
+        || db_sidecars.iter().any(|f| f.exists())
+        || qdrant_data.exists()
+        || qdrant_pid.exists()
+        || qdrant_port.exists();
     if !has_anything {
         println!("  (nothing found)");
         return Ok(());
@@ -311,9 +323,11 @@ pub fn nuke(config: &FerrexConfig, force: bool) -> eyre::Result<()> {
         stop_sidecar(config, &ferrex_dir)?;
     }
 
-    if db_path.exists() {
-        std::fs::remove_file(db_path)?;
-        println!("Deleted {}", db_path.display());
+    for f in std::iter::once(db_path).chain(&db_sidecars) {
+        if f.exists() {
+            std::fs::remove_file(f)?;
+            println!("Deleted {}", f.display());
+        }
     }
     if qdrant_data.exists() {
         std::fs::remove_dir_all(&qdrant_data)?;

@@ -325,7 +325,7 @@ impl Watcher {
 async fn resolve_existing(bin: &str, port: u16, dir: &Path) -> Result<Resolution, StoreError> {
     let pid_file = dir.join(PID_FILE);
     let lock_path = dir.join(LOCK_FILE);
-    let mut lock = acquire_lock_file(&lock_path)?;
+    let mut lock = acquire_lock_file(&lock_path).await?;
 
     loop {
         let Some(existing) = read_pid(&pid_file) else {
@@ -357,7 +357,7 @@ async fn resolve_existing(bin: &str, port: u16, dir: &Path) -> Result<Resolution
             return Ok(Resolution::Reuse(existing));
         }
 
-        lock = acquire_lock_file(&lock_path)?;
+        lock = acquire_lock_file(&lock_path).await?;
         if read_pid(&pid_file) == Some(existing) {
             tracing::info!(
                 pid = existing,
@@ -413,7 +413,7 @@ fn reap(child: &mut Child, dir: &Path) {
 }
 
 fn remove_pid_files_if_ours(dir: &Path, pid: u32) {
-    let Ok(_lock) = acquire_lock_file(&dir.join(LOCK_FILE)) else {
+    let Ok(_lock) = acquire_lock_file_blocking(&dir.join(LOCK_FILE), REAP_LOCK_WAIT) else {
         tracing::warn!(
             pid,
             "sidecar lock busy, leaving PID files for the next start"
@@ -484,54 +484,65 @@ fn dirs_home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// An exclusive flock on the lock file, released when the file closes. The file
+/// itself is never removed, so a lock can't be stolen by deleting it.
 #[derive(Debug)]
 struct SidecarLock {
-    path: PathBuf,
     _file: File,
 }
 
-impl Drop for SidecarLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+/// Outlasts another start holding the lock through its health check.
+const LOCK_WAIT: Duration = HEALTH_CHECK_MAX_TIMEOUT.saturating_add(Duration::from_secs(15));
+const REAP_LOCK_WAIT: Duration = Duration::from_secs(2);
+const LOCK_POLL: Duration = Duration::from_millis(50);
+
+/// Takes the lock without waiting; `Ok(None)` if another holder has it.
+fn try_lock_file(path: &Path) -> Result<Option<SidecarLock>, StoreError> {
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|e| StoreError::Sidecar(format!("failed to open lock file: {e}")))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(SidecarLock { _file: file })),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => Err(StoreError::Sidecar(format!(
+            "failed to lock {}: {e}",
+            path.display()
+        ))),
     }
 }
 
-fn acquire_lock_file(path: &Path) -> Result<SidecarLock, StoreError> {
-    const MAX_ATTEMPTS: u32 = 10;
-    const RETRY_DELAY: Duration = Duration::from_millis(200);
-    const STALE_LOCK_AGE: Duration = Duration::from_secs(30);
+fn lock_timeout() -> StoreError {
+    StoreError::Sidecar("timed out waiting for sidecar lock file".to_string())
+}
 
-    for attempt in 0..MAX_ATTEMPTS {
-        match OpenOptions::new().write(true).create_new(true).open(path) {
-            Ok(file) => {
-                return Ok(SidecarLock {
-                    path: path.to_path_buf(),
-                    _file: file,
-                });
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if let Ok(meta) = fs::metadata(path)
-                    && let Some(age) = meta.modified().ok().and_then(|m| m.elapsed().ok())
-                    && age > STALE_LOCK_AGE
-                {
-                    tracing::warn!("removing stale lock file");
-                    let _ = fs::remove_file(path);
-                    continue;
-                }
-                if attempt + 1 < MAX_ATTEMPTS {
-                    std::thread::sleep(RETRY_DELAY);
-                }
-            }
-            Err(e) => {
-                return Err(StoreError::Sidecar(format!(
-                    "failed to create lock file: {e}"
-                )));
-            }
+async fn acquire_lock_file(path: &Path) -> Result<SidecarLock, StoreError> {
+    let deadline = Instant::now() + LOCK_WAIT;
+    loop {
+        if let Some(lock) = try_lock_file(path)? {
+            return Ok(lock);
         }
+        if Instant::now() >= deadline {
+            return Err(lock_timeout());
+        }
+        tokio::time::sleep(LOCK_POLL).await;
     }
-    Err(StoreError::Sidecar(
-        "timed out waiting for sidecar lock file".to_string(),
-    ))
+}
+
+/// Blocking variant for the reaper, which runs outside the runtime.
+fn acquire_lock_file_blocking(path: &Path, wait: Duration) -> Result<SidecarLock, StoreError> {
+    let deadline = Instant::now() + wait;
+    loop {
+        if let Some(lock) = try_lock_file(path)? {
+            return Ok(lock);
+        }
+        if Instant::now() >= deadline {
+            return Err(lock_timeout());
+        }
+        std::thread::sleep(LOCK_POLL);
+    }
 }
 
 /// Reads a bare PID file; `None` if missing or malformed.
@@ -646,7 +657,7 @@ fn matches_qdrant_name(comm: &str, qdrant_bin: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use std::fs::File;
     use std::os::unix::fs::OpenOptionsExt;
     use std::sync::Arc;
@@ -677,7 +688,7 @@ mod tests {
             .is_ok()
     }
 
-    fn free_port() -> u16 {
+    pub fn free_port() -> u16 {
         loop {
             if let Some(p) = portpicker::pick_unused_port()
                 && p >= MIN_PORT
@@ -762,6 +773,23 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(!err.contains("timed out waiting for sidecar lock"), "{err}");
+    }
+
+    /// A start that holds the lock through a slow health check must keep it,
+    /// however old the lock file looks.
+    #[test]
+    fn held_lock_is_not_stolen_when_its_file_is_old() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOCK_FILE);
+        let _held = try_lock_file(&path).unwrap().unwrap();
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(60))
+            .unwrap();
+
+        assert!(try_lock_file(&path).unwrap().is_none());
     }
 
     #[test]
@@ -1085,14 +1113,14 @@ mod tests {
             .is_some_and(|p| rustix::process::test_kill_process(p) == Err(Errno::SRCH))
     }
 
+    // `ps`, not `pgrep -f`: the latter can't see arguments on recent macOS.
     fn qdrant_processes_for(dir: &Path) -> usize {
-        let config = dir.join("qdrant-config.yaml");
-        let output = Command::new("pgrep")
-            .arg("-f")
-            .arg(config)
-            .output()
-            .unwrap();
-        String::from_utf8_lossy(&output.stdout).lines().count()
+        let config = dir.join("qdrant-config.yaml").display().to_string();
+        let output = Command::new("ps").args(["-axo", "args="]).output().unwrap();
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.contains(&config))
+            .count()
     }
 
     // Stops watchers before killing, or a watcher would respawn qdrant.

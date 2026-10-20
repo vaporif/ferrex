@@ -1,3 +1,6 @@
+# SQLite reader pool size. Writes use a single connection; reads spread across the pool.
+reader_pool_size = 4
+
 [deduplication]
 # Cosine similarity above which non-semantic memories are rejected as
 # near-duplicates. Semantic facts skip this; they use conflict resolution instead.
@@ -39,9 +42,6 @@ maintained_by = ["owned-by", "managed-by", "authored-by", "led-by"]
 # audit_interval_hours = 24
 # Max entries to fix per audit run.
 audit_fix_limit = 1000
-
-# SQLite reader pool size. Writes use a single connection; reads spread across the pool.
-reader_pool_size = 4
 
 # score = weight_age * age_decay + weight_access * access_decay
 #        + weight_validated * validation_decay + weight_count * count_freshness

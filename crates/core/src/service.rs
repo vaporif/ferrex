@@ -188,6 +188,11 @@ impl MemoryService {
         let pending = self.metadata_store.list_pending_ops().await?;
         let mut report = RecoveryReport::default();
         for op in pending {
+            // Older builds could crash between recording completion and clearing the pending row.
+            if self.metadata_store.is_op_completed(&op.op_id).await? {
+                self.metadata_store.clear_pending_op(&op.op_id).await?;
+                continue;
+            }
             match (op.kind, op.qdrant_written) {
                 (_, false) => {
                     self.metadata_store.clear_pending_op(&op.op_id).await?;

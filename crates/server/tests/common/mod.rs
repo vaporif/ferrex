@@ -93,7 +93,7 @@ impl TestEnv {
             run_dir: root.join("run"),
             db_path: root.join("ferrex.db"),
             config_path: root.join("ferrex.toml"),
-            qdrant_port: portpicker::pick_unused_port().expect("free port"),
+            qdrant_port: qdrant_port(),
             root,
             temp,
             _sidecar: None,
@@ -775,5 +775,15 @@ impl ProxyClient {
             let _ = tokio::time::timeout(Duration::from_secs(5), drain).await;
         }
         Some(status)
+    }
+}
+
+/// A free gRPC port whose HTTP neighbour (`port - 1`, used by the sidecar) is free too.
+pub fn qdrant_port() -> u16 {
+    loop {
+        let port = portpicker::pick_unused_port().expect("no free port");
+        if port > 2 && portpicker::is_free(port - 1) {
+            return port;
+        }
     }
 }

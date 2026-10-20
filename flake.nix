@@ -139,6 +139,22 @@
           inherit src pname;
         };
 
+        clippy = craneLib.cargoClippy (commonArgs
+          // {
+            inherit cargoArtifacts;
+            cargoClippyExtraArgs = "--workspace --all-targets -- -D warnings";
+            doInstallCargoArtifacts = false;
+          });
+
+        actionlint =
+          pkgs.runCommand "actionlint-check" {
+            nativeBuildInputs = [pkgs.actionlint pkgs.shellcheck];
+          } ''
+            cd ${self}
+            actionlint .github/workflows/*
+            touch $out
+          '';
+
         taplo =
           pkgs.runCommand "taplo-check" {
             nativeBuildInputs = [pkgs.taplo];
@@ -176,6 +192,9 @@
             pkgs.taplo
             pkgs.typos
             pkgs.lefthook
+            pkgs.just
+            pkgs.actionlint
+            pkgs.alejandra
             qdrant
             pkgs.onnxruntime
             pkgs.maturin

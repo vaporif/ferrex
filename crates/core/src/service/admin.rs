@@ -15,13 +15,13 @@ impl MemoryService {
     ) -> Result<AuditReport, CoreError> {
         let qdrant_ids = self
             .vector_store
-            .scroll_all_ids(&self.config.namespace)
+            .scroll_memory_ids(&self.config.namespace)
             .await?;
         let qdrant_set: HashSet<String> = qdrant_ids.iter().map(ToString::to_string).collect();
 
         let sqlite_ids = self
             .metadata_store
-            .list_all_memory_ids(&self.config.namespace)
+            .list_vectored_memory_ids(&self.config.namespace)
             .await?;
         let sqlite_set: HashSet<String> = sqlite_ids.into_iter().collect();
 

@@ -19,7 +19,13 @@ impl McpTestHarness {
     async fn new_raw() -> Self {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let base_dir = temp_dir.path().to_path_buf();
-        let port = portpicker::pick_unused_port().expect("no free port");
+        // The sidecar also binds `port - 1` for HTTP.
+        let port = loop {
+            let p = portpicker::pick_unused_port().expect("no free port");
+            if p > 2 && portpicker::is_free(p - 1) {
+                break p;
+            }
+        };
 
         let sidecar =
             QdrantSidecar::start("qdrant", port, Some(base_dir), SidecarPolicy::KillOnDrop)

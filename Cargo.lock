@@ -1000,6 +1000,7 @@ dependencies = [
  "lru",
  "portpicker",
  "qdrant-client",
+ "rusqlite",
  "rustc-hash",
  "serde",
  "serde_json",

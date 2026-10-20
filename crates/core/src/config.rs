@@ -10,6 +10,7 @@ use crate::types::{
 };
 
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct FileConfig {
     #[serde(default)]
     pub deduplication: DedupFile,
@@ -30,41 +31,50 @@ pub struct FileConfig {
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct DedupFile {
     pub threshold: Option<f32>,
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ConflictFile {
     pub object_fuzzy_duplicate: Option<f32>,
     pub object_fuzzy_update: Option<f32>,
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct PredicatesFile {
     #[serde(default)]
     pub groups: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct NamespaceFile {
     #[serde(default)]
     pub predicates: PredicatesFile,
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct CacheFile {
     pub embedding_capacity: Option<usize>,
     pub result_capacity: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ReconciliationFile {
     pub audit_interval_hours: Option<u64>,
     pub audit_fix_limit: Option<u64>,
+    /// Older shipped baselines put the top-level key here by mistake.
+    pub reader_pool_size: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct StalenessFile {
     pub weight_age: Option<f64>,
     pub weight_access: Option<f64>,
@@ -77,6 +87,7 @@ pub struct StalenessFile {
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct TypeStalenessFile {
     pub half_life_days: Option<f64>,
     pub stale_threshold: Option<f64>,
@@ -108,7 +119,28 @@ pub fn load_or_init(path: &Path, baseline: &str) -> Result<LoadedConfig, ConfigE
         Err(e) => return Err(ConfigError::Io(e)),
     };
     let file: FileConfig = toml::from_str(&raw).map_err(|e| ConfigError::Parse(e.to_string()))?;
-    Ok(resolve(file))
+    let loaded = resolve(file);
+    validate(&loaded)?;
+    Ok(loaded)
+}
+
+fn validate(cfg: &LoadedConfig) -> Result<(), ConfigError> {
+    let invalid = |msg: String| Err(ConfigError::Invalid(msg));
+    if cfg.cache.embedding_capacity == 0 {
+        return invalid("cache.embedding_capacity must be at least 1".into());
+    }
+    if cfg.cache.result_capacity == 0 {
+        return invalid("cache.result_capacity must be at least 1".into());
+    }
+    for (memory_type, tc) in &cfg.staleness.type_config {
+        if !(tc.half_life_days.is_finite() && tc.half_life_days > 0.0) {
+            return invalid(format!(
+                "staleness.{}.half_life_days must be a positive number",
+                memory_type.as_str()
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn resolve(file: FileConfig) -> LoadedConfig {
@@ -147,7 +179,10 @@ pub fn resolve(file: FileConfig) -> LoadedConfig {
             audit_fix_limit: file.reconciliation.audit_fix_limit.unwrap_or(1000),
         },
         staleness,
-        reader_pool_size: file.reader_pool_size.unwrap_or(DEFAULT_READER_POOL_SIZE),
+        reader_pool_size: file
+            .reader_pool_size
+            .or(file.reconciliation.reader_pool_size)
+            .unwrap_or(DEFAULT_READER_POOL_SIZE),
         cache: CacheConfig {
             embedding_capacity: file.cache.embedding_capacity.unwrap_or(256),
             result_capacity: file.cache.result_capacity.unwrap_or(128),
@@ -220,6 +255,8 @@ pub enum ConfigError {
     Io(std::io::Error),
     #[error("config parse: {0}")]
     Parse(String),
+    #[error("config invalid: {0}")]
+    Invalid(String),
 }
 
 #[cfg(test)]
@@ -346,5 +383,44 @@ stale_threshold = 0.60
         let cfg = load_or_init(&path, baseline).unwrap();
         assert!((cfg.deduplication.threshold - 0.9).abs() < f32::EPSILON);
         assert!(path.exists());
+    }
+
+    fn load_str(raw: &str) -> Result<LoadedConfig, ConfigError> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ferrex.toml");
+        std::fs::write(&path, raw).unwrap();
+        load_or_init(&path, "")
+    }
+
+    #[test]
+    fn shipped_baseline_loads() {
+        load_str(include_str!("../../server/config/ferrex.toml")).unwrap();
+    }
+
+    #[test]
+    fn unknown_key_is_rejected() {
+        let err = load_str("[cache]\nresult_cap = 10\n").err().unwrap();
+        assert!(err.to_string().contains("result_cap"), "{err}");
+    }
+
+    #[test]
+    fn zero_cache_capacity_is_rejected() {
+        let err = load_str("[cache]\nresult_capacity = 0\n").err().unwrap();
+        assert!(err.to_string().contains("result_capacity"), "{err}");
+    }
+
+    #[test]
+    fn non_positive_half_life_is_rejected() {
+        let err = load_str("[staleness.episodic]\nhalf_life_days = 0\n")
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("half_life_days"), "{err}");
+    }
+
+    /// Baselines before this fix wrote `reader_pool_size` under `[reconciliation]`.
+    #[test]
+    fn legacy_reader_pool_size_under_reconciliation_is_honored() {
+        let cfg = load_str("[reconciliation]\nreader_pool_size = 7\n").unwrap();
+        assert_eq!(cfg.reader_pool_size, 7);
     }
 }

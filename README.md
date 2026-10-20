@@ -230,7 +230,7 @@ CLI flags, environment variables, or `~/.ferrex/ferrex.toml`.
 | Flag | Env var | Default | |
 |------|---------|---------|-------------|
 | `--qdrant-url` | `FERREX_QDRANT_URL` | -- | Remote Qdrant endpoint (skip sidecar) |
-| `--qdrant-bin` | `FERREX_QDRANT_BIN` | -- | Path to qdrant binary for sidecar |
+| `--qdrant-bin` | `FERREX_QDRANT_BIN` | qdrant | Path to qdrant binary for sidecar |
 | `--qdrant-port` | `FERREX_QDRANT_PORT` | 6334 | Sidecar gRPC port |
 | `--model-tier` | `FERREX_MODEL_TIER` | best | `small` / `mid` / `best` |
 | `--reranker-tier` | `FERREX_RERANKER_TIER` | default | `default` / `multilingual` |
@@ -241,6 +241,9 @@ CLI flags, environment variables, or `~/.ferrex/ferrex.toml`.
 | -- | `FERREX_IDLE_TIMEOUT` | 600 | Seconds before an idle daemon exits |
 | -- | `FERREX_INIT_TIMEOUT` | 1800 | Seconds a daemon may spend starting up |
 | -- | `FERREX_RUN_DIR` | ~/.ferrex/run | Daemon sockets, PID files and `ferrexd.log` |
+| -- | `FERREX_LOG` | info | Log filter (`tracing` env-filter syntax, e.g. `ferrex_core=debug`) |
+| -- | `FERREX_LOG_FILE` | -- | Write logs to this file instead of stderr |
+| -- | `FERREX_LOG_FORMAT` | text | `json` for structured logs |
 
 ### Embedding models
 
@@ -252,14 +255,16 @@ CLI flags, environment variables, or `~/.ferrex/ferrex.toml`.
 
 ### TOML config
 
-Thresholds, predicate synonym groups, staleness weights, cache sizes -- all configurable in `ferrex.toml`. See [`docs/design/ferrex-rag-memory.md`](docs/design/ferrex-rag-memory.md) for the full schema.
+Thresholds, predicate synonym groups, staleness weights, cache sizes -- all configurable in `ferrex.toml`, which is written on first run from [`crates/server/config/ferrex.toml`](crates/server/config/ferrex.toml). That file lists every supported key; unknown keys and invalid values (a zero cache capacity, a non-positive half-life) are rejected at startup.
 
 ## CLI commands
 
 ```
 ferrex                              # start MCP server (default)
-ferrex audit reconcile [--fix]      # detect/fix Qdrant<>SQLite mismatches
-ferrex backfill normalized-predicates [--dry-run]  # populate missing normalized predicates
+ferrex audit reconcile [--fix] [--sample N] [--format text|json]  # detect/fix Qdrant<>SQLite mismatches
+ferrex backfill normalized-predicates [--namespace NS] [--dry-run]  # populate missing normalized predicates
+ferrex diagnose                     # print versions, Qdrant and SQLite health
+ferrex journal show [--status pending|completed|failed] [--since 1h|24h|7d] [--limit N] [--format text|json]
 ferrex nuke [--force]               # delete all data; stops the qdrant sidecar only on the default path (~/.ferrex)
 ```
 

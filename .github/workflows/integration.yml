@@ -92,9 +92,15 @@ jobs:
         with:
           tool: cargo-nextest
 
+      # Keep in step with the qdrant the flake's dev shell provides.
       - name: Install qdrant
+        env:
+          QDRANT_VERSION: v1.16.3
+          QDRANT_SHA256: 62e42e3e0fffd609365363be85b63ec27b215b8e7ac9929cf5736c49af0416ec
         run: |
-          curl -sL https://github.com/qdrant/qdrant/releases/latest/download/qdrant-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          curl -sSfL -o qdrant.tar.gz "https://github.com/qdrant/qdrant/releases/download/${QDRANT_VERSION}/qdrant-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${QDRANT_SHA256}  qdrant.tar.gz" | sha256sum -c -
+          tar xzf qdrant.tar.gz
           sudo mv qdrant /usr/local/bin/
 
       - uses: actions/download-artifact@v8
