@@ -368,12 +368,16 @@ a collection (see below), so the reply also signals readiness.
 - Idle exit: the daemon tracks two counts, connections in their hello phase and connections
   that passed the hello. The idle state is re-evaluated whenever init succeeds, a connection is accepted, passes
   its hello, fails its hello (refusal, 10 s hello timeout, EOF) or ends. The timer is armed
-  exactly when init has succeeded and both counts are 0, and disarmed otherwise. Arming always starts a fresh `FERREX_IDLE_TIMEOUT` countdown. A daemon whose
+  exactly when init has succeeded and both counts are 0, and disarmed otherwise. Accepting a
+  connection suspends the current deadline rather than discarding it. If every connection since
+  then failed its hello, re-arming restores that deadline (firing at once if it has passed);
+  otherwise, as after init, after a session that passed its hello ends, or after an idle exit
+  abandoned on a busy lock, arming starts a fresh `FERREX_IDLE_TIMEOUT` countdown. A daemon whose
   spawner died before connecting therefore exits one timeout after init, and a connection that
   fails its hello can't leave the timer disarmed. Timeout `FERREX_IDLE_TIMEOUT` seconds,
   default 600.
 - Numeric env settings (`FERREX_IDLE_TIMEOUT`, `FERREX_INIT_TIMEOUT`) fall back to their
-  defaults when unset (silently) or when zero or unparseable (with a warning in the log naming
+  defaults when unset (silently) or when zero or unparsable (with a warning in the log naming
   the variable and the rejected value).
 - The accept loop owns the listener and is the only place shutdown runs: one `select!` over
   accept, signals, the init result (`oneshot`), the init deadline, the init-failed grace
@@ -803,10 +807,9 @@ since every startup does the same). That's today's behaviour with multiple sessi
 too, and it's listed under known risks.
 
 The guard's "socket accepts" probe opens a connection that never sends a hello. Accepting it
-disarms the idle timer, and when it closes (or hits the 10 s hello timeout) the timer re-arms
-with a fresh countdown, so a probe can postpone a daemon's idle exit by up to
-`FERREX_IDLE_TIMEOUT` plus 10 s. That's harmless: the daemon is live, so the command refuses
-anyway.
+suspends the idle timer, and when it closes (or hits the 10 s hello timeout) the previous
+deadline is restored, so a probe never postpones idle exit; one stuck in its hello delays it
+by at most the 10 s hello timeout.
 
 This guard is best-effort: a session that starts while `nuke` is running, or a reused PID, can
 slip through. The guard is there to catch the common mistake, not to lock the database.
@@ -1012,7 +1015,7 @@ T4 (AFK) admin guard, nuke and docs
           pointing to this spec), tests/daemon_admin_guard.rs
    deps:  T1
    done:  tests/daemon_admin_guard.rs passes (reconcile --fix, backfill and nuke refuse with a
-          live daemon on the same DB and succeed with none; a stale or unparseable PID file
+          live daemon on the same DB and succeed with none; a stale or unparsable PID file
           doesn't block); nuke stops qdrant per the admin-guard rules; the README and both
           design docs carry the notes above
 ```
