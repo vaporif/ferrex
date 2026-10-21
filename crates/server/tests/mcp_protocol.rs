@@ -1,10 +1,13 @@
 use std::process::Stdio;
 
 use ferrex_store::{QdrantSidecar, SidecarPolicy};
+use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::time::{Duration, timeout};
+
+mod common;
 
 struct McpTestHarness {
     child: Child,
@@ -143,13 +146,18 @@ impl McpTestHarness {
     }
 
     async fn shutdown(&mut self) {
-        let _ = self.child.kill().await;
+        if let Some(pid) = self.child.id() {
+            common::terminate(pid);
+        }
+        let _ = self.child.wait().await;
     }
 }
 
 impl Drop for McpTestHarness {
     fn drop(&mut self) {
-        let _ = self.child.start_kill();
+        if let Some(pid) = self.child.id() {
+            common::terminate(pid);
+        }
     }
 }
 

@@ -26,6 +26,7 @@ pub fn compute_recency_boost(memory_type: MemoryType, age_days: f64) -> f64 {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     #[allow(clippy::float_cmp)]

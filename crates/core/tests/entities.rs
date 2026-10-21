@@ -1,4 +1,5 @@
 use ferrex_store::{MetadataStore, SqliteStore};
+use pretty_assertions::assert_eq;
 
 mod common;
 use common::episodic;

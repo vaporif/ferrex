@@ -36,13 +36,16 @@ jobs:
         with:
           use-flakehub: false
 
+      - name: AST rules
+        run: nix build .#checks.x86_64-linux.ast-grep --print-build-logs
+
       - name: Nix flake checks
         run: nix flake check
 
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
 
@@ -60,7 +63,7 @@ jobs:
           key: fastembed-models-${{ runner.os }}
 
       - name: Generate coverage
-        run: nix develop .#coverage --command cargo llvm-cov nextest --workspace --profile ci --lcov --output-path lcov.info
+        run: nix develop .#coverage --command cargo llvm-cov nextest --workspace --profile coverage --run-ignored all --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v6

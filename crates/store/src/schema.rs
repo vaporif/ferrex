@@ -156,6 +156,7 @@ fn migrate_schema(conn: &Connection) -> Result<(), StoreError> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
     use rusqlite::Connection;
 
     #[test]

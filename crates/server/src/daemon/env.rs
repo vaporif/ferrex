@@ -44,6 +44,7 @@ fn parse_secs(raw: Option<&str>, default: u64, cap: Option<u64>) -> (u64, Option
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn unset_is_silent_default() {

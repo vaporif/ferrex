@@ -230,6 +230,7 @@
             nativeBuildInputs = [pkgs.ast-grep];
           } ''
             cd ${self}
+            ast-grep test --skip-snapshot-tests
             ast-grep scan
             touch $out
           '';

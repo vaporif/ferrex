@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
+use pretty_assertions::assert_eq;
 use serde_json::Value;
 
 fn ferrex(cwd: &Path, run_dir: &Path, args: &[&str]) -> Output {

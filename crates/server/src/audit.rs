@@ -18,7 +18,12 @@ pub fn run_reconcile(
         .enable_all()
         .build()?
         .block_on(async move {
-            let service = MemoryService::from_config(config).await?;
+            // Without --fix a daemon may be live, and recovery would roll back its in-flight ops.
+            let service = if fix {
+                MemoryService::from_config(config).await?
+            } else {
+                MemoryService::inspect(config).await?
+            };
             let report = service.audit_reconcile(fix, audit_fix_limit).await?;
 
             if is_json {

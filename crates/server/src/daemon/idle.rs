@@ -120,6 +120,7 @@ impl IdleTimer {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     const TIMEOUT: Duration = Duration::from_secs(10);
 

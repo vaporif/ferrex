@@ -159,7 +159,7 @@ pub fn ferrex_bin() -> String {
         .unwrap_or_else(|_| env!("CARGO_BIN_EXE_ferrex").to_string())
 }
 
-/// SIGKILLs the daemon on drop, so a panicking test leaves no process behind.
+/// Stops the daemon on drop, so a panicking test leaves no process behind.
 #[derive(Debug)]
 pub struct DaemonGuard {
     target: GuardTarget,
@@ -227,9 +227,43 @@ impl Drop for DaemonGuard {
             GuardTarget::Disarmed => None,
         };
         if let Some(pid) = pid.filter(|&p| p > 1) {
-            signal(pid, rustix::process::Signal::KILL);
+            terminate(pid);
         }
     }
+}
+
+const TERMINATE_GRACE: Duration = Duration::from_secs(5);
+
+/// SIGTERM, then SIGKILL after a grace period. A clean exit lets coverage runs flush
+/// the child's profile data, which SIGKILL would lose.
+pub fn terminate(pid: u32) {
+    signal(pid, rustix::process::Signal::TERM);
+    let deadline = std::time::Instant::now() + TERMINATE_GRACE;
+    while std::time::Instant::now() < deadline {
+        if !process_exists(pid) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    signal(pid, rustix::process::Signal::KILL);
+}
+
+fn process_exists(pid: u32) -> bool {
+    let Some(raw) = i32::try_from(pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return false;
+    };
+    // An exited child we haven't reaped yet is a zombie that still answers `kill(0)`.
+    // NOWAIT leaves the reaping to whoever owns the `Child`.
+    let opts = rustix::process::WaitIdOptions::EXITED
+        | rustix::process::WaitIdOptions::NOHANG
+        | rustix::process::WaitIdOptions::NOWAIT;
+    if let Ok(Some(_)) = rustix::process::waitid(rustix::process::WaitId::Pid(raw), opts) {
+        return false;
+    }
+    rustix::process::test_kill_process(raw).is_ok()
 }
 
 pub fn signal(pid: u32, sig: rustix::process::Signal) {
@@ -775,6 +809,14 @@ impl ProxyClient {
             let _ = tokio::time::timeout(Duration::from_secs(5), drain).await;
         }
         Some(status)
+    }
+}
+
+impl Drop for ProxyClient {
+    fn drop(&mut self) {
+        if let Some(pid) = self.child.id() {
+            terminate(pid);
+        }
     }
 }
 

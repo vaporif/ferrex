@@ -86,3 +86,69 @@ async fn audit_fix_keeps_vectors_of_invalidated_memories() {
 
     assert!(report.fixed.is_empty(), "deleted: {:?}", report.fixed);
 }
+
+fn pending(kind: PendingOpKind, memory_id: &str, ns: &str, qdrant_written: bool) -> PendingOp {
+    PendingOp {
+        op_id: uuid::Uuid::now_v7().to_string(),
+        kind,
+        memory_id: memory_id.to_owned(),
+        namespace: ns.to_owned(),
+        target_id: None,
+        qdrant_written,
+        started_at: Utc::now(),
+    }
+}
+
+#[tokio::test]
+async fn recovery_compensates_store_after_qdrant_write() {
+    let ctx = common::TestContext::with_file_db().await;
+    let stored = ctx
+        .service
+        .store(episodic("half-written store to roll back"))
+        .await
+        .unwrap();
+    let sqlite = SqliteStore::open(&ctx.config.db_path).unwrap();
+    sqlite
+        .insert_pending_op(&pending(
+            PendingOpKind::Store,
+            &stored.id,
+            &ctx.namespace,
+            true,
+        ))
+        .await
+        .unwrap();
+
+    let _reopened = ctx.reopen().await;
+
+    assert!(sqlite.get_memory(&stored.id).await.unwrap().is_none());
+    assert!(sqlite.list_pending_ops().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn recovery_rolls_forward_forget_and_clears_the_rest() {
+    let ctx = common::TestContext::with_file_db().await;
+    let forgotten = ctx
+        .service
+        .store(episodic("a memory the crash interrupted forgetting"))
+        .await
+        .unwrap();
+    let kept = ctx
+        .service
+        .store(episodic("a memory whose op never reached qdrant"))
+        .await
+        .unwrap();
+    let sqlite = SqliteStore::open(&ctx.config.db_path).unwrap();
+    for op in [
+        pending(PendingOpKind::Forget, &forgotten.id, &ctx.namespace, true),
+        pending(PendingOpKind::Supersede, &kept.id, &ctx.namespace, false),
+        pending(PendingOpKind::Store, "not-a-uuid", &ctx.namespace, true),
+    ] {
+        sqlite.insert_pending_op(&op).await.unwrap();
+    }
+
+    let _reopened = ctx.reopen().await;
+
+    assert!(sqlite.get_memory(&forgotten.id).await.unwrap().is_none());
+    assert!(sqlite.get_memory(&kept.id).await.unwrap().is_some());
+    assert!(sqlite.list_pending_ops().await.unwrap().is_empty());
+}

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use ferrex_core::{RecallRequest, StoreRequest};
 use ferrex_store::MemoryType;
+use pretty_assertions::assert_eq;
 
 fn golden_memories() -> Vec<(&'static str, StoreRequest)> {
     vec![

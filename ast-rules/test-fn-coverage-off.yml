@@ -1,0 +1,27 @@
+id: test-fn-coverage-off
+language: rust
+severity: error
+message: Test functions must live in a module excluded from coverage.
+note: Put the test in a `#[cfg(test)]` module marked `#[cfg_attr(coverage_nightly, coverage(off))]`.
+files:
+  - crates/**/src/**/*.rs
+rule:
+  kind: function_item
+  follows:
+    any:
+      - pattern: "#[test]"
+      - pattern: "#[tokio::test]"
+      - pattern: "#[tokio::test($$$)]"
+    stopBy: &attrs
+      not:
+        any:
+          - kind: attribute_item
+          - kind: line_comment
+          - kind: block_comment
+  not:
+    inside:
+      kind: mod_item
+      stopBy: end
+      follows:
+        pattern: "#[cfg_attr(coverage_nightly, coverage(off))]"
+        stopBy: *attrs

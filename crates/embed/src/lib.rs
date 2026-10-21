@@ -259,6 +259,8 @@ impl Reranker {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use assert_matches::assert_matches;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn model_lock_recovers_after_a_panicking_holder() {
@@ -282,26 +284,46 @@ mod tests {
 
         let embedding = embedder.embed("hello world").await.expect("embed failed");
         assert_eq!(embedding.len(), 384);
+        assert_matches!(embedder.tier(), ModelTier::Small);
+
+        let batch = embedder
+            .embed_batch(&["first", "second"])
+            .await
+            .expect("embed_batch failed");
+        assert_eq!(batch.len(), 2);
+        assert!(batch.iter().all(|v| v.len() == 384));
+    }
+
+    #[test]
+    fn model_tiers_map_to_models_and_dimensions() {
+        let tiers = [ModelTier::Small, ModelTier::Mid, ModelTier::Best];
+        let names: Vec<_> = tiers.iter().map(|t| t.model_name()).collect();
+        assert_eq!(
+            names,
+            ["all-MiniLM-L6-v2", "bge-small-en-v1.5", "bge-base-en-v1.5"]
+        );
+        let dims: Vec<_> = tiers.iter().map(|t| t.dimension()).collect();
+        assert_eq!(dims, [384, 384, 768]);
+        assert_matches!(ModelTier::Mid.to_fastembed(), EmbeddingModel::BGESmallENV15);
+        assert_matches!(ModelTier::Best.to_fastembed(), EmbeddingModel::BGEBaseENV15);
+        assert_matches!(ModelTier::default(), ModelTier::Best);
     }
 
     #[tokio::test]
     async fn test_model_tier_parse() {
-        assert!(matches!("small".parse::<ModelTier>(), Ok(ModelTier::Small)));
-        assert!(matches!("mid".parse::<ModelTier>(), Ok(ModelTier::Mid)));
-        assert!(matches!("best".parse::<ModelTier>(), Ok(ModelTier::Best)));
+        assert_matches!("small".parse::<ModelTier>(), Ok(ModelTier::Small));
+        assert_matches!("mid".parse::<ModelTier>(), Ok(ModelTier::Mid));
+        assert_matches!("best".parse::<ModelTier>(), Ok(ModelTier::Best));
         assert!("unknown".parse::<ModelTier>().is_err());
     }
 
     #[test]
     fn test_reranker_tier_parse() {
-        assert!(matches!(
-            "default".parse::<RerankerTier>(),
-            Ok(RerankerTier::Default)
-        ));
-        assert!(matches!(
+        assert_matches!("default".parse::<RerankerTier>(), Ok(RerankerTier::Default));
+        assert_matches!(
             "multilingual".parse::<RerankerTier>(),
             Ok(RerankerTier::Multilingual)
-        ));
+        );
         assert!("unknown".parse::<RerankerTier>().is_err());
     }
 

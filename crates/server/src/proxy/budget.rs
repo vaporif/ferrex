@@ -106,6 +106,7 @@ impl Drop for Parked<'_> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     /// Takes the whole budget and parks a pump behind it.
     async fn parked_pump(

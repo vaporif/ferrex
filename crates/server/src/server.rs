@@ -325,3 +325,66 @@ impl ServerHandler for FerrexServer {
         .with_server_info(Implementation::new("ferrex", env!("CARGO_PKG_VERSION")))
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use pretty_assertions::assert_eq;
+    use rmcp::model::ErrorCode;
+
+    use super::*;
+
+    #[test]
+    fn parse_memory_types_accepts_known_and_rejects_unknown() {
+        assert_eq!(parse_memory_types(None).unwrap(), None);
+        assert_eq!(
+            parse_memory_types(Some(vec!["episodic".into(), "semantic".into()])).unwrap(),
+            Some(vec![
+                ferrex_core::MemoryType::Episodic,
+                ferrex_core::MemoryType::Semantic
+            ])
+        );
+        let err = parse_memory_types(Some(vec!["bogus".into()])).unwrap_err();
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn parse_datetime_names_the_field() {
+        assert!(parse_datetime("2026-01-01T00:00:00Z", "start").is_ok());
+        let err = parse_datetime("yesterday", "as_of datetime").unwrap_err();
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+        assert!(err.message.starts_with("invalid as_of datetime"), "{err:?}");
+    }
+
+    #[test]
+    fn map_error_tags_conflicts_with_codes() {
+        let dup = map_error(CoreError::Duplicate {
+            existing_id: "a".into(),
+            similarity: 0.97,
+        });
+        assert_eq!(dup.code, ErrorCode::INVALID_PARAMS);
+        assert_eq!(dup.data.unwrap()["code"], "duplicate");
+
+        let ambiguous = map_error(CoreError::ConflictAmbiguous {
+            existing_id: "b".into(),
+            ratio: 0.7,
+        });
+        assert_eq!(ambiguous.data.unwrap()["code"], "conflict_ambiguous");
+
+        let multi = map_error(CoreError::MultiMatchConflict {
+            existing_ids: vec!["c".into(), "d".into()],
+        });
+        let data = multi.data.unwrap();
+        assert_eq!(data["code"], "multi_match_conflict");
+        assert_eq!(data["existing_ids"], serde_json::json!(["c", "d"]));
+
+        let invalid = map_error(CoreError::Validation("bad".into()));
+        assert_eq!(invalid.code, ErrorCode::INVALID_PARAMS);
+        assert_eq!(invalid.message, "bad");
+
+        let internal = map_error(CoreError::Store(ferrex_store::StoreError::Qdrant(
+            "down".into(),
+        )));
+        assert_eq!(internal.code, ErrorCode::INTERNAL_ERROR);
+    }
+}

@@ -25,6 +25,7 @@ pub fn run(ctx: &mut StoreContext<'_>) -> Result<(), CoreError> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
     use std::collections::HashMap;
 
     use crate::predicate::PredicateNormalizer;

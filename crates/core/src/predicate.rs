@@ -81,6 +81,7 @@ impl PredicateNormalizer {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     fn sample_groups() -> HashMap<String, Vec<String>> {
         let mut m = HashMap::new();

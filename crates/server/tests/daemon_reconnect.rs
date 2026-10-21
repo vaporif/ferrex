@@ -10,6 +10,7 @@ use common::{
     CmdOpts, DaemonGuard, FakeBehaviour, FakeConn, FakeDaemon, PathsJson, ProxyClient, TestEnv,
     ferrex_bin, initialize_params, read_pid_file, request_line, signal,
 };
+use pretty_assertions::{assert_eq, assert_ne};
 
 const RESTART_CODE: i64 = -32603;
 const RESTART_MESSAGE: &str = "ferrex daemon restarted, retry";
@@ -468,7 +469,7 @@ async fn lazy_guard_kills_the_pid_file_daemon() {
         .unwrap();
     assert_eq!(
         std::os::unix::process::ExitStatusExt::signal(&status),
-        Some(9)
+        Some(15)
     );
 }
 

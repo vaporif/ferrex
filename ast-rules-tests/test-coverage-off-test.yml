@@ -1,0 +1,40 @@
+id: test-coverage-off
+valid:
+  - |
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    mod tests {}
+  - |
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[cfg(test)]
+    mod tests;
+  - |
+    #[cfg(test)]
+    // helper
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn helper() {}
+  - |
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl Foo { fn bar() {} }
+  - |
+    mod not_test {}
+invalid:
+  - |
+    #[cfg(test)]
+    mod tests {}
+  - |
+    #[cfg(test)]
+    mod tests;
+  - |
+    #[cfg(test)]
+    #[allow(dead_code)]
+    fn helper() {}
+  - |
+    #[cfg(test)]
+    impl Foo { fn bar() {} }
+  - |
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn other() {}
+    #[cfg(test)]
+    fn helper() {}

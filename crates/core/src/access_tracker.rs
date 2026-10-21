@@ -44,6 +44,7 @@ fn dedup_drain(buf: &mut Vec<String>) -> Vec<String> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn drain_deduplicates() {

@@ -121,6 +121,7 @@ const fn detect_memory_type(req: &StoreRequest) -> MemoryType {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn test_auto_detect_semantic() {

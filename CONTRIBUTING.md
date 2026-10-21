@@ -57,8 +57,16 @@ just coverage     # Generate lcov coverage report
 just coverage-html # Generate HTML coverage report
 just check-typos  # Spell check
 just lint-toml    # TOML lint
+just lint-ast     # ast-grep rules and their tests
 ```
 
+### Tests and coverage
+
+Use `pretty_assertions::assert_eq` and `assert_matches::assert_matches` in tests.
+
+Coverage runs on nightly so test code can be excluded with `coverage(off)`. Every `#[cfg(test)]` item under `crates/*/src` needs `#[cfg_attr(coverage_nightly, coverage(off))]` next to it. The ast-grep rules in `ast-rules/` enforce this in `just lint-ast` and `nix flake check`.
+
+`just coverage` runs every test, including the ignored ones that need a `qdrant` binary and the ONNX models. The nightly toolchain and qdrant come from `nix develop .#coverage`.
 
 ### Formatting
 

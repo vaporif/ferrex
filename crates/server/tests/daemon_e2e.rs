@@ -12,6 +12,7 @@ use common::{
     CmdOpts, DaemonGuard, FakeBehaviour, FakeConn, FakeDaemon, PathsJson, ProxyClient, TestEnv,
     read_pid_file, signal,
 };
+use pretty_assertions::assert_eq;
 
 const PID_FILE_WITHIN: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(50);

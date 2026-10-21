@@ -1,6 +1,7 @@
 mod common;
 
 use ferrex_core::{RecallRequest, StatsRequest};
+use pretty_assertions::assert_eq;
 
 #[tokio::test]
 async fn diagnostics_returns_nonzero_after_operations() {

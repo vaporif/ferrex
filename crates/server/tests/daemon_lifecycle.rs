@@ -17,6 +17,7 @@ use common::{
     CmdOpts, DaemonGuard, PathsJson, TestEnv, raw_session, read_pid_file, sigterm, wait_exit,
     wait_for_path,
 };
+use pretty_assertions::assert_eq;
 
 const COLD_HELLO: Duration = Duration::from_secs(60);
 const BIND_WITHIN: Duration = Duration::from_secs(10);
@@ -24,10 +25,11 @@ const BIND_WITHIN: Duration = Duration::from_secs(10);
 const SHUTDOWN_LOCK_WAIT: Duration = Duration::from_secs(10);
 const SHUTDOWN_SLACK: Duration = Duration::from_secs(8);
 
+// `guard` comes first so it stops the daemon before `child` drops and SIGKILLs it.
 struct Daemon {
+    guard: DaemonGuard,
     child: Child,
     paths: PathsJson,
-    guard: DaemonGuard,
 }
 
 impl Daemon {
@@ -37,9 +39,9 @@ impl Daemon {
         let guard = DaemonGuard::for_child(&child);
         wait_for_path(&paths.pid_file, BIND_WITHIN).await;
         Self {
+            guard,
             child,
             paths,
-            guard,
         }
     }
 

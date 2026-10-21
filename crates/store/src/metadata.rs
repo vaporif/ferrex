@@ -63,36 +63,25 @@ pub trait MetadataStore: Send + Sync {
         limit: i64,
     ) -> impl Future<Output = Result<Vec<Memory>, StoreError>> + Send;
 
-    fn delete_memory(&self, _id: &str) -> impl Future<Output = Result<bool, StoreError>> + Send {
-        async { Ok(false) }
-    }
     fn delete_memories(
         &self,
-        _ids: &[String],
-    ) -> impl Future<Output = Result<u64, StoreError>> + Send {
-        async { Ok(0) }
-    }
+        ids: &[String],
+    ) -> impl Future<Output = Result<u64, StoreError>> + Send;
     fn get_memories_by_subject_predicate(
         &self,
-        _subject: &str,
-        _predicate: &str,
-    ) -> impl Future<Output = Result<Vec<Memory>, StoreError>> + Send {
-        async { Ok(vec![]) }
-    }
+        subject: &str,
+        predicate: &str,
+    ) -> impl Future<Output = Result<Vec<Memory>, StoreError>> + Send;
     fn invalidate_memory(
         &self,
-        _id: &str,
-        _t_invalid: DateTime<Utc>,
-    ) -> impl Future<Output = Result<(), StoreError>> + Send {
-        async { Ok(()) }
-    }
+        id: &str,
+        t_invalid: DateTime<Utc>,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
 
     fn list_all_memory_ids(
         &self,
-        _namespace: &str,
-    ) -> impl Future<Output = Result<Vec<String>, StoreError>> + Send {
-        async { Ok(vec![]) }
-    }
+        namespace: &str,
+    ) -> impl Future<Output = Result<Vec<String>, StoreError>> + Send;
     /// Every memory row, invalidated ones included: all of them keep a vector.
     fn list_vectored_memory_ids(
         &self,
@@ -100,148 +89,101 @@ pub trait MetadataStore: Send + Sync {
     ) -> impl Future<Output = Result<Vec<String>, StoreError>> + Send;
     fn semantic_rows_missing_normalized_predicate(
         &self,
-        _namespace: Option<&str>,
-    ) -> impl Future<Output = Result<Vec<Memory>, StoreError>> + Send {
-        async { Ok(vec![]) }
-    }
+        namespace: Option<&str>,
+    ) -> impl Future<Output = Result<Vec<Memory>, StoreError>> + Send;
     fn set_normalized_predicate(
         &self,
-        _id: &str,
-        _normalized: &str,
-    ) -> impl Future<Output = Result<(), StoreError>> + Send {
-        async { Ok(()) }
-    }
+        id: &str,
+        normalized: &str,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
 
     fn get_stale_candidates(
         &self,
-        _namespace: &str,
-        _accessed_before: DateTime<Utc>,
-    ) -> impl Future<Output = Result<Vec<Memory>, StoreError>> + Send {
-        async { Ok(vec![]) }
-    }
+        namespace: &str,
+        accessed_before: DateTime<Utc>,
+    ) -> impl Future<Output = Result<Vec<Memory>, StoreError>> + Send;
     fn get_unvalidated_memories(
         &self,
-        _namespace: &str,
-    ) -> impl Future<Output = Result<Vec<Memory>, StoreError>> + Send {
-        async { Ok(vec![]) }
-    }
+        namespace: &str,
+    ) -> impl Future<Output = Result<Vec<Memory>, StoreError>> + Send;
     fn get_low_access_memories(
         &self,
-        _namespace: &str,
-        _max_count: i64,
-    ) -> impl Future<Output = Result<Vec<Memory>, StoreError>> + Send {
-        async { Ok(vec![]) }
-    }
+        namespace: &str,
+        max_count: i64,
+    ) -> impl Future<Output = Result<Vec<Memory>, StoreError>> + Send;
     fn update_last_validated(
         &self,
-        _ids: &[String],
-        _now: DateTime<Utc>,
-    ) -> impl Future<Output = Result<(), StoreError>> + Send {
-        async { Ok(()) }
-    }
+        ids: &[String],
+        now: DateTime<Utc>,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
     /// Counts of live memories by type. Rows with unrecognized `memory_type`
     /// are logged and dropped, so the sum can lag the raw row count after a
     /// schema change.
     fn memory_count_by_type(
         &self,
-        _namespace: &str,
-    ) -> impl Future<Output = Result<HashMap<MemoryType, u64>, StoreError>> + Send {
-        async { Ok(HashMap::new()) }
-    }
-    fn storage_size_bytes(&self) -> impl Future<Output = Result<u64, StoreError>> + Send {
-        async { Ok(0) }
-    }
-    fn entity_count(
-        &self,
-        _namespace: &str,
-    ) -> impl Future<Output = Result<u64, StoreError>> + Send {
-        async { Ok(0) }
-    }
+        namespace: &str,
+    ) -> impl Future<Output = Result<HashMap<MemoryType, u64>, StoreError>> + Send;
+    fn storage_size_bytes(&self) -> impl Future<Output = Result<u64, StoreError>> + Send;
+    fn entity_count(&self, namespace: &str)
+    -> impl Future<Output = Result<u64, StoreError>> + Send;
 
     /// Memories linked to `entity_id`, newest first by
     /// `COALESCE(t_valid, created_at)`. Type filter runs in SQL before `LIMIT`.
     fn timeline_by_entity(
         &self,
-        _entity_id: &str,
-        _namespace: &str,
-        _limit: i64,
-        _include_invalidated: bool,
-        _types: Option<&[MemoryType]>,
-    ) -> impl Future<Output = Result<Vec<Memory>, StoreError>> + Send {
-        async { Ok(vec![]) }
-    }
+        entity_id: &str,
+        namespace: &str,
+        limit: i64,
+        include_invalidated: bool,
+        types: Option<&[MemoryType]>,
+    ) -> impl Future<Output = Result<Vec<Memory>, StoreError>> + Send;
 
     fn top_entities(
         &self,
-        _namespace: &str,
-        _limit: i64,
-    ) -> impl Future<Output = Result<Vec<(String, u64)>, StoreError>> + Send {
-        async { Ok(vec![]) }
-    }
+        namespace: &str,
+        limit: i64,
+    ) -> impl Future<Output = Result<Vec<(String, u64)>, StoreError>> + Send;
 
     fn top_predicates(
         &self,
-        _namespace: &str,
-        _limit: i64,
-    ) -> impl Future<Output = Result<Vec<(String, u64)>, StoreError>> + Send {
-        async { Ok(vec![]) }
-    }
+        namespace: &str,
+        limit: i64,
+    ) -> impl Future<Output = Result<Vec<(String, u64)>, StoreError>> + Send;
 
-    fn list_namespaces(&self) -> impl Future<Output = Result<Vec<String>, StoreError>> + Send {
-        async { Ok(vec![]) }
-    }
+    fn list_namespaces(&self) -> impl Future<Output = Result<Vec<String>, StoreError>> + Send;
 
     fn insert_pending_op(
         &self,
-        _op: &PendingOp,
-    ) -> impl Future<Output = Result<(), StoreError>> + Send {
-        async { Ok(()) }
-    }
+        op: &PendingOp,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
     fn mark_pending_op_qdrant_written(
         &self,
-        _op_id: &str,
-    ) -> impl Future<Output = Result<(), StoreError>> + Send {
-        async { Ok(()) }
-    }
-    fn clear_pending_op(
-        &self,
-        _op_id: &str,
-    ) -> impl Future<Output = Result<(), StoreError>> + Send {
-        async { Ok(()) }
-    }
-    fn list_pending_ops(&self) -> impl Future<Output = Result<Vec<PendingOp>, StoreError>> + Send {
-        async { Ok(vec![]) }
-    }
+        op_id: &str,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+    fn clear_pending_op(&self, op_id: &str) -> impl Future<Output = Result<(), StoreError>> + Send;
+    fn list_pending_ops(&self) -> impl Future<Output = Result<Vec<PendingOp>, StoreError>> + Send;
     fn count_pending_ops_older_than(
         &self,
-        _age: std::time::Duration,
-    ) -> impl Future<Output = Result<u64, StoreError>> + Send {
-        async { Ok(0) }
-    }
+        age: std::time::Duration,
+    ) -> impl Future<Output = Result<u64, StoreError>> + Send;
 
     fn complete_op(
         &self,
-        _op: &crate::journal::CompletedOp,
-    ) -> impl Future<Output = Result<(), StoreError>> + Send {
-        async { Ok(()) }
-    }
+        op: &crate::journal::CompletedOp,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
 
     fn list_completed_ops(
         &self,
-        _status: Option<&str>,
-        _limit: usize,
-        _since: Option<DateTime<Utc>>,
-    ) -> impl Future<Output = Result<Vec<crate::journal::CompletedOp>, StoreError>> + Send {
-        async { Ok(vec![]) }
-    }
+        status: Option<&str>,
+        limit: usize,
+        since: Option<DateTime<Utc>>,
+    ) -> impl Future<Output = Result<Vec<crate::journal::CompletedOp>, StoreError>> + Send;
 
     fn prune_completed_ops(
         &self,
-        _max_count: usize,
-        _max_age: chrono::Duration,
-    ) -> impl Future<Output = Result<u64, StoreError>> + Send {
-        async { Ok(0) }
-    }
+        max_count: usize,
+        max_age: chrono::Duration,
+    ) -> impl Future<Output = Result<u64, StoreError>> + Send;
     fn is_op_completed(&self, op_id: &str)
     -> impl Future<Output = Result<bool, StoreError>> + Send;
     /// Inserts `memory`, links its entities, invalidates `invalidate_ids` and
@@ -1561,6 +1503,7 @@ pub fn is_memory_path(path: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::MemoryType;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn is_memory_path_detects_both_forms() {

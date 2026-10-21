@@ -1,0 +1,33 @@
+id: test-fn-coverage-off
+valid:
+  - |
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    mod tests {
+        #[test]
+        fn works() {}
+        #[tokio::test(flavor = "multi_thread")]
+        async fn works_async() {}
+        mod nested {
+            #[test]
+            fn deep() {}
+        }
+    }
+  - |
+    fn not_a_test() {}
+invalid:
+  - |
+    #[test]
+    fn loose() {}
+  - |
+    #[cfg(test)]
+    mod tests {
+        #[tokio::test]
+        async fn uncovered() {}
+    }
+  - |
+    #[cfg(test)]
+    mod tests {
+        #[tokio::test(start_paused = true)]
+        async fn uncovered() {}
+    }

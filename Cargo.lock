@@ -162,6 +162,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "assert_matches"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b34d609dfbaf33d6889b2b7106d3ca345eacad44200913df5ba02bfd31d2ba9"
+
+[[package]]
 name = "async-trait"
 version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -801,6 +807,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "diff"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56254986775e3233ffa9c4d7d3faaf6d36a2c09d30b20687e9f88bc8bafc16c8"
+
+[[package]]
 name = "digest"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -994,11 +1006,13 @@ dependencies = [
 name = "ferrex-core"
 version = "0.2.0"
 dependencies = [
+ "assert_matches",
  "chrono",
  "ferrex-embed",
  "ferrex-store",
  "lru",
  "portpicker",
+ "pretty_assertions",
  "qdrant-client",
  "rusqlite",
  "rustc-hash",
@@ -1018,8 +1032,10 @@ dependencies = [
 name = "ferrex-embed"
 version = "0.2.0"
 dependencies = [
+ "assert_matches",
  "dirs",
  "fastembed",
+ "pretty_assertions",
  "serde",
  "thiserror",
  "tokio",
@@ -1030,6 +1046,7 @@ dependencies = [
 name = "ferrex-server"
 version = "0.2.0"
 dependencies = [
+ "assert_matches",
  "chrono",
  "clap",
  "color-eyre",
@@ -1038,6 +1055,7 @@ dependencies = [
  "ferrex-core",
  "ferrex-store",
  "portpicker",
+ "pretty_assertions",
  "rmcp",
  "rustix",
  "schemars",
@@ -1056,12 +1074,14 @@ dependencies = [
 name = "ferrex-store"
 version = "0.2.0"
 dependencies = [
+ "assert_matches",
  "chrono",
  "deadpool",
  "deadpool-sync",
  "dirs",
  "libc",
  "portpicker",
+ "pretty_assertions",
  "qdrant-client",
  "rusqlite",
  "rustix",
@@ -2357,6 +2377,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pretty_assertions"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ae130e2f271fbc2ac3a40fb1d07180839cdbbe443c7a27e1e3c13c5cac0116d"
+dependencies = [
+ "diff",
+ "yansi",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3365,7 +3395,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -4259,6 +4289,12 @@ name = "y4m"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a5a4b21e1a62b67a2970e6831bc091d7b87e119e7f9791aef9702e3bef04448"
+
+[[package]]
+name = "yansi"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfe53a6657fd280eaa890a3bc59152892ffa3e30101319d168b781ed6529b049"
 
 [[package]]
 name = "yoke"

@@ -202,6 +202,7 @@ pub fn build_config(cli: Cli) -> eyre::Result<FerrexConfig> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     fn config_for(args: &[&str]) -> eyre::Result<FerrexConfig> {
         let mut argv = vec!["ferrex"];

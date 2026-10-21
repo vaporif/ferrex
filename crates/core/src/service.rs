@@ -56,6 +56,18 @@ impl MemoryService {
         config: FerrexConfig,
         policy: SidecarPolicy,
     ) -> Result<Self, CoreError> {
+        let service = Self::open(config, policy).await?;
+        service.recover_and_prune().await?;
+        Ok(service)
+    }
+
+    /// Opens without startup recovery or journal pruning. For read-only commands that may
+    /// run beside a live daemon, whose in-flight ops recovery would wrongly roll back.
+    pub async fn inspect(config: FerrexConfig) -> Result<Self, CoreError> {
+        Self::open(config, SidecarPolicy::LeaveRunning).await
+    }
+
+    async fn open(config: FerrexConfig, policy: SidecarPolicy) -> Result<Self, CoreError> {
         if let Some(parent) = config.db_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
                 CoreError::Validation(format!("failed to create db directory: {e}"))
@@ -137,7 +149,7 @@ impl MemoryService {
             })
         };
 
-        let service = Self {
+        Ok(Self {
             embedder,
             reranker,
             metadata_store,
@@ -151,9 +163,11 @@ impl MemoryService {
             flush_handle: std::sync::Mutex::new(Some(flush_handle)),
             cache,
             ops_buffer: OpsBuffer::new(),
-        };
+        })
+    }
 
-        let report = service.recover_on_startup().await?;
+    async fn recover_and_prune(&self) -> Result<(), CoreError> {
+        let report = self.recover_on_startup().await?;
         let pending_ops =
             report.compensated_stores + report.rolled_forward_forgets + report.cleared_pre_qdrant;
         if pending_ops > 0 {
@@ -171,15 +185,14 @@ impl MemoryService {
             "startup recovery complete"
         );
 
-        let pruned = service
+        let pruned = self
             .metadata_store
             .prune_completed_ops(1000, chrono::Duration::days(7))
             .await?;
         if pruned > 0 {
             tracing::info!(pruned, "pruned old completed_ops entries");
         }
-
-        Ok(service)
+        Ok(())
     }
 
     async fn recover_on_startup(&self) -> Result<RecoveryReport, CoreError> {
