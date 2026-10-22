@@ -1,10 +1,6 @@
 default:
     @just --list
 
-# Setup git hooks
-setup:
-    lefthook install --reset-hooks-path
-
 check: clippy test check-fmt lint
 
 lint: lint-toml check-typos check-nix-fmt lint-actions lint-ast

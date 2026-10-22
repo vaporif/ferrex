@@ -32,11 +32,7 @@ You'll also need these tools (provided automatically by the Nix dev shell):
 
 ## Setup
 
-After cloning, install git hooks with [lefthook](https://github.com/evilmartians/lefthook) (included in the dev shell):
-
-```bash
-just setup
-```
+Git hooks are managed by [lefthook](https://github.com/evilmartians/lefthook) and installed automatically when you enter the dev shell (`nix develop` or direnv).
 
 Hooks are defined in `lefthook.yml`:
 - **pre-commit** - runs `just check-fmt` to check formatting
