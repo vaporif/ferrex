@@ -6,6 +6,9 @@ mod journal;
 mod metadata;
 mod schema;
 mod sidecar;
+#[cfg(any(test, feature = "testing"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub mod testing;
 mod vector;
 
 pub use error::StoreError;

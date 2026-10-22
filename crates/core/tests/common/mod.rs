@@ -51,7 +51,7 @@ impl TestContext {
     ) -> Self {
         let base_dir = temp_dir.path().to_path_buf();
 
-        let port = qdrant_port();
+        let port = ferrex_store::testing::free_port();
 
         let sidecar =
             QdrantSidecar::start("qdrant", port, Some(base_dir), SidecarPolicy::KillOnDrop)
@@ -143,15 +143,5 @@ pub fn recall_query(query: &str) -> RecallRequest {
         as_of: None,
         validate_ids: None,
         explain: false,
-    }
-}
-
-/// A free gRPC port whose HTTP neighbour (`port - 1`, used by the sidecar) is free too.
-pub fn qdrant_port() -> u16 {
-    loop {
-        let port = portpicker::pick_unused_port().expect("no free port");
-        if port > 2 && portpicker::is_free(port - 1) {
-            return port;
-        }
     }
 }

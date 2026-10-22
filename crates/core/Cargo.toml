@@ -24,8 +24,8 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+ferrex-store = { workspace = true, features = ["testing"] }
 assert_matches = { workspace = true }
-portpicker = { workspace = true }
 pretty_assertions = { workspace = true }
 rusqlite = { workspace = true }
 tempfile = { workspace = true }

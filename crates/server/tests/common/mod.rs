@@ -93,7 +93,7 @@ impl TestEnv {
             run_dir: root.join("run"),
             db_path: root.join("ferrex.db"),
             config_path: root.join("ferrex.toml"),
-            qdrant_port: qdrant_port(),
+            qdrant_port: ferrex_store::testing::free_port(),
             root,
             temp,
             _sidecar: None,
@@ -816,16 +816,6 @@ impl Drop for ProxyClient {
     fn drop(&mut self) {
         if let Some(pid) = self.child.id() {
             terminate(pid);
-        }
-    }
-}
-
-/// A free gRPC port whose HTTP neighbour (`port - 1`, used by the sidecar) is free too.
-pub fn qdrant_port() -> u16 {
-    loop {
-        let port = portpicker::pick_unused_port().expect("no free port");
-        if port > 2 && portpicker::is_free(port - 1) {
-            return port;
         }
     }
 }

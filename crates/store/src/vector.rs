@@ -596,7 +596,7 @@ mod tests {
 
     async fn sidecar() -> (crate::QdrantSidecar, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let port = crate::sidecar::tests::free_port();
+        let port = crate::testing::free_port();
         let sidecar = crate::QdrantSidecar::start(
             "qdrant",
             port,
