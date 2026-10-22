@@ -157,6 +157,7 @@ pub fn threshold_for_type(config: &StalenessConfig, memory_type: MemoryType) -> 
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use chrono::Duration;
+    use pretty_assertions::assert_eq;
 
     use super::*;
 

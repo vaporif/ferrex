@@ -9,6 +9,7 @@ rule:
   any:
     - kind: mod_item
     - kind: function_item
+    - kind: impl_item
   follows:
     pattern: "#[cfg(test)]"
     stopBy: &attrs

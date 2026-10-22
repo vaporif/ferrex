@@ -11,6 +11,7 @@ chrono = { workspace = true }
 deadpool = { workspace = true }
 deadpool-sync = { workspace = true }
 dirs = { workspace = true }
+portpicker = { workspace = true, optional = true }
 qdrant-client = { workspace = true }
 rusqlite = { workspace = true }
 rustix = { workspace = true }
@@ -21,11 +22,16 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
+[features]
+testing = ["dep:portpicker"]
+
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = { workspace = true }
 
 [dev-dependencies]
+assert_matches = { workspace = true }
 portpicker = { workspace = true }
+pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 

@@ -1,9 +1,33 @@
+output:
+  - summary
+  - failure
+
 pre-commit:
   jobs:
-    - name: check-fmt
-      run: just check-fmt
+    - name: fmt
+      glob: "*.rs"
+      run: rustfmt --edition 2024 --check {staged_files}
 
 pre-push:
+  parallel: true
   jobs:
-    - name: check
-      run: just check
+    - name: clippy
+      glob: ["*.rs", "Cargo.*"]
+      run: just clippy
+    - name: test
+      glob: ["*.rs", "Cargo.*"]
+      run: just test
+    - name: typos
+      run: just check-typos
+    - name: toml
+      glob: "*.toml"
+      run: just lint-toml
+    - name: nix-fmt
+      glob: "flake.nix"
+      run: just check-nix-fmt
+    - name: actions
+      glob: ".github/workflows/*"
+      run: just lint-actions
+    - name: ast-grep
+      glob: ["*.rs", "ast-rules/*", "ast-rules-tests/*", "sgconfig.yml"]
+      run: just lint-ast

@@ -1,4 +1,5 @@
 use ferrex_core::{FreshnessLabel, ReflectRequest, StatsRequest};
+use pretty_assertions::assert_eq;
 
 mod common;
 use common::{episodic, recall_query, semantic};

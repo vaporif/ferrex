@@ -1,16 +1,15 @@
 # ferrex
 
 [![CI](https://github.com/vaporif/ferrex/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/vaporif/ferrex/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/vaporif/ferrex/branch/main/graph/badge.svg)](https://codecov.io/gh/vaporif/ferrex)
 
-Local-first MCP memory server for AI agents. One Rust binary, a Qdrant sidecar, no cloud accounts.
+Local-first MCP memory server for AI agents. It is one Rust binary plus a Qdrant sidecar, with no cloud accounts.
 
-Five MCP tools -- `store`, `recall`, `forget`, `reflect`, `stats` -- give agents persistent memory across conversations. Memories are typed (episodic events, semantic facts, procedural workflows), entities get resolved even when agents name them inconsistently, and facts carry temporal validity so stale stuff ages out instead of silently misleading.
+Agents get persistent memory across conversations. Memories are typed, entities resolve even when agents spell them differently, and facts carry a validity window so old facts age out.
 
 ## Usage
 
 Add to `~/.claude/settings.json`:
-
-**With [uvx](https://docs.astral.sh/uv/):**
 
 ```json
 {
@@ -23,40 +22,51 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-**With ferrex on PATH** (via [Nix](#nix), cargo install, or [release binary](https://github.com/vaporif/ferrex/releases)):
-
-```json
-{
-  "mcpServers": {
-    "ferrex": {
-      "command": "ferrex"
-    }
-  }
-}
-```
+If `ferrex` is on your PATH, use `"command": "ferrex"` and drop `args`.
 
 <details>
-<summary>Other installation methods</summary>
+<summary>Other ways to install</summary>
 
-**Direct binary:**
-
-Download from [GitHub Releases](https://github.com/vaporif/ferrex/releases).
-
-**Nix:**
-
-```bash
-nix run github:vaporif/ferrex
-```
-
-**From source:**
-
-```bash
-cargo install --path crates/server
-```
+- Binary: [GitHub Releases](https://github.com/vaporif/ferrex/releases)
+- Nix: `nix run github:vaporif/ferrex`
+- From source: `cargo install --path crates/server`
 
 </details>
 
-## Architecture
+## MCP tools
+
+| Tool | What it does |
+|------|--------------|
+| `store` | Save a memory. The type is detected from the fields, or you can set it. |
+| `recall` | Hybrid search (dense + BM25) with reranking, recency boost and staleness scores. |
+| `forget` | Delete memories by ID. |
+| `reflect` | Find stale memories and contradicting facts. |
+| `stats` | Counts, staleness distribution and diagnostics. |
+
+Each tool's parameters are described in its MCP schema.
+
+## Memory types
+
+| Type | Shape | Example | Half-life |
+|------|-------|---------|-----------|
+| Episodic | Free text | "Fixed a deadlock by switching to `tokio::sync::Semaphore`" | 30 days |
+| Semantic | Subject, predicate, object | `api-server / uses / tokio 1.38` | 180 days |
+| Procedural | Free text | A deployment checklist | 365 days |
+
+When a new fact replaces an old one, the old fact is marked invalid instead of deleted, so the history stays.
+
+## Shared daemon
+
+The first session for a database starts a `ferrex` daemon. Later sessions connect to it through a small stdio proxy, so models and the database load once.
+
+- The daemon exits after `FERREX_IDLE_TIMEOUT` seconds without sessions (default 600).
+- Its log is `~/.ferrex/run/ferrexd.log`. `FERREX_RUN_DIR` moves the run directory.
+- `--no-daemon`, `FERREX_NO_DAEMON=1` or a `:memory:` database serve MCP in-process.
+- The Qdrant sidecar keeps running after the last session. `ferrex nuke` stops it, but only after it confirms the recorded PID is qdrant.
+- `audit reconcile --fix`, `backfill` and `nuke` refuse to run while a daemon uses the database.
+
+<details>
+<summary>Architecture</summary>
 
 ```mermaid
 flowchart TD
@@ -87,177 +97,67 @@ flowchart TD
     Stale --> SQLite
 ```
 
-Four crates:
-
-| Crate | What it does |
+| Crate | Role |
 |-------|------|
-| `ferrex-server` | Thin MCP shell. Deserializes tool calls, delegates to core, serializes responses. |
-| `ferrex-core` | The pipeline. Validation, embedding, dedup, conflict resolution, entity resolution, staleness scoring, reranking. |
-| `ferrex-embed` | Local ONNX inference via fastembed. Embedding and reranking models. |
-| `ferrex-store` | Dual write to SQLite (metadata) and Qdrant (vectors). Transaction journal for crash recovery. |
+| `ferrex-server` | MCP shell, CLI and shared daemon. |
+| `ferrex-core` | The pipeline: validation, dedup, conflicts, entities, staleness, reranking. |
+| `ferrex-embed` | Local ONNX embedding and reranking through fastembed. |
+| `ferrex-store` | SQLite for metadata, Qdrant for vectors, and a journal for crash recovery. |
 
-## MCP tools
+Entity resolution normalizes a name, then tries known aliases, Jaro-Winkler (> 0.85) and embedding similarity (cosine > 0.92) in that order. A match is saved as an alias. No match creates a new entity.
 
-### `store`
+Predicates map to synonym groups, so "uses", "requires" and "imports" all become `depends_on`. Groups are set per namespace in `ferrex.toml`.
 
-Save a memory. Type auto-detects from fields (subject+predicate+object = semantic, content = episodic), or set it yourself.
+A new triple with the same subject and predicate as an existing one is compared by object. Similarity >= 0.95 is a duplicate and is rejected. Below 0.50 it replaces the old fact. Between those, pass `supersedes` yourself.
 
-Pipeline: validate → normalize predicate → embed → dedup check → conflict resolution → entity resolution → dual write → journal
+Episodic and procedural memories with cosine >= 0.95 to an existing memory in the namespace are rejected as duplicates.
 
-| Parameter | |
-|-----------|-------------|
-| `content` | Free text (episodic/procedural) |
-| `subject`, `predicate`, `object` | Triple (semantic) |
-| `memory_type` | `episodic`, `semantic`, or `procedural` (auto-detected if omitted) |
-| `confidence` | 0.0--1.0 (default 1.0) |
-| `entities` | Entity names to link (resolved through the pipeline) |
-| `namespace` | Isolation boundary (default "default") |
-| `supersedes` | Memory ID to invalidate (bypasses dedup) |
-| `source`, `context` | Optional metadata |
-
-### `recall`
-
-Semantic search with hybrid retrieval and reranking.
-
-Pipeline: embed query → hybrid search (dense + BM25 sparse, RRF fusion) → rerank (BGE cross-encoder) → recency boost → staleness scoring → filter and return
-
-| Parameter | |
-|-----------|-------------|
-| `query` | Natural language search |
-| `types` | Filter by memory type |
-| `entities` | Filter by linked entities |
-| `namespace` | Scope the search |
-| `limit` | Max results (default 10, max 200) |
-| `time_range` | `{start, end}` in ISO-8601 |
-| `include_stale` | Return stale memories too (default false) |
-| `include_invalidated` | Return superseded memories too (default false) |
-| `validate_ids` | Mark these IDs as validated (updates `last_validated`) |
-
-### `forget`
-
-Delete memories by ID from both stores.
-
-| Parameter | |
-|-----------|-------------|
-| `ids` | Memory IDs to delete |
-
-### `reflect`
-
-Audit memory health. Finds stale memories and contradicting semantic facts.
-
-| Parameter | |
-|-----------|-------------|
-| `namespace` | Scope |
-| `limit` | Max items to scan (default 20) |
-| `include_contradictions` | Find conflicting triples (default true) |
-| `include_stale` | Find aging memories (default true) |
-
-### `stats`
-
-Memory system overview.
-
-| Parameter | |
-|-----------|-------------|
-| `namespace` | Scope |
-| `detailed` | Per-type counts, staleness distribution, entity count |
-
-## Memory types
-
-| Type | Structure | Example | Staleness half-life |
-|------|-----------|---------|-------------------|
-| Episodic | Free text | "User debugged a deadlock by switching to tokio::sync::Semaphore" | 30 days |
-| Semantic | Subject-predicate-object triple | "api-server / uses / tokio 1.38" | 180 days |
-| Procedural | Free text | Step-by-step deployment workflow | 365 days |
-
-Semantic memories have `t_valid`/`t_invalid` timestamps. When a new fact supersedes an old one, the old memory gets invalidated rather than deleted, so you keep the history.
-
-## How things work
-
-### Entity resolution
-
-Agents are bad at consistent naming ("tokio" vs "Tokio" vs "tokio runtime"). ferrex resolves entities in stages:
-
-1. Normalize (lowercase, trim, collapse separators)
-2. Exact match against the aliases table
-3. Fuzzy match -- Jaro-Winkler > 0.85, matched name stored as alias
-4. Embedding match -- cosine > 0.92, stored as alias
-5. Nothing matched -- new entity created
-
-### Predicate normalization
-
-Free-form predicates get mapped to canonical groups. "uses", "depends-on", "requires", and "imports" all resolve to `depends_on`. Groups are configurable per namespace in `ferrex.toml`.
-
-### Conflict resolution (semantic)
-
-When you store a triple with the same subject and normalized predicate as something already in the system:
-
-- Object similarity >= 0.95: duplicate, rejected
-- Object similarity < 0.50: update, old memory invalidated
-- 0.50--0.95: ambiguous, you need to pass `supersedes` explicitly
-
-### Deduplication (episodic/procedural)
-
-New memories get embedded and compared against existing ones in the same namespace. Cosine similarity >= 0.95 (configurable) triggers rejection.
-
-### Staleness scoring
-
-Recalled memories get a staleness score between 0.0 (fresh) and 1.0 (stale):
+Each recalled memory gets a staleness score from 0.0 (fresh) to 1.0 (stale). Decay is exponential with a half-life per type, and results are labeled fresh, aging or stale.
 
 ```
 score = 0.40 * age_decay + 0.25 * access_decay + 0.25 * validation_decay + 0.10 * count_freshness
 ```
 
-Decay is exponential with half-lives tuned per memory type. Results come back labeled fresh, aging, or stale based on configurable thresholds.
+Recall runs dense and BM25 searches, merges them with reciprocal rank fusion and reranks with a BGE cross-encoder. Episodic memories get the strongest recency boost. Procedural memories get none.
 
-### Hybrid retrieval and reranking
-
-Recall runs both dense (cosine) and sparse (BM25) searches in Qdrant, fuses them with reciprocal rank fusion, then reranks the top candidates using a BGE cross-encoder. Recency boosts are type-specific: episodic memories get a stronger recent-is-better signal than semantic ones, procedural gets none.
-
-### Shared daemon
-
-The first session for a given database and config spawns one `ferrex` daemon. Later sessions reuse it, and each Claude session runs a thin stdio proxy that connects to it. The daemon loads the models and opens the database once, so extra sessions cost almost nothing.
-
-- The daemon exits after `FERREX_IDLE_TIMEOUT` seconds with no sessions (default 600).
-- Its log is `~/.ferrex/run/ferrexd.log`. Set `FERREX_RUN_DIR` to move the run directory.
-- `--no-daemon` or `FERREX_NO_DAEMON=1` serves MCP in the process itself, as before. A `:memory:` database does the same.
-- The Qdrant sidecar keeps running after the last session ends. `ferrex nuke` stops it, but only when the recorded PID is confirmed to be a qdrant process; otherwise it fails without deleting anything, naming the PID and `qdrant.pid`, so you can stop that process or remove the file and retry.
-- `ferrex audit reconcile --fix` and `ferrex backfill` (without `--dry-run`) refuse to run while a daemon is using the database. `ferrex nuke` on the default path (`~/.ferrex`) refuses while any daemon is running; with a custom `--db-path` it refuses only while a daemon uses that database. Close your sessions or wait for the daemon to go idle.
+</details>
 
 ## Configuration
 
-CLI flags, environment variables, or `~/.ferrex/ferrex.toml`.
+Use CLI flags, environment variables or `~/.ferrex/ferrex.toml`.
+
+<details>
+<summary>Flags and environment variables</summary>
 
 | Flag | Env var | Default | |
 |------|---------|---------|-------------|
-| `--qdrant-url` | `FERREX_QDRANT_URL` | -- | Remote Qdrant endpoint (skip sidecar) |
-| `--qdrant-bin` | `FERREX_QDRANT_BIN` | qdrant | Path to qdrant binary for sidecar |
+| `--qdrant-url` | `FERREX_QDRANT_URL` | | Remote Qdrant endpoint (skips the sidecar) |
+| `--qdrant-bin` | `FERREX_QDRANT_BIN` | qdrant | qdrant binary for the sidecar |
 | `--qdrant-port` | `FERREX_QDRANT_PORT` | 6334 | Sidecar gRPC port |
 | `--model-tier` | `FERREX_MODEL_TIER` | best | `small` / `mid` / `best` |
 | `--reranker-tier` | `FERREX_RERANKER_TIER` | default | `default` / `multilingual` |
 | `--namespace` | `FERREX_NAMESPACE` | default | Default namespace |
 | `--db-path` | `FERREX_DB_PATH` | ~/.ferrex/ferrex.db | SQLite path |
 | `--config-path` | `FERREX_CONFIG_PATH` | ~/.ferrex/ferrex.toml | Config file |
-| `--no-daemon` | `FERREX_NO_DAEMON` | off | Serve in-process instead of through the shared daemon |
-| -- | `FERREX_IDLE_TIMEOUT` | 600 | Seconds before an idle daemon exits |
-| -- | `FERREX_INIT_TIMEOUT` | 1800 | Seconds a daemon may spend starting up |
-| -- | `FERREX_RUN_DIR` | ~/.ferrex/run | Daemon sockets, PID files and `ferrexd.log` |
-| -- | `FERREX_LOG` | info | Log filter (`tracing` env-filter syntax, e.g. `ferrex_core=debug`) |
-| -- | `FERREX_LOG_FILE` | -- | Write logs to this file instead of stderr |
-| -- | `FERREX_LOG_FORMAT` | text | `json` for structured logs |
+| `--no-daemon` | `FERREX_NO_DAEMON` | off | Serve in-process |
+| | `FERREX_IDLE_TIMEOUT` | 600 | Seconds before an idle daemon exits |
+| | `FERREX_INIT_TIMEOUT` | 1800 | Seconds a daemon may spend starting |
+| | `FERREX_RUN_DIR` | ~/.ferrex/run | Sockets, PID files and `ferrexd.log` |
+| | `FERREX_LOG` | info | `tracing` env-filter, e.g. `ferrex_core=debug` |
+| | `FERREX_LOG_FILE` | | Log to this file instead of stderr |
+| | `FERREX_LOG_FORMAT` | text | `json` for structured logs |
 
-### Embedding models
-
-| Tier | Model | Dimensions |
-|------|-------|-----------|
+| Model tier | Model | Dimensions |
+|------------|-------|-----------|
 | small | all-MiniLM-L6-v2 | 384 |
 | mid | bge-small-en-v1.5 | 384 |
 | best | bge-base-en-v1.5 | 768 |
 
-### TOML config
+</details>
 
-Thresholds, predicate synonym groups, staleness weights, cache sizes -- all configurable in `ferrex.toml`, which is written on first run from [`crates/server/config/ferrex.toml`](crates/server/config/ferrex.toml). That file lists every supported key; unknown keys and invalid values (a zero cache capacity, a non-positive half-life) are rejected at startup.
+Thresholds, predicate groups, staleness weights and cache sizes live in `ferrex.toml`. The first run writes it from [`crates/server/config/ferrex.toml`](crates/server/config/ferrex.toml), which lists every key. Unknown keys and invalid values fail at startup.
 
-## CLI commands
+## CLI
 
 ```
 ferrex                              # start MCP server (default)
@@ -270,11 +170,11 @@ ferrex nuke [--force]               # delete all data; stops the qdrant sidecar 
 
 ## Design docs
 
-- [Main design doc](docs/design/ferrex-rag-memory.md) -- architecture, memory types, MCP tool API, retrieval pipeline
-- [Design decisions](docs/design/design-decisions.md) -- 24 numbered decisions with rationale
-- [References](docs/design/references.md) -- papers, benchmarks, prior art
-- [Roadmap](docs/design/roadmap.md) -- phased implementation plan
-- [Future improvements](docs/design/future-improvements.md) -- v2 features, deferred until there's measurement data
+- [Design doc](docs/design/ferrex-rag-memory.md): architecture, memory types, tool API, retrieval
+- [Design decisions](docs/design/design-decisions.md)
+- [References](docs/design/references.md)
+- [Roadmap](docs/design/roadmap.md)
+- [Future improvements](docs/design/future-improvements.md)
 
 ## License
 

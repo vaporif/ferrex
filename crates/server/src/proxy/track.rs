@@ -257,6 +257,7 @@ impl Tracker {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use pretty_assertions::assert_eq;
     use serde_json::{Value, json};
 
     use super::*;

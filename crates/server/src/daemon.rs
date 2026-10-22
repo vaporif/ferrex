@@ -71,6 +71,9 @@ fn exit_skipping_atexit(code: i32) -> ! {
 
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
+    // `_exit` skips the atexit hook that writes coverage data, so write it here.
+    #[cfg(coverage)]
+    let _ = posix::write_coverage_profile();
     posix::exit_immediately(code)
 }
 
@@ -80,6 +83,12 @@ mod posix {
     unsafe extern "C" {
         #[link_name = "_exit"]
         pub safe fn exit_immediately(status: std::ffi::c_int) -> !;
+
+        // SAFETY: the LLVM profiler runtime linked into `-C instrument-coverage` builds defines
+        // it with this signature; it only writes the profile file.
+        #[cfg(coverage)]
+        #[link_name = "__llvm_profile_write_file"]
+        pub safe fn write_coverage_profile() -> std::ffi::c_int;
     }
 }
 

@@ -9,6 +9,7 @@ use common::{
     CmdOpts, FakeBehaviour, FakeConn, FakeDaemon, ProxyClient, TestEnv, initialize_params,
     request_line,
 };
+use pretty_assertions::assert_eq;
 
 const EXIT_WITHIN: Duration = Duration::from_secs(15);
 

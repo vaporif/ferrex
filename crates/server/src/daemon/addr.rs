@@ -259,7 +259,8 @@ fn live_daemons(run_dir: &Path) -> impl Iterator<Item = PidFile> {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub(super) mod tests {
+pub mod tests {
+    use pretty_assertions::{assert_eq, assert_ne};
     use std::fs::{self, File};
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
@@ -274,7 +275,7 @@ pub(super) mod tests {
 
     type Mutation = fn(&mut FerrexConfig);
 
-    pub(in crate::daemon) fn base_config() -> FerrexConfig {
+    pub fn base_config() -> FerrexConfig {
         FerrexConfig {
             qdrant_url: None,
             qdrant_bin: "qdrant".into(),

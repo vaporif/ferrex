@@ -175,3 +175,186 @@ pub fn build_entity_alias_map(entities: &[ferrex_store::Entity]) -> HashMap<Stri
     }
     map
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use assert_matches::assert_matches;
+    use chrono::Utc;
+    use ferrex_store::{Entity, MemoryType};
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    fn triple(id: &str, subject: &str, predicate: &str, object: &str) -> Memory {
+        let now = Utc::now();
+        Memory {
+            id: id.into(),
+            namespace: "ns".into(),
+            memory_type: MemoryType::Semantic,
+            content: None,
+            subject: Some(subject.into()),
+            predicate: Some(predicate.into()),
+            object: Some(object.into()),
+            confidence: 1.0,
+            source: None,
+            context: None,
+            entities: vec![],
+            created_at: now,
+            updated_at: now,
+            t_valid: None,
+            t_invalid: None,
+            last_accessed: now,
+            last_validated: None,
+            access_count: 0,
+            normalized_predicate: None,
+        }
+    }
+
+    fn entity(name: &str, aliases: &[&str]) -> Entity {
+        let now = Utc::now();
+        Entity {
+            id: name.into(),
+            name: name.into(),
+            aliases: aliases.iter().map(|a| (*a).to_string()).collect(),
+            entity_type: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn ids(pair: &ContradictionPair) -> (&str, &str) {
+        (pair.a.id.as_str(), pair.b.id.as_str())
+    }
+
+    #[test]
+    fn exact_predicate_with_different_objects() {
+        let mems = [
+            triple("1", "API", "uses", "tokio"),
+            triple("2", "api", "USES", "async-std"),
+        ];
+        let found = detect_contradictions(&mems, &HashMap::new());
+        assert_eq!(found.len(), 1);
+        assert_matches!(found[0].match_type, ContradictionMatchType::ExactPredicate);
+        assert!((found[0].similarity - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn same_object_is_not_a_contradiction() {
+        let mems = [
+            triple("1", "api", "uses", "tokio"),
+            triple("2", "api", "uses", "tokio"),
+        ];
+        assert!(detect_contradictions(&mems, &HashMap::new()).is_empty());
+    }
+
+    #[test]
+    fn normalized_predicate_groups_memories() {
+        let mut a = triple("1", "api", "depends on", "tokio");
+        a.normalized_predicate = Some("uses".into());
+        let mut b = triple("2", "api", "relies on", "smol");
+        b.normalized_predicate = Some("uses".into());
+        let found = detect_contradictions(&[a, b], &HashMap::new());
+        assert_eq!(found.len(), 1);
+        assert_matches!(found[0].match_type, ContradictionMatchType::ExactPredicate);
+    }
+
+    #[test]
+    fn fuzzy_predicate_match() {
+        let mems = [
+            triple("1", "api", "deployed_on", "aws"),
+            triple("2", "api", "deployed_to", "gcp"),
+        ];
+        let found = detect_contradictions(&mems, &HashMap::new());
+        assert_eq!(found.len(), 1);
+        assert_matches!(found[0].match_type, ContradictionMatchType::FuzzyPredicate);
+        assert!(found[0].similarity > REFLECT_FUZZY_PREDICATE_THRESHOLD);
+    }
+
+    #[test]
+    fn dissimilar_predicates_are_ignored() {
+        let mems = [
+            triple("1", "api", "uses", "tokio"),
+            triple("2", "api", "owned_by", "team-x"),
+        ];
+        assert!(detect_contradictions(&mems, &HashMap::new()).is_empty());
+    }
+
+    #[test]
+    fn memories_without_subject_or_predicate_are_skipped() {
+        let mut no_subject = triple("1", "api", "uses", "tokio");
+        no_subject.subject = None;
+        let mut no_predicate = triple("2", "api", "uses", "smol");
+        no_predicate.predicate = None;
+        let other = triple("3", "api", "uses", "async-std");
+        let found = detect_contradictions(&[no_subject, no_predicate, other], &HashMap::new());
+        assert!(
+            found
+                .iter()
+                .all(|p| ids(p) != ("1", "3") && ids(p) != ("3", "1"))
+        );
+    }
+
+    #[test]
+    fn already_matched_pairs_are_not_reported_twice() {
+        let mems = [
+            triple("1", "api", "uses", "tokio"),
+            triple("2", "api", "uses", "smol"),
+        ];
+        // The exact pass matches them; the fuzzy pass must not re-report.
+        assert_eq!(detect_contradictions(&mems, &HashMap::new()).len(), 1);
+    }
+
+    #[test]
+    fn alias_subjects_contradict() {
+        let mems = [
+            triple("1", "postgres", "version", "15"),
+            triple("2", "pg", "version", "16"),
+        ];
+        let aliases = build_entity_alias_map(&[entity("Postgres", &["PG"])]);
+        let found = detect_contradictions(&mems, &aliases);
+        assert_eq!(found.len(), 2, "reported from both alias directions");
+        assert!(
+            found
+                .iter()
+                .all(|p| matches!(p.match_type, ContradictionMatchType::SimilarSubject))
+        );
+    }
+
+    #[test]
+    fn alias_subjects_with_different_predicate_or_same_object_are_ignored() {
+        let mems = [
+            triple("1", "postgres", "version", "15"),
+            triple("2", "pg", "port", "5432"),
+            triple("3", "pg", "version", "15"),
+        ];
+        let aliases = build_entity_alias_map(&[entity("postgres", &["pg"])]);
+        assert!(detect_contradictions(&mems, &aliases).is_empty());
+    }
+
+    #[test]
+    fn alias_pass_skips_already_matched_memories() {
+        let mems = [
+            triple("1", "postgres", "version", "15"),
+            triple("2", "postgres", "version", "16"),
+            triple("3", "pg", "version", "17"),
+        ];
+        let aliases = build_entity_alias_map(&[entity("postgres", &["pg"])]);
+        let found = detect_contradictions(&mems, &aliases);
+        assert_eq!(found.len(), 1);
+        assert_matches!(found[0].match_type, ContradictionMatchType::ExactPredicate);
+    }
+
+    #[test]
+    fn alias_map_links_every_name_to_the_others() {
+        let map = build_entity_alias_map(&[entity("Postgres", &["PG", "psql", "pg"])]);
+        assert_eq!(map["postgres"], vec!["pg", "psql"]);
+        assert_eq!(map["pg"], vec!["postgres", "psql"]);
+        assert_eq!(map["psql"], vec!["pg", "postgres"]);
+    }
+
+    #[test]
+    fn alias_map_empty_for_no_entities() {
+        assert!(build_entity_alias_map(&[]).is_empty());
+    }
+}

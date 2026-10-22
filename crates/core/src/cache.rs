@@ -184,6 +184,7 @@ impl RecallCache {
 mod tests {
     use super::*;
     use crate::types::CacheConfig;
+    use pretty_assertions::assert_eq;
 
     fn make_cache() -> RecallCache {
         RecallCache::new(&CacheConfig {

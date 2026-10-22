@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 
+use assert_matches::assert_matches;
 use ferrex_core::{
     CoreError, ForgetRequest, PredicatesConfig, RecallRequest, StatsRequest, StoreRequest,
     TaxonomyRequest, TimelineRequest,
 };
 use ferrex_store::MemoryType;
+use pretty_assertions::{assert_eq, assert_ne};
 
 mod common;
 use common::{episodic, recall_query, semantic};
@@ -195,10 +197,7 @@ async fn validation_rejects_episodic_without_content() {
         namespace: None,
         supersedes: None,
     };
-    assert!(matches!(
-        svc.store(req).await,
-        Err(CoreError::Validation(_))
-    ));
+    assert_matches!(svc.store(req).await, Err(CoreError::Validation(_)));
 }
 
 #[tokio::test]
@@ -218,10 +217,7 @@ async fn validation_rejects_semantic_missing_object() {
         namespace: None,
         supersedes: None,
     };
-    assert!(matches!(
-        svc.store(req).await,
-        Err(CoreError::Validation(_))
-    ));
+    assert_matches!(svc.store(req).await, Err(CoreError::Validation(_)));
 }
 
 #[tokio::test]
@@ -322,10 +318,7 @@ async fn supersedes_nonexistent_target_fails() {
     let fake_id = uuid::Uuid::now_v7().to_string();
     let mut req = semantic("api", "uses", "tokio 1.40");
     req.supersedes = Some(fake_id);
-    assert!(matches!(
-        svc.store(req).await,
-        Err(CoreError::Validation(_))
-    ));
+    assert_matches!(svc.store(req).await, Err(CoreError::Validation(_)));
 }
 
 #[tokio::test]

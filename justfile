@@ -1,10 +1,6 @@
 default:
     @just --list
 
-# Setup git hooks
-setup:
-    lefthook install --reset-hooks-path
-
 check: clippy test check-fmt lint
 
 lint: lint-toml check-typos check-nix-fmt lint-actions lint-ast
@@ -26,10 +22,10 @@ test:
 
 # Nightly so `coverage(off)` excludes test code from the report
 coverage:
-    nix develop .#coverage --command cargo llvm-cov nextest --workspace --lcov --output-path lcov.info
+    nix develop .#coverage --command cargo llvm-cov nextest --workspace --profile coverage --run-ignored all --lcov --output-path lcov.info
 
 coverage-html:
-    nix develop .#coverage --command cargo llvm-cov nextest --workspace --html
+    nix develop .#coverage --command cargo llvm-cov nextest --workspace --profile coverage --run-ignored all --html
 
 check-fmt:
     cargo fmt --all -- --check
@@ -56,6 +52,7 @@ lint-actions:
     actionlint
 
 lint-ast:
+    ast-grep test --skip-snapshot-tests
     ast-grep scan
 
 e2e:

@@ -72,3 +72,49 @@ pub struct RecoveryReport {
     pub rolled_forward_forgets: u64,
     pub cleared_pre_qdrant: u64,
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use pretty_assertions::assert_eq;
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn recent_returns_newest_first() {
+        let buf = OpsBuffer::new();
+        buf.record("store", "a", Duration::from_millis(3), "ok");
+        buf.record("recall", "b", Duration::from_millis(7), "err");
+        let ops = buf.recent(10);
+        assert_eq!(ops.len(), 2);
+        assert_eq!(ops[0].kind, "recall");
+        assert_eq!(ops[0].duration_ms, 7);
+        assert_eq!(ops[0].outcome, "err");
+        assert_eq!(ops[1].detail, "a");
+        assert_eq!(buf.recent(1).len(), 1);
+    }
+
+    #[test]
+    fn evicts_oldest_at_capacity() {
+        let buf = OpsBuffer::new();
+        for i in 0..=OPS_BUFFER_CAPACITY {
+            buf.record("store", &i.to_string(), Duration::ZERO, "ok");
+        }
+        let ops = buf.recent(usize::MAX);
+        assert_eq!(ops.len(), OPS_BUFFER_CAPACITY);
+        assert_eq!(ops[0].detail, OPS_BUFFER_CAPACITY.to_string());
+        assert_eq!(ops.last().unwrap().detail, "1");
+    }
+
+    #[test]
+    fn truncates_detail_on_char_boundary() {
+        let buf = OpsBuffer::new();
+        let detail = "é".repeat(OpsBuffer::MAX_DETAIL_LEN);
+        buf.record("store", &detail, Duration::ZERO, "ok");
+        let stored = &buf.recent(1)[0].detail;
+        assert!(stored.len() <= OpsBuffer::MAX_DETAIL_LEN);
+        assert_eq!(stored.len(), OpsBuffer::MAX_DETAIL_LEN);
+        assert!(stored.chars().all(|c| c == 'é'));
+    }
+}

@@ -1,10 +1,13 @@
 use std::process::Stdio;
 
 use ferrex_store::{QdrantSidecar, SidecarPolicy};
+use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::time::{Duration, timeout};
+
+mod common;
 
 struct McpTestHarness {
     child: Child,
@@ -19,13 +22,7 @@ impl McpTestHarness {
     async fn new_raw() -> Self {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let base_dir = temp_dir.path().to_path_buf();
-        // The sidecar also binds `port - 1` for HTTP.
-        let port = loop {
-            let p = portpicker::pick_unused_port().expect("no free port");
-            if p > 2 && portpicker::is_free(p - 1) {
-                break p;
-            }
-        };
+        let port = ferrex_store::testing::free_port();
 
         let sidecar =
             QdrantSidecar::start("qdrant", port, Some(base_dir), SidecarPolicy::KillOnDrop)
@@ -143,13 +140,18 @@ impl McpTestHarness {
     }
 
     async fn shutdown(&mut self) {
-        let _ = self.child.kill().await;
+        if let Some(pid) = self.child.id() {
+            common::terminate(pid);
+        }
+        let _ = self.child.wait().await;
     }
 }
 
 impl Drop for McpTestHarness {
     fn drop(&mut self) {
-        let _ = self.child.start_kill();
+        if let Some(pid) = self.child.id() {
+            common::terminate(pid);
+        }
     }
 }
 

@@ -226,6 +226,7 @@ async fn resolve_entities_stages_1_2<M: MetadataStore>(
 mod tests {
     use super::*;
     use ferrex_store::SqliteStore;
+    use pretty_assertions::assert_eq;
 
     #[tokio::test]
     async fn test_resolve_exact_match() {

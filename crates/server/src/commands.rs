@@ -11,7 +11,7 @@ use crate::admin_guard;
 pub fn diagnose(config: FerrexConfig) -> eyre::Result<()> {
     runtime()?.block_on(async move {
         let namespace = config.namespace.clone();
-        let service = MemoryService::from_config(config).await?;
+        let service = MemoryService::inspect(config).await?;
         let report = service.diagnostics(&namespace).await?;
 
         println!("ferrex v{} | {}", report.version, report.embedding_model);
@@ -103,7 +103,7 @@ pub fn journal_show(
     format: String,
 ) -> eyre::Result<()> {
     runtime()?.block_on(async move {
-        let service = MemoryService::from_config(config).await?;
+        let service = MemoryService::inspect(config).await?;
 
         let since_dt = since.as_deref().map(parse_since).transpose()?;
 

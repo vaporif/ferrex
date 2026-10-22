@@ -448,6 +448,7 @@ where
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use pretty_assertions::assert_eq;
     use std::cell::Cell;
     use std::ffi::OsStr;
     use std::io;

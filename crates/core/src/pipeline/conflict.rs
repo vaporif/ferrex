@@ -4,6 +4,7 @@ use crate::error::CoreError;
 use crate::pipeline::StoreContext;
 use crate::types::ConflictConfig;
 
+#[derive(Debug)]
 pub enum Classification {
     NoConflict,
     Duplicate(String, f32),
@@ -90,6 +91,7 @@ pub async fn run(ctx: &mut StoreContext<'_>, metadata: &SqliteStore) -> Result<(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use assert_matches::assert_matches;
     use chrono::Utc;
 
     fn mem(id: &str, object: &str) -> Memory {
@@ -119,7 +121,7 @@ mod tests {
     #[test]
     fn test_classify_no_conflict() {
         let c = ConflictConfig::default();
-        assert!(matches!(classify("x", &[], &c), Classification::NoConflict));
+        assert_matches!(classify("x", &[], &c), Classification::NoConflict);
     }
 
     #[test]
@@ -138,21 +140,21 @@ mod tests {
     fn test_classify_duplicate_case_insensitive() {
         let c = ConflictConfig::default();
         let outcome = classify("  Tokio 1.38 ", &[mem("e-1", "tokio 1.38")], &c);
-        assert!(matches!(outcome, Classification::Duplicate(_, _)));
+        assert_matches!(outcome, Classification::Duplicate(_, _));
     }
 
     #[test]
     fn test_classify_update_far() {
         let c = ConflictConfig::default();
         let outcome = classify("postgres", &[mem("e-1", "tokio 1.38")], &c);
-        assert!(matches!(outcome, Classification::Update(_)));
+        assert_matches!(outcome, Classification::Update(_));
     }
 
     #[test]
     fn test_classify_ambiguous() {
         let c = ConflictConfig::default();
         let outcome = classify("tokio 1.38 with patches", &[mem("e-1", "tokio 1.38")], &c);
-        assert!(matches!(outcome, Classification::Ambiguous { .. }));
+        assert_matches!(outcome, Classification::Ambiguous { .. });
     }
 
     #[test]
@@ -160,6 +162,6 @@ mod tests {
         let c = ConflictConfig::default();
         let existing = vec![mem("e-1", "foo"), mem("e-2", "bar")];
         let outcome = classify("baz", &existing, &c);
-        assert!(matches!(outcome, Classification::MultiMatch(ref ids) if ids.len() == 2));
+        assert_matches!(outcome, Classification::MultiMatch(ref ids) if ids.len() == 2);
     }
 }

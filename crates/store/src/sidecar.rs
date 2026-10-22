@@ -16,6 +16,7 @@ const HEALTH_CHECK_CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
 const HEALTH_CHECK_INITIAL_DELAY: Duration = Duration::from_millis(200);
 const HEALTH_CHECK_MAX_TIMEOUT: Duration = Duration::from_secs(30);
 const HEALTH_CHECK_MAX_DELAY: Duration = Duration::from_secs(2);
+const PORT_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 const MIN_PORT: u16 = 2;
 const COMM_MATCH_LEN: usize = 15;
 const PID_FILE: &str = "qdrant.pid";
@@ -161,6 +162,14 @@ async fn spawn(ctx: &StartCtx, lock: SidecarLock) -> Result<Started, StoreError>
     if port < MIN_PORT {
         return Err(StoreError::Sidecar(format!(
             "port must be >= {MIN_PORT} (got {port}), http_port is port - 1"
+        )));
+    }
+
+    // Our health check can't tell another server's answer from our child's, so a child that
+    // dies slowly would otherwise pass it.
+    if port_in_use(port).await {
+        return Err(StoreError::Sidecar(format!(
+            "port {port} is already in use by another process"
         )));
     }
 
@@ -441,6 +450,17 @@ async fn probe_qdrant(port: u16) -> bool {
     }
 }
 
+async fn port_in_use(port: u16) -> bool {
+    matches!(
+        tokio::time::timeout(
+            PORT_PROBE_TIMEOUT,
+            tokio::net::TcpStream::connect(("localhost", port))
+        )
+        .await,
+        Ok(Ok(_))
+    )
+}
+
 fn ensure_running(child: Option<&mut Child>) -> Result<(), StoreError> {
     match child.map(Child::try_wait) {
         Some(Ok(Some(status))) => Err(StoreError::Sidecar(format!(
@@ -660,6 +680,7 @@ fn matches_qdrant_name(comm: &str, qdrant_bin: &str) -> bool {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub mod tests {
+    use pretty_assertions::{assert_eq, assert_ne};
     use std::fs::File;
     use std::os::unix::fs::OpenOptionsExt;
     use std::sync::Arc;
@@ -670,38 +691,7 @@ pub mod tests {
     use rustix::process::{Pid, Signal};
 
     use super::*;
-
-    // Nextest runs each test in its own process, so claim ports via marker files
-    // to keep concurrent qdrant tests off each other's gRPC/HTTP pair.
-    fn claim(port: u16) -> bool {
-        let dir = std::env::temp_dir().join("ferrex-test-ports");
-        let _ = fs::create_dir_all(&dir);
-        let marker = dir.join(port.to_string());
-        let stale = fs::metadata(&marker)
-            .and_then(|m| m.modified())
-            .is_ok_and(|m| m.elapsed().is_ok_and(|e| e > Duration::from_secs(600)));
-        if stale {
-            let _ = fs::remove_file(&marker);
-        }
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(marker)
-            .is_ok()
-    }
-
-    pub fn free_port() -> u16 {
-        loop {
-            if let Some(p) = portpicker::pick_unused_port()
-                && p >= MIN_PORT
-                && portpicker::is_free(p - 1)
-                && claim(p)
-                && claim(p - 1)
-            {
-                return p;
-            }
-        }
-    }
+    use crate::testing::free_port;
 
     fn write_script(path: &Path, body: &str) {
         let mut f = OpenOptions::new()
@@ -1050,7 +1040,7 @@ pub mod tests {
 
     #[tokio::test]
     #[ignore = "requires qdrant binary on PATH"]
-    async fn bin_exits_while_real_qdrant_answers_fails() {
+    async fn start_refuses_port_another_qdrant_holds() {
         let real = tempfile::tempdir().unwrap();
         let port = free_port();
         let _qdrant = QdrantSidecar::start(
@@ -1063,8 +1053,11 @@ pub mod tests {
         .unwrap();
         let fake = tempfile::tempdir().unwrap();
         let script = exit_script(fake.path());
-        let result = start_retrying_txtbsy(script.to_str().unwrap(), port, fake.path()).await;
-        assert!(result.is_err());
+        let err = start_retrying_txtbsy(script.to_str().unwrap(), port, fake.path())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("already in use"), "{err}");
+        assert!(!fake.path().join("child.pid").exists(), "spawned anyway");
     }
 
     #[test]

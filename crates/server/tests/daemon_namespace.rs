@@ -5,6 +5,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use common::{CmdOpts, DaemonGuard, ProxyClient, TestEnv};
+use pretty_assertions::assert_eq;
 
 const PID_FILE_WITHIN: Duration = Duration::from_secs(30);
 

@@ -64,3 +64,44 @@ impl PendingOpKind {
         }
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn kind_round_trips_through_str() {
+        for kind in [
+            PendingOpKind::Store,
+            PendingOpKind::Forget,
+            PendingOpKind::Supersede,
+        ] {
+            assert_eq!(PendingOpKind::parse(kind.as_str()), Some(kind));
+        }
+        assert_eq!(PendingOpKind::parse("bogus"), None);
+    }
+
+    #[test]
+    fn into_completed_keeps_op_and_overrides_target() {
+        let started_at = Utc::now() - chrono::Duration::milliseconds(50);
+        let op = PendingOp {
+            op_id: "op".into(),
+            kind: PendingOpKind::Forget,
+            memory_id: "old".into(),
+            namespace: "old-ns".into(),
+            target_id: None,
+            qdrant_written: true,
+            started_at,
+        };
+        let done = op.into_completed("mem".into(), "ns".into());
+        assert_eq!(done.op_id, "op");
+        assert_eq!(done.kind, PendingOpKind::Forget);
+        assert_eq!(done.memory_id, "mem");
+        assert_eq!(done.namespace, "ns");
+        assert_eq!(done.started_at, started_at);
+        assert!(done.duration_ms >= 50);
+        assert_eq!(done.outcome, "ok");
+    }
+}

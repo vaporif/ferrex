@@ -28,3 +28,28 @@ fn refuse(live_pid: Option<u32>, target: impl Display) -> eyre::Result<()> {
         ))
     })
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refuse_passes_without_live_daemon() {
+        assert!(refuse(None, "db").is_ok());
+    }
+
+    #[test]
+    fn refuse_names_pid_and_target() {
+        let err = refuse(Some(42), "/tmp/db").unwrap_err().to_string();
+        assert!(err.contains("pid 42"), "{err}");
+        assert!(err.contains("/tmp/db"), "{err}");
+    }
+
+    #[test]
+    fn in_memory_db_is_never_refused() {
+        let mut config = crate::daemon::addr::tests::base_config();
+        config.db_path = ":memory:".into();
+        assert!(refuse_if_live(&config).is_ok());
+    }
+}

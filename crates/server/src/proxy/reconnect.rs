@@ -279,6 +279,7 @@ async fn read_response(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use pretty_assertions::{assert_eq, assert_ne};
     use tokio::net::UnixStream;
     use tokio::sync::mpsc;
 

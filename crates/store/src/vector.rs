@@ -468,6 +468,7 @@ impl VectorStore {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     const TEST_DIM: usize = 384;
 
@@ -476,9 +477,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires running Qdrant"]
+    #[ignore = "requires qdrant binary on PATH"]
     async fn test_upsert_and_search() {
-        let store = VectorStore::new("http://localhost:6334", TEST_DIM).unwrap();
+        let (sidecar, _dir) = sidecar().await;
+        let store = VectorStore::new(&sidecar.url(), TEST_DIM).unwrap();
         let ns = "test_hybrid_upsert_search";
         store.ensure_collection(ns).await.unwrap();
 
@@ -512,9 +514,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires running Qdrant"]
+    #[ignore = "requires qdrant binary on PATH"]
     async fn test_delete() {
-        let store = VectorStore::new("http://localhost:6334", TEST_DIM).unwrap();
+        let (sidecar, _dir) = sidecar().await;
+        let store = VectorStore::new(&sidecar.url(), TEST_DIM).unwrap();
         let ns = "test_hybrid_delete";
         store.ensure_collection(ns).await.unwrap();
 
@@ -531,9 +534,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires running Qdrant"]
+    #[ignore = "requires qdrant binary on PATH"]
     async fn test_delete_by_ids_removes_multiple_points() {
-        let store = VectorStore::new("http://localhost:6334", TEST_DIM).unwrap();
+        let (sidecar, _dir) = sidecar().await;
+        let store = VectorStore::new(&sidecar.url(), TEST_DIM).unwrap();
         let ns = "test_delete_by_ids";
         store.ensure_collection(ns).await.unwrap();
         let ids: Vec<Uuid> = (0..3).map(|_| Uuid::now_v7()).collect();
@@ -551,9 +555,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires running Qdrant"]
+    #[ignore = "requires qdrant binary on PATH"]
     async fn test_bm25_keyword_contribution() {
-        let store = VectorStore::new("http://localhost:6334", TEST_DIM).unwrap();
+        let (sidecar, _dir) = sidecar().await;
+        let store = VectorStore::new(&sidecar.url(), TEST_DIM).unwrap();
         let ns = "test_bm25_keyword";
         let _ = store
             .client
@@ -591,7 +596,7 @@ mod tests {
 
     async fn sidecar() -> (crate::QdrantSidecar, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let port = crate::sidecar::tests::free_port();
+        let port = crate::testing::free_port();
         let sidecar = crate::QdrantSidecar::start(
             "qdrant",
             port,
@@ -691,5 +696,173 @@ mod tests {
             ra.unwrap();
             rb.unwrap();
         }
+    }
+
+    fn memory_payload(id: Uuid, ns: &str, text: &str) -> Payload {
+        Payload::try_from(serde_json::json!({
+            "memory_id": id.to_string(),
+            "memory_type": "episodic",
+            "namespace": ns,
+            "searchable_text": text,
+            crate::QdrantField::POINT_TYPE: crate::PointType::MEMORY,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn validate_namespace_rules() {
+        assert!(validate_namespace("ok_name-1").is_ok());
+        assert!(validate_namespace("").is_err());
+        let err = validate_namespace("bad name").unwrap_err();
+        assert!(err.contains("bad name"), "{err}");
+        assert!(VectorStore::collection_name("a/b").is_err());
+        assert_eq!(VectorStore::collection_name("ns").unwrap(), "ferrex_ns");
+    }
+
+    #[tokio::test]
+    async fn invalid_namespace_fails_before_any_request() {
+        let store = VectorStore::new("http://127.0.0.1:1", TEST_DIM).unwrap();
+        let id = Uuid::now_v7();
+        let bad = "no spaces";
+        assert!(store.ensure_collection(bad).await.is_err());
+        assert!(
+            store
+                .upsert(bad, id, test_vector(), "x", Payload::new())
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .search(bad, test_vector(), "x", 1, None)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .search_dense(bad, test_vector(), 1, None)
+                .await
+                .is_err()
+        );
+        assert!(store.delete(bad, id).await.is_err());
+        assert!(store.delete_by_ids(bad, &[id]).await.is_err());
+        assert!(store.scroll_memory_ids(bad).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn empty_batches_are_noops() {
+        let store = VectorStore::new("http://127.0.0.1:1", TEST_DIM).unwrap();
+        store.upsert_batch_hybrid("ns", Vec::new()).await.unwrap();
+        store.delete_by_ids("ns", &[]).await.unwrap();
+        store.upsert_batch("ferrex_ns", Vec::new()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unreachable_qdrant_reports_errors() {
+        let store = VectorStore::new("http://127.0.0.1:1", TEST_DIM).unwrap();
+        assert!(store.health_check().await.is_err());
+        assert!(store.ensure_collection("ns").await.is_err());
+        assert!(store.create_collection("c", TEST_DIM).await.is_err());
+        assert!(store.delete_collection("c").await.is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires qdrant binary on PATH"]
+    async fn hybrid_batch_payload_dense_and_scroll() {
+        let (sidecar, _dir) = sidecar().await;
+        let store = VectorStore::new(&sidecar.url(), TEST_DIM).unwrap();
+        store.health_check().await.unwrap();
+        let ns = "batch";
+        store.ensure_collection(ns).await.unwrap();
+
+        let ids: Vec<Uuid> = (0..3).map(|_| Uuid::now_v7()).collect();
+        let texts = ["alpha rust", "beta tokio", "gamma qdrant"];
+        let points = ids
+            .iter()
+            .zip(texts)
+            .map(|(id, text)| BatchPoint {
+                id: *id,
+                vector: test_vector(),
+                content_text: text,
+                payload: memory_payload(*id, ns, text),
+            })
+            .collect();
+        store.upsert_batch_hybrid(ns, points).await.unwrap();
+
+        let mut scrolled = store.scroll_memory_ids(ns).await.unwrap();
+        scrolled.sort();
+        let mut expected = ids.clone();
+        expected.sort();
+        assert_eq!(scrolled, expected);
+
+        let hits = store
+            .search_with_payload(ns, test_vector(), "tokio", 10, None)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 3);
+        assert!(
+            hits.iter()
+                .all(|h| { serde_json::to_value(&h.payload).unwrap()["memory_id"].is_string() })
+        );
+
+        let filter = Filter::must([Condition::matches(
+            crate::QdrantField::POINT_TYPE,
+            crate::PointType::MEMORY.to_string(),
+        )]);
+        let dense = store
+            .search_dense(ns, test_vector(), 2, Some(filter))
+            .await
+            .unwrap();
+        assert_eq!(dense.len(), 2);
+
+        store.delete_by_ids(ns, &ids[..2]).await.unwrap();
+        assert_eq!(store.scroll_memory_ids(ns).await.unwrap(), vec![ids[2]]);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires qdrant binary on PATH"]
+    async fn plain_collection_lifecycle() {
+        let (sidecar, _dir) = sidecar().await;
+        let store = VectorStore::new(&sidecar.url(), 4).unwrap();
+        let name = "plain";
+        store.create_collection(name, 4).await.unwrap();
+        // A second create is a no-op on an existing collection.
+        store.create_collection(name, 4).await.unwrap();
+
+        let a = Uuid::now_v7();
+        let b = Uuid::now_v7();
+        let payload = || Payload::try_from(serde_json::json!({"kind": "x"})).unwrap();
+        store
+            .upsert_batch(
+                name,
+                vec![
+                    (a, vec![1.0, 0.0, 0.0, 0.0], payload()),
+                    (b, vec![0.0, 1.0, 0.0, 0.0], payload()),
+                ],
+            )
+            .await
+            .unwrap();
+
+        let hits = store
+            .search_collection(name, vec![1.0, 0.0, 0.0, 0.0], 1, None)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, a.to_string());
+
+        let filter = Filter::must([Condition::matches("kind", "y".to_string())]);
+        let none = store
+            .search_collection(name, vec![1.0, 0.0, 0.0, 0.0], 5, Some(filter))
+            .await
+            .unwrap();
+        assert!(none.is_empty());
+
+        store.delete_collection(name).await.unwrap();
+        assert!(!store.client.collection_exists(name).await.unwrap());
+        assert!(
+            store
+                .search_collection(name, vec![1.0, 0.0, 0.0, 0.0], 1, None)
+                .await
+                .is_err()
+        );
     }
 }

@@ -76,6 +76,7 @@ pub fn run(ctx: &StoreContext<'_>) -> Result<(), CoreError> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use assert_matches::assert_matches;
     use std::collections::HashMap;
 
     use crate::predicate::PredicateNormalizer;
@@ -135,7 +136,7 @@ mod tests {
             &dedup,
             &conflict,
         );
-        assert!(matches!(run(&c), Err(CoreError::Validation(_))));
+        assert_matches!(run(&c), Err(CoreError::Validation(_)));
     }
 
     #[test]
@@ -151,7 +152,7 @@ mod tests {
             &dedup,
             &conflict,
         );
-        assert!(matches!(run(&c), Err(CoreError::Validation(_))));
+        assert_matches!(run(&c), Err(CoreError::Validation(_)));
     }
 
     #[test]
@@ -177,7 +178,7 @@ mod tests {
         let mut req = req_semantic("a", "b", "c");
         req.object = Some(String::new());
         let c = ctx(req, MemoryType::Semantic, &norm, &dedup, &conflict);
-        assert!(matches!(run(&c), Err(CoreError::Validation(_))));
+        assert_matches!(run(&c), Err(CoreError::Validation(_)));
     }
 
     #[test]
@@ -188,6 +189,43 @@ mod tests {
         let mut req = req_episodic(Some("hi"));
         req.supersedes = Some("not-a-uuid".into());
         let c = ctx(req, MemoryType::Episodic, &norm, &dedup, &conflict);
-        assert!(matches!(run(&c), Err(CoreError::Validation(_))));
+        assert_matches!(run(&c), Err(CoreError::Validation(_)));
+    }
+
+    fn validation_message(req: StoreRequest, mt: MemoryType) -> String {
+        let norm = PredicateNormalizer::new(HashMap::new());
+        let dedup = DedupConfig::default();
+        let conflict = ConflictConfig::default();
+        let c = ctx(req, mt, &norm, &dedup, &conflict);
+        match run(&c) {
+            Err(CoreError::Validation(msg)) => msg,
+            other => panic!("expected a validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn too_many_entities_fails() {
+        let mut req = req_episodic(Some("hi"));
+        req.entities = (0..=MAX_ENTITIES_PER_REQUEST)
+            .map(|i| i.to_string())
+            .collect();
+        let msg = validation_message(req, MemoryType::Episodic);
+        assert!(msg.starts_with("too many entities"), "{msg}");
+    }
+
+    #[test]
+    fn oversize_triple_fields_fail() {
+        let long = |n: usize| "x".repeat(n + 1);
+        for (req, field) in [
+            (req_semantic(&long(MAX_SUBJECT_LENGTH), "b", "c"), "subject"),
+            (
+                req_semantic("a", &long(MAX_PREDICATE_LENGTH), "c"),
+                "predicate",
+            ),
+            (req_semantic("a", "b", &long(MAX_OBJECT_LENGTH)), "object"),
+        ] {
+            let msg = validation_message(req, MemoryType::Semantic);
+            assert!(msg.starts_with(&format!("{field} exceeds")), "{msg}");
+        }
     }
 }
