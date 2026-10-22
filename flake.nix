@@ -167,6 +167,12 @@
               pkgs.apple-sdk_26
             ];
 
+          shellHook = ''
+            if [ -z "''${CI:-}" ] && git rev-parse --git-dir >/dev/null 2>&1; then
+              lefthook install --reset-hooks-path >/dev/null
+            fi
+          '';
+
           env =
             {
               RUST_BACKTRACE = "1";
